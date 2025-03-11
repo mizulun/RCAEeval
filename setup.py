@@ -13,9 +13,10 @@ with open("README.md", encoding="utf-8") as f:
     
 setup(
     name="RCAEval",
-    version="0.4.4",
+    version="0.4.5",
     packages=["RCAEval"],
     include_package_data=True,
+    description="RCAEval: A Benchmark for Root Cause Analysis of Microservice Systems",
     long_description=long_description,
     long_description_content_type="text/markdown",
     install_requires=[],
