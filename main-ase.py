@@ -142,7 +142,7 @@ for p in data_paths:
         new_data_paths.append(p)
 data_paths = new_data_paths
 if args.test is True:
-    data_paths = data_paths[:2]
+    data_paths = sorted(data_paths)[:2]
 
 
 # prepare output paths
