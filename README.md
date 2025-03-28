@@ -9,6 +9,8 @@
 
 RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) and an evaluation framework for root cause analysis (RCA) in microservice systems. It includes 15 reproducible baselines covering metric-based, trace-based, and multi-source RCA methods.
 
+**_NOTE:_** The [main branch](https://github.com/phamquiluan/RCAEval/tree/main) is now under extensive development. Please refer to [CHANGE LOGS](https://github.com/phamquiluan/RCAEval/blob/main/README.md#change-logs) to find the code for our previous publications.
+
 <p align="center">
 <img width=1000 src= "./docs/readme.jpg"/>
 </p>
