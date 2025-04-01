@@ -220,3 +220,4 @@ data/sock-shop-2
 data/train-ticket
 output
 *.zip
+.DS_Store
