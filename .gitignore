@@ -221,3 +221,4 @@ data/train-ticket
 output
 *.zip
 .DS_Store
+logparser/config.json
