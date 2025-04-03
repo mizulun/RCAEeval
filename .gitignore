@@ -222,3 +222,4 @@ output
 *.zip
 .DS_Store
 logparser/config.json
+logbatcher/config.json
