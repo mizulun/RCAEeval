@@ -26,7 +26,17 @@ class EventTemplate:
         Check if the event matches the template.
         """
         return bool(self.regex.match(event))
-
-
-
+    
+    @staticmethod
+    def load_templates(template_path : str) -> list: 
+        """
+        Load event templates from a file.
+        """
+        templates = []
+        with open(template_path, 'r') as file:
+            for line in file:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    templates.append(EventTemplate(line))
+        return templates
 

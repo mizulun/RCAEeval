@@ -1,4 +1,5 @@
 import pytest 
+from tempfile import TemporaryFile
 from RCAEval.logparser import EventTemplate
 
 
@@ -32,4 +33,21 @@ def test_load_template(pattern, no_matches, matches):
     # Test strings that should match
     for match in matches:
         assert template.match(match)
+
+
+
+def test_load_templates():
+    temfile = TemporaryFile(mode='w+')
+    temfile.write(
+        "# This is a comment\n"
+        "received ad request (context_words=[<*>])\n"
+        "SEVERE: Exception while executing runnable <*>"
+    )
+    temfile.seek(0)
+    templates = EventTemplate.load_templates(temfile.name)
+    assert len(templates) == 2
+    assert isinstance(templates[0], EventTemplate)
+    assert isinstance(templates[1], EventTemplate)
+    assert templates[0].template == "received ad request (context_words=[<*>])"
+    assert templates[1].template == "SEVERE: Exception while executing runnable <*>"
 
