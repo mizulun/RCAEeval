@@ -1,4 +1,5 @@
 import re
+import pandas as pd
 
 
 class EventTemplate:
@@ -40,3 +41,24 @@ class EventTemplate:
                     templates.append(EventTemplate(line))
         return templates
 
+    @staticmethod
+    def matchfile(template_file, log_file):
+        """
+        Match events in a log file against templates and write the results to an output file.
+        """
+        templates = EventTemplate.load_templates(template_file)
+        log_file = open(log_file)
+        df = pd.DataFrame(columns=['log', 'event type'])
+        for line in log_file:
+            line = line.strip()
+            if line:
+                match = False
+                for template in templates:
+                    if template.match(line):
+                        df = df._append({'log': line, 'event type': template.template}, ignore_index=True)
+                        match = True
+                        break
+                if not match:
+                    df = df._append({'log': line, 'event type': None}, ignore_index=True)
+        log_file.close()
+        return df
