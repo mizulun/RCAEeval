@@ -87,3 +87,26 @@ class EventTemplate:
         log_file.close()
 
         return duplicate
+
+    @staticmethod
+    def completeness(template_file, log_file):
+        """check if all logs are match"""
+        log_file = open(log_file)
+        templates = EventTemplate.load_templates(template_file)
+        completeness = True
+
+        for log in log_file:
+            log = log.strip()
+            if log:
+                match = False
+                for template in templates:
+                    if template.match(log):
+                        match = True
+                        break
+                if not match:
+                    print(f"[WARN] Not matched: `{log}`")
+                    completeness = False
+
+        log_file.close()
+        return completeness
+

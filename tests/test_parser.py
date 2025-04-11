@@ -1,6 +1,7 @@
 import pytest 
-from tempfile import TemporaryFile
+from tempfile import TemporaryFile, NamedTemporaryFile
 from RCAEval.logparser import EventTemplate
+
 
 
 
@@ -107,10 +108,45 @@ def test_detect_multiple_template():
 
     assert output == True
 
-test_detect_multiple_template()
-    
 
+def test_completeness():
+    """ensure all logs are matched"""
+    template_file = TemporaryFile(mode='w+')
+    template_file.write(
+        "# This is a comment\n"
+        "received ad request (context_words=[<*>])\n"
+        "SEVERE: Exception while executing runnable <*>"
+    )
+    template_file.seek(0)
 
+    log_file1 = NamedTemporaryFile(mode='w+')
+    log_file1.write(
+        "received ad request (context_words=[clothing])\n"
+        "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@7d71091e\n"
+        "Match no thing\n"
+        "received ad request (context_words=[])\n"
+    )
+    log_file1.seek(0)
+
+    output = EventTemplate.completeness(
+        template_file=template_file.name,
+        log_file=log_file1.name,
+    )
+    assert output == False
+
+    log_file2 = NamedTemporaryFile(mode='w+')
+    log_file2.write(
+        "received ad request (context_words=[clothing])\n"
+        "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@7d71091e\n"
+        "received ad request (context_words=[])\n"
+    )
+    log_file2.seek(0)
+
+    output = EventTemplate.completeness(
+        template_file=template_file.name,
+        log_file=log_file2.name,
+    )
+    assert output == True
 
 
 
