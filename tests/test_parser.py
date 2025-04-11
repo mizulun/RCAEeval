@@ -21,9 +21,9 @@ from RCAEval.logparser import EventTemplate
             "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@7d71091e",
             "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@293e648c"
         ]
-    ) 
+    ),
 ])
-def test_load_template(pattern, no_matches, matches):
+def test_load_and_match_template(pattern, no_matches, matches):
     template = EventTemplate(pattern)
     
     # Test strings that should NOT match
@@ -35,7 +35,7 @@ def test_load_template(pattern, no_matches, matches):
         assert template.match(match)
 
 
-def test_load_templates():
+def test_load_multiple_templates():
     temfile = TemporaryFile(mode='w+')
     temfile.write(
         "# This is a comment\n"
@@ -51,7 +51,7 @@ def test_load_templates():
     assert templates[1].template == "SEVERE: Exception while executing runnable <*>"
 
 
-def test_matching():
+def test_file_matching():
     template_file = TemporaryFile(mode='w+')
     template_file.write(
         "# This is a comment\n"
@@ -80,6 +80,36 @@ def test_matching():
     assert df.columns.tolist() == ['log', 'event type']
     assert df.iloc[0]['log'] == "received ad request (context_words=[clothing])"
     assert df.iloc[0]['event type'] == "received ad request (context_words=[<*>])"
+
+
+
+def test_detect_multiple_template():
+    """one log may match multiple templates, we need to detect this case"""
+    template_file = TemporaryFile(mode='w+')
+    template_file.write(
+        "template 1 <*>\n"
+        "<*> template 2\n"
+    )
+    template_file.seek(0)
+
+    log_file = TemporaryFile(mode='w+')
+    log_file.write(
+        "received ad request (context_words=[clothing])\n"
+        "template 1 template 2\n"
+    )
+    log_file.seek(0)
+
+
+    output = EventTemplate.check_duplicate(
+        template_file=template_file.name,
+        log_file=log_file.name,
+    )
+
+    assert output == True
+
+test_detect_multiple_template()
+    
+
 
 
 

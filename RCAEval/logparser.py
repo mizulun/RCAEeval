@@ -62,3 +62,28 @@ class EventTemplate:
                     df = df._append({'log': line, 'event type': None}, ignore_index=True)
         log_file.close()
         return df
+
+    @staticmethod
+    def check_duplicate(template_file, log_file):
+        """
+        Check if a log file matches multiple templates.
+        """
+        templates = EventTemplate.load_templates(template_file)
+        log_file = open(log_file)
+        duplicate = False
+        for line in log_file:
+            line = line.strip()
+            if line:
+                matches = []
+                for template in templates:
+                    if template.match(line):
+                        matches.append(template.template)
+                if len(matches) > 1:
+                    duplicate = True
+                    print(f"[WARN] Duplicate found!")
+                    print(f"log: `{line}`")
+                    for match in matches:
+                        print(f"template: `{match}`")
+        log_file.close()
+
+        return duplicate
