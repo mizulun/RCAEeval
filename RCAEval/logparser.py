@@ -105,7 +105,7 @@ class EventTemplate:
         return df
 
     @staticmethod
-    def check_duplicate(template_file, log_file):
+    def is_duplicate(template_file, log_file):
         """
         Check if a log file matches multiple templates.
         """

@@ -104,7 +104,7 @@ def test_detect_multiple_template():
     log_file.seek(0)
 
 
-    output = EventTemplate.check_duplicate(
+    output = EventTemplate.is_duplicate(
         template_file=template_file.name,
         log_file=log_file.name,
     )
