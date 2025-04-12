@@ -32,11 +32,11 @@ def test_load_and_match_template(pattern, no_matches, matches):
     
     # Test strings that should NOT match
     for no_match in no_matches:
-        assert not template.match(no_match)
+        assert not template.is_match(no_match)
     
     # Test strings that should match
     for match in matches:
-        assert template.match(match)
+        assert template.is_match(match)
 
 
 def test_load_multiple_templates():
@@ -73,7 +73,7 @@ def test_file_matching():
     )
     log_file.seek(0)
 
-    df = EventTemplate.matchfile(
+    df = EventTemplate.parse_logs(
         template_file=template_file.name,
         log_file=log_file.name,
     )
@@ -131,7 +131,7 @@ def test_completeness():
     )
     log_file1.seek(0)
 
-    output = EventTemplate.completeness(
+    output = EventTemplate.is_completeness(
         template_file=template_file.name,
         log_file=log_file1.name,
     )
@@ -145,7 +145,7 @@ def test_completeness():
     )
     log_file2.seek(0)
 
-    output = EventTemplate.completeness(
+    output = EventTemplate.is_completeness(
         template_file=template_file.name,
         log_file=log_file2.name,
     )
@@ -159,7 +159,7 @@ def test_from_toml():
     """
     valid = False
     for template in templates:
-        if template.id == "E2" and template.match(log):
+        if template.id == "E2" and template.is_match(log):
             valid = True
             break
     assert valid == True

@@ -35,7 +35,7 @@ class EventTemplate:
         # Compile the regex pattern
         return re.compile(regex_pattern)
 
-    def match(self, event: str) -> bool:
+    def is_match(self, event: str) -> bool:
         """
         Check if the event matches the template.
         """
@@ -68,10 +68,22 @@ class EventTemplate:
 
         return templates
 
+    @staticmethod 
+    def load_templates(template_file):
+        if template_file.endswith(".toml"):
+            return EventTemplate.load_templates_from_toml(template_file)
+        elif template_file.endswith(".txt"):
+            return EventTemplate.load_templates_from_txt(template_file)
+        else:
+            raise ValueError(f"Unsupported template file format: {template_file}. Supported formats are .toml and .txt")
+
     @staticmethod
-    def matchfile(template_file, log_file):
+    def parse_logs(template_file, log_file):
         """
-        Match events in a log file against templates and write the results to an output file.
+        Parse logs and match them with templates.
+        Args:
+            template_file (str): Path to the template file.
+            log_file (str): Path to the log file.
         """
         templates = EventTemplate.load_templates(template_file=template_file)
         log_file = open(log_file)
@@ -81,7 +93,7 @@ class EventTemplate:
             if line:
                 match = False
                 for template in templates:
-                    if template.match(line):
+                    if template.is_match(line):
                         df = df._append({'log': line, 'event type': template.template}, ignore_index=True)
                         match = True
                         break
@@ -103,7 +115,7 @@ class EventTemplate:
             if line:
                 matches = []
                 for template in templates:
-                    if template.match(line):
+                    if template.is_match(line):
                         matches.append(template.template)
                 if len(matches) > 1:
                     duplicate = True
@@ -115,17 +127,8 @@ class EventTemplate:
 
         return duplicate
     
-    @staticmethod 
-    def load_templates(template_file):
-        if template_file.endswith(".toml"):
-            return EventTemplate.load_templates_from_toml(template_file)
-        elif template_file.endswith(".txt"):
-            return EventTemplate.load_templates_from_txt(template_file)
-        else:
-            raise ValueError(f"Unsupported template file format: {template_file}. Supported formats are .toml and .txt")
-
     @staticmethod
-    def completeness(template_file, log_file):
+    def is_completeness(template_file, log_file):
         """check if all logs are match"""
         log_file = open(log_file)
         templates = EventTemplate.load_templates(template_file)
@@ -136,7 +139,7 @@ class EventTemplate:
             if log:
                 match = False
                 for template in templates:
-                    if template.match(log):
+                    if template.is_match(log):
                         match = True
                         break
                 if not match:
