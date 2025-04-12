@@ -9,9 +9,14 @@ class EventTemplate:
     A class to represent an event template for matching events.
     """
     def __init__(self, id: str = None, template: str = None, known_regex: dict = None):
+        if not template:
+            raise ValueError("Template cannot be None")
         self.id = id 
-        self.template : str = template
-        self.regex : re.Pattern = self._compile_template(template, known_regex)
+        self.template = template
+        try:
+            self.regex = self._compile_template(template, known_regex)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern in template: {template}. Error: {e}")
 
     def _compile_template(self, template: str, known_regex : dict = None) -> re.Pattern:
         """
@@ -37,16 +42,30 @@ class EventTemplate:
         return bool(self.regex.match(event))
     
     @staticmethod
-    def load_templates(template_file: str) -> list: 
-        """
-        Load event templates from a file.
-        """
+    def load_templates_from_txt(template_file: str) -> list: 
+        """ Load event templates from a txt file.  """
         templates = []
-        with open(template_file, 'r') as file:
+        with open(template_file) as file:
             for line in file:
                 line = line.strip()
                 if line and not line.startswith('#'):
                     templates.append(EventTemplate(template=line))
+        return templates
+
+    @staticmethod
+    def load_templates_from_toml(template_file):
+        """Read templates from toml file"""
+        templates = []
+
+        with open(template_file) as f:
+            config = toml.load(f)
+        regex_patterns = config.get("Regex", {})
+
+        event_types = config.get("EventType", {}) 
+        for event_id, template in event_types.items():
+            template = EventTemplate(id=event_id, template=template, known_regex=regex_patterns)
+            templates.append(template)
+
         return templates
 
     @staticmethod
@@ -95,6 +114,15 @@ class EventTemplate:
         log_file.close()
 
         return duplicate
+    
+    @staticmethod 
+    def load_templates(template_file):
+        if template_file.endswith(".toml"):
+            return EventTemplate.load_templates_from_toml(template_file)
+        elif template_file.endswith(".txt"):
+            return EventTemplate.load_templates_from_txt(template_file)
+        else:
+            raise ValueError(f"Unsupported template file format: {template_file}. Supported formats are .toml and .txt")
 
     @staticmethod
     def completeness(template_file, log_file):
@@ -118,18 +146,4 @@ class EventTemplate:
         log_file.close()
         return completeness
 
-    @staticmethod
-    def from_toml(template_file):
-        """Read templates from toml file"""
-        templates = []
 
-        with open(template_file) as f:
-            config = toml.load(f)
-        regex_patterns = config.get("Regex", {})
-
-        event_types = config.get("EventType", {}) 
-        for event_id, template in event_types.items():
-            template = EventTemplate(id=event_id, template=template, known_regex=regex_patterns)
-            templates.append(template)
-
-        return templates

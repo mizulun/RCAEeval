@@ -47,7 +47,7 @@ def test_load_multiple_templates():
         "SEVERE: Exception while executing runnable <*>"
     )
     temfile.seek(0)
-    templates = EventTemplate.load_templates(template_file=temfile.name)
+    templates = EventTemplate.load_templates_from_txt(template_file=temfile.name)
     assert len(templates) == 2
     assert isinstance(templates[0], EventTemplate)
     assert isinstance(templates[1], EventTemplate)
@@ -56,7 +56,7 @@ def test_load_multiple_templates():
 
 
 def test_file_matching():
-    template_file = TemporaryFile(mode='w+')
+    template_file = NamedTemporaryFile(mode='w+', suffix=".txt")
     template_file.write(
         "# This is a comment\n"
         "received ad request (context_words=[<*>])\n"
@@ -64,7 +64,7 @@ def test_file_matching():
     )
     template_file.seek(0)
 
-    log_file = TemporaryFile(mode='w+')
+    log_file = TemporaryFile(mode='w+', suffix=".log")
     log_file.write(
         "received ad request (context_words=[clothing])\n"
         "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@7d71091e\n"
@@ -89,7 +89,7 @@ def test_file_matching():
 
 def test_detect_multiple_template():
     """one log may match multiple templates, we need to detect this case"""
-    template_file = TemporaryFile(mode='w+')
+    template_file = NamedTemporaryFile(mode='w+', suffix=".txt")
     template_file.write(
         "template 1 <*>\n"
         "<*> template 2\n"
@@ -114,7 +114,7 @@ def test_detect_multiple_template():
 
 def test_completeness():
     """ensure all logs are matched"""
-    template_file = TemporaryFile(mode='w+')
+    template_file = NamedTemporaryFile(mode='w+', suffix=".txt")
     template_file.write(
         "# This is a comment\n"
         "received ad request (context_words=[<*>])\n"
@@ -122,7 +122,7 @@ def test_completeness():
     )
     template_file.seek(0)
 
-    log_file1 = NamedTemporaryFile(mode='w+')
+    log_file1 = NamedTemporaryFile(mode='w+', suffix=".log")
     log_file1.write(
         "received ad request (context_words=[clothing])\n"
         "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@7d71091e\n"
@@ -153,7 +153,7 @@ def test_completeness():
 
 
 def test_from_toml():
-    templates = EventTemplate.from_toml("tests/data/carts.toml")
+    templates = EventTemplate.load_templates_from_toml("tests/data/carts.toml")
 
     log = """2024-01-18 16:31:07.450  WARN [carts,,,] 1 --- [tion/x-thrift})] z.r.AsyncReporter$BoundedAsyncReporter   : Dropped 2 spans due to UnknownHostException(zipkin)
     """
@@ -163,6 +163,3 @@ def test_from_toml():
             valid = True
             break
     assert valid == True
-
-
-test_from_toml()
