@@ -8,6 +8,7 @@ class EventTemplate:
     """
     A class to represent an event template for matching events.
     """
+    verbose = False
     def __init__(self, id: str = None, template: str = None, known_regex: dict = None):
         if not template:
             raise ValueError("Template cannot be None")
@@ -31,7 +32,8 @@ class EventTemplate:
 
         # Replace <*> with a regex pattern that matches any word
         regex_pattern = escaped_template.replace("<\\*>", ".*?")
-        #print(regex_pattern)
+        if self.verbose:
+            print(self.id, regex_pattern)
         # Compile the regex pattern
         return re.compile(regex_pattern)
 
@@ -61,7 +63,7 @@ class EventTemplate:
             config = toml.load(f)
         regex_patterns = config.get("Regex", {})
 
-        event_types = config.get("EventType", {}) 
+        event_types = config.get("EventTemplate", {}) 
         for event_id, template in event_types.items():
             template = EventTemplate(id=event_id, template=template, known_regex=regex_patterns)
             templates.append(template)
@@ -128,11 +130,14 @@ class EventTemplate:
         return duplicate
     
     @staticmethod
-    def is_completeness(template_file, log_file):
+    def is_complete(template_file, log_file):
         """check if all logs are match"""
         log_file = open(log_file)
         templates = EventTemplate.load_templates(template_file)
         completeness = True
+        match_count = 0
+        not_match_count = 0
+        not_match_logs = []
 
         for log in log_file:
             log = log.strip()
@@ -143,10 +148,22 @@ class EventTemplate:
                         match = True
                         break
                 if not match:
-                    print(f"Not matched: `{log}`")
+                    not_match_logs.append(log)
+                    not_match_count += 1
                     completeness = False
+                else: 
+                    match_count += 1
 
         log_file.close()
+
+        if completeness:
+            print(f"[INFO] All logs are matched. {match_count} logs matched.")
+        else:
+            print(f"[INFO] {match_count/(match_count + not_match_count)*100:.2f}% logs matched.")
+            print(f"[WARN] {not_match_count} logs not matched.")
+            print(f"[INFO] Not matched logs:")
+            for log in not_match_logs:
+                print(log)
         return completeness
 
 

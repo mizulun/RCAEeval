@@ -131,7 +131,7 @@ def test_completeness():
     )
     log_file1.seek(0)
 
-    output = EventTemplate.is_completeness(
+    output = EventTemplate.is_complete(
         template_file=template_file.name,
         log_file=log_file1.name,
     )
@@ -145,7 +145,7 @@ def test_completeness():
     )
     log_file2.seek(0)
 
-    output = EventTemplate.is_completeness(
+    output = EventTemplate.is_complete(
         template_file=template_file.name,
         log_file=log_file2.name,
     )
