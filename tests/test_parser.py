@@ -155,8 +155,7 @@ def test_completeness():
 def test_from_toml():
     templates = EventTemplate.load_templates_from_toml("tests/data/carts.toml")
 
-    log = """2024-01-18 16:31:07.450  WARN [carts,,,] 1 --- [tion/x-thrift})] z.r.AsyncReporter$BoundedAsyncReporter   : Dropped 2 spans due to UnknownHostException(zipkin)
-    """
+    log = """2024-01-18 16:31:07.450  WARN [carts,,,] 1 --- [tion/x-thrift})] z.r.AsyncReporter$BoundedAsyncReporter   : Dropped 2 spans due to UnknownHostException(zipkin)"""
     valid = False
     for template in templates:
         if template.id == "E2" and template.is_match(log):
