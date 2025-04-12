@@ -31,7 +31,7 @@ class EventTemplate:
 
         # Replace <*> with a regex pattern that matches any word
         regex_pattern = escaped_template.replace("<\\*>", ".*?")
-        print(regex_pattern)
+        #print(regex_pattern)
         # Compile the regex pattern
         return re.compile(regex_pattern)
 
