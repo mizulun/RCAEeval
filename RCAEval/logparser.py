@@ -104,7 +104,7 @@ class EventTemplate:
                         match = True
                         break
                 if not match:
-                    print(f"[WARN] Not matched: `{log}`")
+                    print(f"Not matched: `{log}`")
                     completeness = False
 
         log_file.close()
