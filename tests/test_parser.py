@@ -25,7 +25,7 @@ from RCAEval.logparser import EventTemplate
     ),
 ])
 def test_load_and_match_template(pattern, no_matches, matches):
-    template = EventTemplate(pattern)
+    template = EventTemplate(template=pattern)
     
     # Test strings that should NOT match
     for no_match in no_matches:
@@ -44,7 +44,7 @@ def test_load_multiple_templates():
         "SEVERE: Exception while executing runnable <*>"
     )
     temfile.seek(0)
-    templates = EventTemplate.load_templates(temfile.name)
+    templates = EventTemplate.load_templates(template_file=temfile.name)
     assert len(templates) == 2
     assert isinstance(templates[0], EventTemplate)
     assert isinstance(templates[1], EventTemplate)
@@ -149,4 +149,17 @@ def test_completeness():
     assert output == True
 
 
+def test_from_toml():
+    templates = EventTemplate.from_toml("tests/data/carts.toml")
 
+    log = """2024-01-18 16:31:07.450  WARN [carts,,,] 1 --- [tion/x-thrift})] z.r.AsyncReporter$BoundedAsyncReporter   : Dropped 2 spans due to UnknownHostException(zipkin)
+    """
+    valid = False
+    for template in templates:
+        if template.id == "E2" and template.match(log):
+            valid = True
+            break
+    assert valid == True
+
+
+test_from_toml()

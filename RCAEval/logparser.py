@@ -1,4 +1,5 @@
 import re
+import toml
 import pandas as pd
 
 
@@ -6,19 +7,25 @@ class EventTemplate:
     """
     A class to represent an event template for matching events.
     """
-    def __init__(self, template: str):
-        self.event_id = None
-        self.template = template
-        self.regex = self._compile_template(template)
+    def __init__(self, id: str = None, template: str = None, known_regex: dict = None):
+        self.id = id 
+        self.template : str = template
+        self.regex : re.Pattern = self._compile_template(template, known_regex)
 
-    def _compile_template(self, template: str) -> re.Pattern:
+    def _compile_template(self, template: str, known_regex : dict = None) -> re.Pattern:
         """
         Compile the template into a regex pattern.
         """
         # Escape special characters and replace placeholders with regex patterns
         escaped_template = re.escape(template)
+
+        if known_regex is not None:
+            for name, pattern in known_regex.items():
+                escaped_template = escaped_template.replace(f"<:{name}:>", pattern)
+
         # Replace <*> with a regex pattern that matches any word
         regex_pattern = escaped_template.replace("<\\*>", ".*?")
+        print(regex_pattern)
         # Compile the regex pattern
         return re.compile(regex_pattern)
 
@@ -29,16 +36,16 @@ class EventTemplate:
         return bool(self.regex.match(event))
     
     @staticmethod
-    def load_templates(template_path : str) -> list: 
+    def load_templates(template_file: str) -> list: 
         """
         Load event templates from a file.
         """
         templates = []
-        with open(template_path, 'r') as file:
+        with open(template_file, 'r') as file:
             for line in file:
                 line = line.strip()
                 if line and not line.startswith('#'):
-                    templates.append(EventTemplate(line))
+                    templates.append(EventTemplate(template=line))
         return templates
 
     @staticmethod
@@ -46,7 +53,7 @@ class EventTemplate:
         """
         Match events in a log file against templates and write the results to an output file.
         """
-        templates = EventTemplate.load_templates(template_file)
+        templates = EventTemplate.load_templates(template_file=template_file)
         log_file = open(log_file)
         df = pd.DataFrame(columns=['log', 'event type'])
         for line in log_file:
@@ -110,3 +117,18 @@ class EventTemplate:
         log_file.close()
         return completeness
 
+    @staticmethod
+    def from_toml(template_file):
+        """Read templates from toml file"""
+        templates = []
+
+        with open(template_file) as f:
+            config = toml.load(f)
+        regex_patterns = config.get("Regex", {})
+
+        event_types = config.get("EventType", {}) 
+        for event_id, template in event_types.items():
+            template = EventTemplate(id=event_id, template=template, known_regex=regex_patterns)
+            templates.append(template)
+
+        return templates
