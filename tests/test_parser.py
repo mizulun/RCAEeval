@@ -1,3 +1,6 @@
+"""
+To debug regex: https://www.debuggex.com/
+"""
 import pytest 
 from tempfile import TemporaryFile, NamedTemporaryFile
 from RCAEval.logparser import EventTemplate
