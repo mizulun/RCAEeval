@@ -31,7 +31,7 @@ class EventTemplate:
                 escaped_template = escaped_template.replace(f"<:{name}:>", pattern)
 
         # Replace <*> with a regex pattern that matches any word
-        regex_pattern = escaped_template.replace("<\\*>", ".*?")
+        regex_pattern = escaped_template.replace("<\\*>", ".*?") + "$"
         if self.verbose:
             print(self.id, regex_pattern)
         # Compile the regex pattern
@@ -110,6 +110,7 @@ class EventTemplate:
         Check if a log file matches multiple templates.
         """
         templates = EventTemplate.load_templates(template_file)
+            
         log_file = open(log_file)
         duplicate = False
         for line in log_file:
