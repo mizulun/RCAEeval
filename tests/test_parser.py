@@ -167,6 +167,10 @@ def test_from_toml():
         "POST to carts: items body: {\"itemId\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"unitPrice\":14}\"",
         "POST to carts: items body: {\"itemId\": \"<*>\", \"unitPrice\": \"<*>\"}\""
     ),
+    (
+        "{\"id\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"name\":\"Figueroa\",\"description\":\"enim officia aliqua excepteur esse deserunt quis aliquip nostrud anim\",\"imageUrl\":[\"/catalogue/images/WAT.jpg\",\"/catalogue/images/WAT2.jpg\"],\"price\":14,\"count\":808,\"tag\":[\"formal\",\"green\",\"blue\"]}",
+        "{\"id\": \"<*>\", \"name\": \"<*>\", \"description\": \"<*>\", \"imageUrl\": \"<*>\", \"price\": \"<*>\", \"count\": \"<*>\", \"tag\": \"<*>\"}"
+    )
 ])
 def test_remove_dict_values(log, expected):
     from RCAEval.logparser import remove_dict_values
