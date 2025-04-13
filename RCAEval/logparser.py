@@ -1,7 +1,37 @@
 """ To debug regex: https://www.debuggex.com/ """
+import json
 import re
 import toml
 import pandas as pd
+from collections import OrderedDict
+
+
+def remove_dict_values(log_line):
+    """Remove values from JSON-like dictionaries in the log line.
+    Example:
+    log_line: "Received ad request (context_words=[{'key': 'value'}])"
+    output = "Receved ad request (context_words=[{'key': '<*>'}])"
+    """
+    pattern = r'(\{.*?\})'
+
+    def replace_match(match):
+        try:
+            # Parse the JSON while preserving order
+            data = json.loads(match.group(1), object_pairs_hook=OrderedDict)
+            # Replace all values with <*>
+            for key in data:
+                if isinstance(data[key], (list, dict)):
+                    data[key] = "<*>"
+                else:
+                    data[key] = "<*>"
+            # Convert back to JSON string
+            return json.dumps(data)
+        except json.JSONDecodeError:
+            # If it's not valid JSON, return the original match
+            return match.group(1)
+
+    # Find and replace all JSON-like dictionaries in the line
+    return re.sub(pattern, replace_match, log_line)
 
 
 class EventTemplate:
@@ -127,7 +157,8 @@ class EventTemplate:
                     for match in matches:
                         print(f"template: `{match}`")
         log_file.close()
-
+        if not duplicate:
+            print(f"[INFO] No duplicate found.")
         return duplicate
     
     @staticmethod
