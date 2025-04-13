@@ -151,7 +151,6 @@ def test_completeness():
     )
     assert output == True
 
-
 def test_from_toml():
     templates = EventTemplate.load_templates_from_toml("tests/data/carts.toml")
 
@@ -162,3 +161,13 @@ def test_from_toml():
             valid = True
             break
     assert valid == True
+
+@pytest.mark.parametrize("log, expected", [
+    (
+        "POST to carts: items body: {\"itemId\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"unitPrice\":14}\"",
+        "POST to carts: items body: {\"itemId\": \"<*>\", \"unitPrice\": \"<*>\"}\""
+    ),
+])
+def test_remove_dict_values(log, expected):
+    from RCAEval.logparser import remove_dict_values
+    assert remove_dict_values(log) == expected
