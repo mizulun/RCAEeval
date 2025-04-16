@@ -163,7 +163,33 @@ def test_from_toml():
     assert valid == True
 
 
-def test_find_json_bound():
+@pytest.mark.parametrize("text, expected", [
+    (
+        "This is a json: {'a': 1}",
+        ["{'a': 1}"]
+    ),
+    (
+        "This is a json: {'a': 1, 'b': 2}",
+        ["{'a': 1, 'b': 2}"]
+    ),
+    (
+        "This is a json: {'a': 1, 'b': 2, 'c': 3}",
+        ["{'a': 1, 'b': 2, 'c': 3}"]
+    ),
+    (
+        "This is two dicts: {'a': 1} and {'b': 2}",
+        ["{'a': 1}", "{'b': 2}"]
+    ),
+    (
+        "This is a nested dict: {'a': 1, 'b': {'c': 2}}",
+        ["{'a': 1, 'b': {'c': 2}}"]
+    ),
+    (
+        "This is a very very complex nested dict with multiple data types (e.g., int, str, list, dict): {'a': 1, 'b': {'c': 2, 'd': [3, 4]}, 'e': 'string', 'f': [5, 6], 'g': {'h': 7}}",
+        ["{'a': 1, 'b': {'c': 2, 'd': [3, 4]}, 'e': 'string', 'f': [5, 6], 'g': {'h': 7}}"]
+    ),
+])
+def test_find_json_bound(text, expected):
     from RCAEval.logparser import find_json_bounds
 
     text = "This is a json: {'a': 1}"
