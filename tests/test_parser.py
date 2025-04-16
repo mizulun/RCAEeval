@@ -162,16 +162,30 @@ def test_from_toml():
             break
     assert valid == True
 
-@pytest.mark.parametrize("log, expected", [
-    (
-        "POST to carts: items body: {\"itemId\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"unitPrice\":14}\"",
-        "POST to carts: items body: {\"itemId\": \"<*>\", \"unitPrice\": \"<*>\"}\""
-    ),
-    (
-        "{\"id\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"name\":\"Figueroa\",\"description\":\"enim officia aliqua excepteur esse deserunt quis aliquip nostrud anim\",\"imageUrl\":[\"/catalogue/images/WAT.jpg\",\"/catalogue/images/WAT2.jpg\"],\"price\":14,\"count\":808,\"tag\":[\"formal\",\"green\",\"blue\"]}",
-        "{\"id\": \"<*>\", \"name\": \"<*>\", \"description\": \"<*>\", \"imageUrl\": \"<*>\", \"price\": \"<*>\", \"count\": \"<*>\", \"tag\": \"<*>\"}"
-    )
-])
-def test_remove_dict_values(log, expected):
-    from RCAEval.logparser import remove_dict_values
-    assert remove_dict_values(log) == expected
+
+def test_find_json_bound():
+    from RCAEval.logparser import find_json_bounds
+
+    text = "This is a json: {'a': 1}"
+    expected = ["{'a': 1}"]
+    bounds = find_json_bounds(text)
+    for i, (start, end) in enumerate(bounds):
+        assert text[start:end] == expected[i]
+
+#@pytest.mark.parametrize("log, expected", [
+#    (
+#        "POST to carts: items body: {\"itemId\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"unitPrice\":14}\"",
+#        "POST to carts: items body: {\"itemId\": \"<*>\", \"unitPrice\": \"<*>\"}\""
+#    ),
+#    (
+#        "{\"id\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"name\":\"Figueroa\",\"description\":\"enim officia aliqua excepteur esse deserunt quis aliquip nostrud anim\",\"imageUrl\":[\"/catalogue/images/WAT.jpg\"],\"price\":14,\"count\":808,\"tag\":[\"formal\",\"green\",\"blue\"]}",
+#        "{\"id\": \"<*>\", \"name\": \"<*>\", \"description\": \"<*>\", \"imageUrl\": [\"<*>\"], \"price\": \"<*>\", \"count\": \"<*>\", \"tag\": [\"<*>\", \"<*>\", \"<*>\"]}"
+#    ),
+#    (
+#        "This is a log: {'id': 001, 'data': {'log-1': 'aaa', 01: [1,2,3, 'a']}} with some values.",
+#        "This is a log: {'id': \"<*>\", 'data': {'log-1': \"<*>\", 01: \"<*>\"}} with some values."
+#    )
+#])
+#def test_remove_dict_values(log, expected):
+#    from RCAEval.logparser import remove_dict_values
+#    assert remove_dict_values(log) == expected

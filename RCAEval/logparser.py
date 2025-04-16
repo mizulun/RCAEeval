@@ -6,32 +6,138 @@ import pandas as pd
 from collections import OrderedDict
 
 
-def remove_dict_values(log_line):
-    """Remove values from JSON-like dictionaries in the log line.
-    Example:
-    log_line: "Received ad request (context_words=[{'key': 'value'}])"
-    output = "Receved ad request (context_words=[{'key': '<*>'}])"
-    """
-    pattern = r'(\{.*?\})'
+def find_json_bounds(text):
+    """Find (start,end) positions of all outermost {} pairs"""
+    bounds = []
+    start = None
+    bracket_stack = 0
 
-    def replace_match(match):
-        try:
-            # Parse the JSON while preserving order
-            data = json.loads(match.group(1), object_pairs_hook=OrderedDict)
-            # Replace all values with <*>
-            for key in data:
-                if isinstance(data[key], (list, dict)):
-                    data[key] = "<*>"
-                else:
-                    data[key] = "<*>"
-            # Convert back to JSON string
-            return json.dumps(data)
-        except json.JSONDecodeError:
-            # If it's not valid JSON, return the original match
-            return match.group(1)
+    for i, char in enumerate(text):
+        if char == '{':
+            if start is None:  # New opening
+                start = i
+            bracket_stack += 1
+        elif char == '}' and bracket_stack > 0:
+            bracket_stack -= 1 
+            if bracket_stack == 0:
+                # Found a complete JSON object
+                bounds.append((start, i + 1))
+                start = None
 
-    # Find and replace all JSON-like dictionaries in the line
-    return re.sub(pattern, replace_match, log_line)
+    return bounds  # List of (start, end) tuples
+
+def mask_non_dict_values(data):
+    if isinstance(data, dict):
+        # Process dictionaries while preserving order
+        masked_dict = OrderedDict()
+        for key, value in data.items():
+            masked_dict[key] = mask_non_dict_values(value)
+        return masked_dict
+    elif isinstance(data, (list, tuple)):
+        # Process lists/tuples (mask non-dict elements, recurse into dict elements)
+        return [mask_non_dict_values(item) for item in data]
+    else:
+        # Mask all non-dict values
+        return "<*>"
+
+def mask_values(data):
+    if isinstance(data, dict):
+        return OrderedDict((k, mask_values(v)) for k, v in data.items())
+    elif isinstance(data, list):
+        return [mask_values(item) for item in data]
+    else:
+        return "<*>"
+
+#def remove_dict_values(line):
+#    try:
+#        # First try to parse the entire line as JSON
+#        data = json.loads(line, object_pairs_hook=OrderedDict)
+#        return json.dumps(mask_values(data))
+#    except json.JSONDecodeError:
+#        # If whole line isn't JSON, look for JSON substrings
+#        parts = []
+#        start = 0
+#        
+#        # Find all potential JSON segments in the line
+#        for match in re.finditer(r'\{.*?\}', line):
+#            # Add non-JSON text before the match
+#            parts.append(line[start:match.start()])
+#            
+#            # Process the JSON segment
+#            try:
+#                data = json.loads(match.group(), object_pairs_hook=OrderedDict)
+#                parts.append(json.dumps(mask_values(data)))
+#            except json.JSONDecodeError:
+#                parts.append(match.group())
+#            
+#            start = match.end()
+#        
+#        # Add remaining non-JSON text
+#        parts.append(line[start:])
+#        return ''.join(parts)
+
+def remove_dict_values(text):
+    """Process text and mask values in all JSON/dict objects"""
+    bounds = find_json_bounds(text)
+    if not bounds:
+        return text
+    
+    for start, end in bounds:  
+        json_str = text[start:end]
+        import json
+        data = json.loads(json_str.replace("'", "\""), object_pairs_hook=OrderedDict)
+        masked = json.dumps(mask_values(data))
+        
+        # Replace original text segment
+        text.replace(json_str, masked)
+    
+    return text
+
+#def remove_dict_values(log_line):
+#    # Pattern to find JSON-like dictionaries in the log line
+#    pattern = r'(\{.*?\}(?=(?:(?:[^"]*"){2})*[^"]*$))'
+#    
+#    def replace_match(match):
+#        try:
+#            # Parse the JSON while preserving order
+#            data = json.loads(match.group(1), object_pairs_hook=OrderedDict)
+#            # Recursively mask all non-dict values
+#            masked_data = mask_non_dict_values(data)
+#            # Convert back to JSON string
+#            return json.dumps(masked_data)
+#        except json.JSONDecodeError:
+#            # If it's not valid JSON, return the original match
+#            return match.group(1)
+#    
+#    # Find and replace all JSON-like dictionaries in the line
+#    return re.sub(pattern, replace_match, log_line)
+
+#def remove_dict_values(log_line):
+#    """Remove values from JSON-like dictionaries in the log line.
+#    Example:
+#    log_line: "Received ad request (context_words=[{'key': 'value'}])"
+#    output = "Receved ad request (context_words=[{'key': '<*>'}])"
+#    """
+#    pattern = r'(\{.*?\})'
+#
+#    def replace_match(match):
+#        try:
+#            # Parse the JSON while preserving order
+#            data = json.loads(match.group(1), object_pairs_hook=OrderedDict)
+#            # Replace all values with <*>
+#            for key in data:
+#                if isinstance(data[key], (list, dict)):
+#                    data[key] = "<*>"
+#                else:
+#                    data[key] = "<*>"
+#            # Convert back to JSON string
+#            return json.dumps(data)
+#        except json.JSONDecodeError:
+#            # If it's not valid JSON, return the original match
+#            return match.group(1)
+#
+#    # Find and replace all JSON-like dictionaries in the line
+#    return re.sub(pattern, replace_match, log_line)
 
 
 class EventTemplate:
@@ -199,3 +305,6 @@ class EventTemplate:
         return completeness
 
 
+
+#output = mask_dict_values("This is a log: {'id': 100, 'data': {'log-1': 'aaa', 10: {'this is a set'}}} with some values.")
+#print(output)
