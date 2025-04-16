@@ -26,10 +26,12 @@ def find_json_bounds(text):
 
     return bounds  # List of (start, end) tuples
 
+
 def mask_non_dict_values(data):
+    """Recursively mask all non-dict values in the data structure."""
     if isinstance(data, dict):
         # Process dictionaries while preserving order
-        masked_dict = OrderedDict()
+        masked_dict = {}
         for key, value in data.items():
             masked_dict[key] = mask_non_dict_values(value)
         return masked_dict

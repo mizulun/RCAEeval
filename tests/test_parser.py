@@ -198,6 +198,27 @@ def test_find_json_bound(text, expected):
     for i, (start, end) in enumerate(bounds):
         assert text[start:end] == expected[i]
 
+@pytest.mark.parametrize("data, expected", [
+    (
+        {'id': 100, 'data': {'log-1': 'aaa', 10: [1, 2, 'a']}},
+        {'id': '<*>', 'data': {'log-1': '<*>', 10: ['<*>', '<*>', '<*>']}}
+    ),
+    (
+        {'id': 100, 'data': {'log-1': 'aaa', 10: [1, 2, 'a'], 'log-2': {'a': 1}}},
+        {'id': '<*>', 'data': {'log-1': '<*>', 10: ['<*>', '<*>', '<*>'], 'log-2': {'a': '<*>'}}}
+    ),
+    (
+        "abc",
+        "<*>"
+    )
+])
+def test_mask_non_dict_values(data, expected):
+    from RCAEval.logparser import mask_non_dict_values
+
+    #data = {'id': 100, 'data': {'log-1': 'aaa', 10: [1, 2, 'a']}}
+    #expected = {'id': '<*>', 'data': {'log-1': '<*>', 10: ['<*>', '<*>', '<*>']}}
+    assert mask_non_dict_values(data) == expected
+
 #@pytest.mark.parametrize("log, expected", [
 #    (
 #        "POST to carts: items body: {\"itemId\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"unitPrice\":14}\"",
