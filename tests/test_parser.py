@@ -212,12 +212,9 @@ def test_find_json_bound(text, expected):
         "<*>"
     )
 ])
-def test_mask_non_dict_values(data, expected):
-    from RCAEval.logparser import mask_non_dict_values
-
-    #data = {'id': 100, 'data': {'log-1': 'aaa', 10: [1, 2, 'a']}}
-    #expected = {'id': '<*>', 'data': {'log-1': '<*>', 10: ['<*>', '<*>', '<*>']}}
-    assert mask_non_dict_values(data) == expected
+def test_mask_dict_values(data, expected):
+    from RCAEval.logparser import mask_dict_values
+    assert mask_dict_values(data) == expected
 
 #@pytest.mark.parametrize("log, expected", [
 #    (
