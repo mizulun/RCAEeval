@@ -227,8 +227,3 @@ class EventTemplate:
                 print(log)
         return completeness
 
-
-
-#log = "This is a test log with a JSON object: {\"key1\": \"value1\", \"key2\": {\"nested_key\": \"nested_value\"}} and some other text."
-#output = mask_dict_values_in_logs(log)
-#print(output)

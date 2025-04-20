@@ -234,5 +234,3 @@ def test_mask_dict_values(data, expected):
 def test_mask_dict_values_in_logs(log, expected):
     from RCAEval.logparser import mask_dict_values_in_logs
     assert mask_dict_values_in_logs(log) == expected
-
-#@pytest.mark.parametrize("log, expected", [
