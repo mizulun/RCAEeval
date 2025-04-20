@@ -43,6 +43,26 @@ def mask_dict_values(data):
         return "<*>"
 
 
+def mask_dict_values_in_logs(text):
+    """Mask all values in the dict/json in the text."""
+    # Find all JSON bounds
+    bounds = find_json_bounds(text)
+    if not bounds:
+        return text
+
+    # Process each JSON object found
+    for start, end in bounds:
+        json_str = text[start:end]
+        try:
+            data = json.loads(json_str.replace("'", '"'))
+            masked_data = mask_dict_values(data)
+            masked_json_str = json.dumps(masked_data)
+            text = text[:start] + masked_json_str + text[end:]
+        except json.JSONDecodeError:
+            raise Exception(f"[WARN] Invalid JSON object: {json_str}")
+
+    return text
+
 class EventTemplate:
     """
     A class to represent an event template for matching events.
@@ -209,5 +229,6 @@ class EventTemplate:
 
 
 
-#output = mask_dict_values("This is a log: {'id': 100, 'data': {'log-1': 'aaa', 10: {'this is a set'}}} with some values.")
+#log = "This is a test log with a JSON object: {\"key1\": \"value1\", \"key2\": {\"nested_key\": \"nested_value\"}} and some other text."
+#output = mask_dict_values_in_logs(log)
 #print(output)
