@@ -219,8 +219,8 @@ class EventTemplate:
         # Declare local variables
         completeness = True
         match_count = 0
-        not_match_count = 0
-        not_match_logs = []
+        no_match_count = 0
+        no_match_logs = []
 
         # Loop for each log in log file
         for log in log_file:
@@ -243,13 +243,13 @@ class EventTemplate:
 
             # record unmatch logs for reporting
             if not match:
-                not_match_logs.append(log)
-                not_match_count += 1
+                no_match_logs.append(log)
+                no_match_count += 1
                 completeness = False
 
-            if in_progress is True and not_match_count == 100:
-                print(f"[INFO] Not matched logs:")
-                for log in not_match_logs:
+            if in_progress is True and no_match_count == 100:
+                print(f"[INFO] Unmatched logs:")
+                for log in no_match_logs:
                     print(log)
                 return False
 
@@ -258,14 +258,9 @@ class EventTemplate:
         if completeness:
             print(f"[INFO] All logs are matched. {match_count} logs matched.")
         else:
-            print(f"[INFO] {match_count/(match_count + not_match_count)*100:.2f}% logs matched.")
-            print(f"[WARN] {not_match_count} logs not matched.")
-            print(f"[INFO] Not matched logs:")
-            for log in not_match_logs[:1000]:
+            print(f"[INFO] {match_count/(match_count + no_match_count)*100:.2f}% logs matched.")
+            print(f"[WARN] {no_match_count} logs unmatched.")
+            print(f"[INFO] Unmatched logs:")
+            for log in no_match_logs:
                 print(log)
         return completeness
-
-#log = '{"id":"d3588630-ad8e-49df-bbd7-3167f7efb246","name":"YouTube.sock","description":"We were not paid to sell this sock. It"s just a bit geeky.","imageUrl":["/catalogue/images/youtube_1.jpeg","/catalogue/images/youtube_2.jpeg"],"price":10.99,"count":801,"tag":["geek","formal"]}'
-#
-#output = mask_dict_values_in_log(log)
-#print(output)
