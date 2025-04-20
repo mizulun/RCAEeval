@@ -211,7 +211,7 @@ class EventTemplate:
     
     @classmethod
     def is_complete(cls, template_file, log_file, in_progress=False):
-        """check if all logs are match"""
+        """Check if all logs are match, given a template file"""
         # load log file and template files
         log_file = open(log_file)
         templates = EventTemplate.load_templates(template_file)
@@ -221,16 +221,13 @@ class EventTemplate:
         not_match_logs = []
 
         for log in log_file:
-            # preprocess logs
             log = log.strip()
-            if not log: 
-                continue
+            if not log: continue
 
             #log = log.encode().decode('unicode_escape').replace("'", '"')
 
-            if cls.mask_dict:
+            if cls.mask_dict:  # in case we wanna keep only the json structure
                 log = mask_dict_values_in_log(log)
-
 
             match = False
             for template in templates:
