@@ -43,31 +43,47 @@ def mask_dict_values(data):
         return "<*>"
 
 
-def mask_dict_values_in_logs(text):
-    """Mask all values in the dict/json in the text."""
+def mask_dict_values_in_log(log):
+    """Mask all values in the dict/json in a log."""
     # Find all JSON bounds
-    bounds = find_json_bounds(text)
+    bounds = find_json_bounds(log)
     if not bounds:
-        return text
+        return log
 
     # Process each JSON object found
     for start, end in bounds:
-        json_str = text[start:end]
+        json_str = log[start:end]
+
+        retry = False
         try:
             data = json.loads(json_str.replace("'", '"'))
             masked_data = mask_dict_values(data)
             masked_json_str = json.dumps(masked_data)
-            text = text[:start] + masked_json_str + text[end:]
-        except json.JSONDecodeError:
-            raise Exception(f"[WARN] Invalid JSON object: {json_str}")
-
-    return text
+            log = log[:start] + masked_json_str + log[end:]
+        except json.JSONDecodeError as e:
+            retry = True
+            #pass
+            #print(f"[WARN] Invalid JSON object: {json_str}")
+            #raise Exception(f"[WARN] Invalid JSON object: {json_str}")
+        if retry is True:
+            try:
+                log = log.encode().decode('unicode_escape').replace("'", '"')
+                data = json.loads(json_str.replace("'", '"'))
+                masked_data = mask_dict_values(data)
+                masked_json_str = json.dumps(masked_data)
+                log = log[:start] + masked_json_str + log[end:]
+            except json.JSONDecodeError as e:
+                pass
+ 
+    return log
 
 class EventTemplate:
     """
     A class to represent an event template for matching events.
     """
     verbose = False
+    mask_dict = False  # mask dict values in logs
+
     def __init__(self, id: str = None, template: str = None, known_regex: dict = None):
         if not template:
             raise ValueError("Template cannot be None")
@@ -77,6 +93,9 @@ class EventTemplate:
             self.regex = self._compile_template(template, known_regex)
         except re.error as e:
             raise ValueError(f"Invalid regex pattern in template: {template}. Error: {e}")
+
+    def __repr__(self):
+        return f"<{self.id}>_<{self.template}>"
 
     def _compile_template(self, template: str, known_regex : dict = None) -> re.Pattern:
         """
@@ -190,9 +209,10 @@ class EventTemplate:
             print(f"[INFO] No duplicate found.")
         return duplicate
     
-    @staticmethod
-    def is_complete(template_file, log_file):
+    @classmethod
+    def is_complete(cls, template_file, log_file, in_progress=False):
         """check if all logs are match"""
+        # load log file and template files
         log_file = open(log_file)
         templates = EventTemplate.load_templates(template_file)
         completeness = True
@@ -201,19 +221,34 @@ class EventTemplate:
         not_match_logs = []
 
         for log in log_file:
+            # preprocess logs
             log = log.strip()
-            if log:
-                match = False
-                for template in templates:
-                    if template.is_match(log):
-                        match = True
-                        break
-                if not match:
-                    not_match_logs.append(log)
-                    not_match_count += 1
-                    completeness = False
-                else: 
-                    match_count += 1
+            if not log: 
+                continue
+
+            #log = log.encode().decode('unicode_escape').replace("'", '"')
+
+            if cls.mask_dict:
+                log = mask_dict_values_in_log(log)
+
+
+            match = False
+            for template in templates:
+                if template.is_match(log):
+                    match = True
+                    break
+            if not match:
+                not_match_logs.append(log)
+                not_match_count += 1
+                completeness = False
+            else: 
+                match_count += 1
+
+            if in_progress is True and not_match_count == 100:
+                print(f"[INFO] Not matched logs:")
+                for log in not_match_logs:
+                    print(log)
+                return False
 
         log_file.close()
 
@@ -223,7 +258,11 @@ class EventTemplate:
             print(f"[INFO] {match_count/(match_count + not_match_count)*100:.2f}% logs matched.")
             print(f"[WARN] {not_match_count} logs not matched.")
             print(f"[INFO] Not matched logs:")
-            for log in not_match_logs:
+            for log in not_match_logs[:1000]:
                 print(log)
         return completeness
 
+#log = '{"id":"d3588630-ad8e-49df-bbd7-3167f7efb246","name":"YouTube.sock","description":"We were not paid to sell this sock. It"s just a bit geeky.","imageUrl":["/catalogue/images/youtube_1.jpeg","/catalogue/images/youtube_2.jpeg"],"price":10.99,"count":801,"tag":["geek","formal"]}'
+#
+#output = mask_dict_values_in_log(log)
+#print(output)
