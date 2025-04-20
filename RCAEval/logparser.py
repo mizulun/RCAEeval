@@ -212,14 +212,17 @@ class EventTemplate:
     @classmethod
     def is_complete(cls, template_file, log_file, in_progress=False):
         """Check if all logs are match, given a template file"""
-        # load log file and template files
+        # Load log file and template files
         log_file = open(log_file)
         templates = EventTemplate.load_templates(template_file)
+
+        # Declare local variables
         completeness = True
         match_count = 0
         not_match_count = 0
         not_match_logs = []
 
+        # Loop for each log in log file
         for log in log_file:
             log = log.strip()
             if not log: continue
@@ -230,16 +233,19 @@ class EventTemplate:
                 log = mask_dict_values_in_log(log)
 
             match = False
+
+            # for each template
             for template in templates:
-                if template.is_match(log):
+                if template.is_match(log): # there is a match
                     match = True
+                    match_count += 1
                     break
+
+            # record unmatch logs for reporting
             if not match:
                 not_match_logs.append(log)
                 not_match_count += 1
                 completeness = False
-            else: 
-                match_count += 1
 
             if in_progress is True and not_match_count == 100:
                 print(f"[INFO] Not matched logs:")
