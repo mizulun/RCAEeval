@@ -231,6 +231,6 @@ def test_mask_dict_values(data, expected):
         '{"id": "<*>", "name": "<*>", "description": "<*>", "imageUrl": ["<*>"], "price": "<*>", "count": "<*>", "tag": ["<*>", "<*>", "<*>"]}',
     )
 ])
-def test_mask_dict_values_in_logs(log, expected):
-    from RCAEval.logparser import mask_dict_values_in_logs
-    assert mask_dict_values_in_logs(log) == expected
+def test_mask_dict_values_in_log(log, expected):
+    from RCAEval.logparser import mask_dict_values_in_log
+    assert mask_dict_values_in_log(log) == expected
