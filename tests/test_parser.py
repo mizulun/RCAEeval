@@ -216,26 +216,23 @@ def test_mask_dict_values(data, expected):
     from RCAEval.logparser import mask_dict_values
     assert mask_dict_values(data) == expected
 
-def test_mask_dict_values_in_logs():
+
+@pytest.mark.parametrize("log, expected", [
+    (
+        "This is a log: {'id': 100, 'data': {'log-1': 'aaa', 'key-2': [1,2,3, 'a']}} with some values.",
+        'This is a log: {"id": "<*>", "data": {"log-1": "<*>", "key-2": ["<*>", "<*>", "<*>", "<*>"]}} with some values.'
+    ),
+    (
+        'POST to carts: items body: {"itemId":"819e1fbf-8b7e-4f6d-811f-693534916a8b","unitPrice":14}"',
+        'POST to carts: items body: {"itemId": "<*>", "unitPrice": "<*>"}"',
+    ),
+    (   
+        '{"id":"819e1fbf-8b7e-4f6d-811f-693534916a8b","name":"Figueroa","description":"enim officia aliqua excepteur esse deserunt quis aliquip nostrud anim","imageUrl":["/catalogue/images/WAT.jpg"],"price":14,"count":808,"tag":["formal","green","blue"]}',
+        '{"id": "<*>", "name": "<*>", "description": "<*>", "imageUrl": ["<*>"], "price": "<*>", "count": "<*>", "tag": ["<*>", "<*>", "<*>"]}',
+    )
+])
+def test_mask_dict_values_in_logs(log, expected):
     from RCAEval.logparser import mask_dict_values_in_logs
-    log = "This is a log: {'id': 100, 'data': {'log-1': 'aaa', 'key-2': [1,2,3, 'a']}} with some values."
-    expected = 'This is a log: {"id": "<*>", "data": {"log-1": "<*>", "key-2": ["<*>", "<*>", "<*>", "<*>"]}} with some values.'
     assert mask_dict_values_in_logs(log) == expected
 
 #@pytest.mark.parametrize("log, expected", [
-#    (
-#        "POST to carts: items body: {\"itemId\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"unitPrice\":14}\"",
-#        "POST to carts: items body: {\"itemId\": \"<*>\", \"unitPrice\": \"<*>\"}\""
-#    ),
-#    (
-#        "{\"id\":\"819e1fbf-8b7e-4f6d-811f-693534916a8b\",\"name\":\"Figueroa\",\"description\":\"enim officia aliqua excepteur esse deserunt quis aliquip nostrud anim\",\"imageUrl\":[\"/catalogue/images/WAT.jpg\"],\"price\":14,\"count\":808,\"tag\":[\"formal\",\"green\",\"blue\"]}",
-#        "{\"id\": \"<*>\", \"name\": \"<*>\", \"description\": \"<*>\", \"imageUrl\": [\"<*>\"], \"price\": \"<*>\", \"count\": \"<*>\", \"tag\": [\"<*>\", \"<*>\", \"<*>\"]}"
-#    ),
-#    (
-#        "This is a log: {'id': 001, 'data': {'log-1': 'aaa', 01: [1,2,3, 'a']}} with some values.",
-#        "This is a log: {'id': \"<*>\", 'data': {'log-1': \"<*>\", 01: \"<*>\"}} with some values."
-#    )
-#])
-#def test_remove_dict_values(log, expected):
-#    from RCAEval.logparser import remove_dict_values
-#    assert remove_dict_values(log) == expected
