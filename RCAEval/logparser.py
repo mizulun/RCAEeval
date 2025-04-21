@@ -79,7 +79,8 @@ def mask_dict_values_in_log(log):
 
 class EventTemplate:
     """
-    A class to represent an event template for matching events.
+    A class to represent an event type (i.e., log template) for matching events/logs.
+    It also offers various useful @staticmethod and @classmethod for mapping/parsing logs.
     """
     verbose = False
     mask_dict = False  # mask dict values in logs
@@ -228,22 +229,23 @@ class EventTemplate:
             if not log: continue
 
             #log = log.encode().decode('unicode_escape').replace("'", '"')
+            log = log.replace("'", '"')
 
-            if cls.mask_dict:  # in case we wanna keep only the json structure
-                log = mask_dict_values_in_log(log)
+            #if cls.mask_dict:  # in case we wanna keep only the json structure
+            masked_log = mask_dict_values_in_log(log)
 
             match = False
 
             # for each template
             for template in templates:
-                if template.is_match(log): # there is a match
+                if template.is_match(masked_log): # there is a match
                     match = True
                     match_count += 1
                     break
 
             # record unmatch logs for reporting
             if not match:
-                no_match_logs.append(log)
+                no_match_logs.append(masked_log)
                 no_match_count += 1
                 completeness = False
 
