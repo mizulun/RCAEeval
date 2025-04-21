@@ -65,15 +65,16 @@ def mask_dict_values_in_log(log):
             #pass
             #print(f"[WARN] Invalid JSON object: {json_str}")
             #raise Exception(f"[WARN] Invalid JSON object: {json_str}")
-        if retry is True:
-            try:
-                log = log.encode().decode('unicode_escape').replace("'", '"')
-                data = json.loads(json_str.replace("'", '"'))
-                masked_data = mask_dict_values(data)
-                masked_json_str = json.dumps(masked_data)
-                log = log[:start] + masked_json_str + log[end:]
-            except json.JSONDecodeError as e:
-                pass
+        # NOTE: already handle in def is_complete.
+        #if retry is True:
+        #    try:
+        #        log = log.encode().decode('unicode_escape').replace("'", '"')
+        #        data = json.loads(json_str.replace("'", '"'))
+        #        masked_data = mask_dict_values(data)
+        #        masked_json_str = json.dumps(masked_data)
+        #        log = log[:start] + masked_json_str + log[end:]
+        #    except json.JSONDecodeError as e:
+        #        pass
  
     return log
 
@@ -228,7 +229,8 @@ class EventTemplate:
             log = log.strip()
             if not log: continue
 
-            #log = log.encode().decode('unicode_escape').replace("'", '"')
+            if '\\"' in log:
+                log = log.encode().decode('unicode_escape').strip()
             log = log.replace("'", '"')
 
             #if cls.mask_dict:  # in case we wanna keep only the json structure
