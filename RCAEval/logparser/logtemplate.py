@@ -6,24 +6,7 @@ import pandas as pd
 from collections import OrderedDict
 
 from .utility import mask_dict_values_in_log
-
-
-class Template:
-    verbose = False
-
-    def __init__(self):
-        ...
-
-    def __repr__(self):
-        ... 
-
-    def is_match(self, event):
-        # Check if the event matches the template.
-        ...
-    
-    @staticmethod
-    def load_templates(self, template_file):
-        ...
+from .template import Template
 
 
 class LogTemplate(Template):
