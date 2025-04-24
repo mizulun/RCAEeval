@@ -26,7 +26,7 @@ jobs:
               pip install -e .[default]
       - run:
           name: "Run test"
-          command: pytest tests/test.py
+          command: pytest tests/test.py tests/test_parser*
           no_output_timeout: 3h
       - run: 
           name: "Reproduce BARO performance on the RE2 dataset, Train Ticket system"
