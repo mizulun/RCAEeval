@@ -3,6 +3,4 @@ from .utility import (
     mask_dict_values, 
     mask_dict_values_in_log,
 )
-from .logparser import (
-    LogTemplate
-)
+from .logtemplate import LogTemplate
