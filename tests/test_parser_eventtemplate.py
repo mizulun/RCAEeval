@@ -6,27 +6,72 @@ from tempfile import TemporaryFile, NamedTemporaryFile
 from RCAEval.logparser import EventTemplate
 
 
+
+@pytest.mark.parametrize("pattern, keyset, logkeyset", [
+    (
+        {
+            "key-a": {
+                "key-b": {
+                    "key-c": ""
+                }
+            },
+            "key-d": ""
+        }, 
+        {
+            "key-a",
+            "key-a.key-b",
+            "key-a.key-b.key-c",
+            "key-d"
+        },
+        set()
+     ),
+    (
+        {
+            "key-a": {
+                "key-b": {
+                    "key-c": {
+                        "key-d": "",
+                        "key-e": "UserId=<:ID:>"
+                    }
+                }
+            },
+            "key-e": "This is a log"
+        },
+        {
+            "key-a",
+            "key-a.key-b",
+            "key-a.key-b.key-c",
+            "key-a.key-b.key-c.key-d",
+            "key-a.key-b.key-c.key-e",
+            "key-e"
+        },
+        {"key-e", "key-a.key-b.key-c.key-e"}
+    ),
+])
+def test_find_key(pattern, keyset, logkeyset):
+    e = EventTemplate(pattern)
+    assert e.keyset == keyset
+    assert e.logkeyset == logkeyset
+
+
 #@pytest.mark.parametrize("pattern, no_matches, matches", [
 #    (
-#        "received ad request (context_words=[<*>])",
-#        ["abc", "received ad", "ad request (context_words=[])"],
-#        [
-#            "received ad request (context_words=[clothing])",
-#            "received ad request (context_words=[clothing, shoes])",
-#            "received ad request (context_words=[123])"
-#        ]
-#    ),
-#    (
-#        "SEVERE: Exception while executing runnable <*>",
-#        ["SEVERE: Exception while executing runnable", "abc", ""],
-#        [
-#            "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@7d71091e",
-#            "SEVERE: Exception while executing runnable io.grpc.internal.ServerImpl$JumpToApplicationThreadServerStreamListener$1HalfClosed@293e648c"
-#        ]
+#        {
+#            "key-a": "",
+#            "key-b": ""
+#        },
+#        [{
+#            "key-a": "value-a",
+#            "key-c": "value-c"
+#        }],
+#        [{
+#            "key-a": "value-a",
+#            "key-b": "value-b"
+#        }]
 #    ),
 #])
 #def test_load_and_match_template(pattern, no_matches, matches):
-#    template = LogTemplate(template=pattern)
+#    template = EventTemplate(template=pattern)
 #    
 #    # Test strings that should NOT match
 #    for no_match in no_matches:
@@ -35,8 +80,8 @@ from RCAEval.logparser import EventTemplate
 #    # Test strings that should match
 #    for match in matches:
 #        assert template.is_match(match)
-#
-#
+
+
 #def test_load_multiple_templates():
 #    temfile = TemporaryFile(mode='w+')
 #    temfile.write(
