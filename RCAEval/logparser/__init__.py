@@ -4,3 +4,4 @@ from .utility import (
     mask_dict_values_in_log,
 )
 from .logtemplate import LogTemplate
+from .eventtemplate import EventTemplate
