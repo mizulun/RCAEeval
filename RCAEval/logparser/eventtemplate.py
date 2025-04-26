@@ -1,4 +1,5 @@
 from .template import Template
+from .event import Event
 
 
 class EventTemplate(Template):
@@ -6,9 +7,8 @@ class EventTemplate(Template):
         self.pattern = pattern
 
         self.keyset = set()
-        self.logkeyset = set() # log key has the value is a non-empty string
+        self.logkeyset = set()
 
-        # recursively find all keys in the pattern
         self._find_keys(self.pattern)
         
     def __repr__(self):
@@ -28,8 +28,16 @@ class EventTemplate(Template):
                     if value != "":
                         self.logkeyset.add(f"{header}{key}")
         
-    def is_match(self, event):
-        pass
-    
+    def is_match(self, e: dict):
+        e = Event(data=e)
+
+        print(f"{self.keyset=} {e.keyset=}")
+        # check if the event matches the pattern
+        if e.keyset != self.keyset:
+            return False
+        return True
+        
     def load_templates(self, template_file):
         pass
+
+

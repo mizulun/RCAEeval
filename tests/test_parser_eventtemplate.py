@@ -1,10 +1,6 @@
-"""
-To debug regex: https://www.debuggex.com/
-"""
 import pytest 
 from tempfile import TemporaryFile, NamedTemporaryFile
 from RCAEval.logparser import EventTemplate
-
 
 
 @pytest.mark.parametrize("pattern, keyset, logkeyset", [
@@ -45,7 +41,10 @@ from RCAEval.logparser import EventTemplate
             "key-a.key-b.key-c.key-e",
             "key-e"
         },
-        {"key-e", "key-a.key-b.key-c.key-e"}
+        {
+            "key-e",
+            "key-a.key-b.key-c.key-e"
+        }
     ),
 ])
 def test_find_key(pattern, keyset, logkeyset):
@@ -54,32 +53,36 @@ def test_find_key(pattern, keyset, logkeyset):
     assert e.logkeyset == logkeyset
 
 
-#@pytest.mark.parametrize("pattern, no_matches, matches", [
-#    (
-#        {
-#            "key-a": "",
-#            "key-b": ""
-#        },
-#        [{
-#            "key-a": "value-a",
-#            "key-c": "value-c"
-#        }],
-#        [{
-#            "key-a": "value-a",
-#            "key-b": "value-b"
-#        }]
-#    ),
-#])
-#def test_load_and_match_template(pattern, no_matches, matches):
-#    template = EventTemplate(template=pattern)
-#    
-#    # Test strings that should NOT match
-#    for no_match in no_matches:
-#        assert not template.is_match(no_match)
-#    
-#    # Test strings that should match
-#    for match in matches:
-#        assert template.is_match(match)
+@pytest.mark.parametrize("pattern, no_matches, matches", [
+    (
+        {
+            "key-a": "",
+            "key-b": ""
+        },
+        [
+            {
+                "key-a": "value-a",
+                "key-c": "value-c"
+            }
+        ],
+        [
+            {
+                "key-a": "value-a",
+                "key-b": "value-b"
+            }
+        ]
+    ),
+])
+def test_load_and_match_template(pattern, no_matches, matches):
+    template = EventTemplate(pattern)
+    
+    # Test strings that should NOT match
+    for no_match in no_matches:
+        assert not template.is_match(no_match)
+    
+    # Test strings that should match
+    for match in matches:
+        assert template.is_match(match)
 
 
 #def test_load_multiple_templates():
