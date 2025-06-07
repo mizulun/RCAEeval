@@ -71,7 +71,6 @@ python3.12 -m venv env
 Install RCAEval using pip
 
 ```bash
-pip install pip==20.0.2
 pip install -e .[default]
 ```
 
@@ -79,7 +78,6 @@ Or, install RCAEval from PyPI
 
 ```bash
 # Install RCAEval from PyPI
-pip install pip==20.0.2
 pip install RCAEval[default]
 ```
 
