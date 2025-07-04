@@ -324,10 +324,11 @@ We would like to express our sincere gratitude to the researchers and developers
 
 
 ```bibtex
-@inproceedings{pham2025benchmark,
+@inproceedings{pham2025rcaeval,
   title={RCAEval: A Benchmark for Root Cause Analysis of Microservice Systems with Telemetry Data},
   author={Pham, Luan and Zhang, Hongyu and Ha, Huong and Salim, Flora and Zhang, Xiuzhen},
-  booktitle={The 2025 ACM Web Conference (WWW)},
+  booktitle={Companion Proceedings of the ACM on Web Conference 2025},
+  pages={777--780},
   year={2025}
 }
 ```
@@ -339,6 +340,18 @@ We would like to express our sincere gratitude to the researchers and developers
   booktitle={Proceedings of the 39th IEEE/ACM International Conference on Automated Software Engineering},
   pages={706--715},
   year={2024}
+}
+```
+
+```bibtex
+@article{pham2024baro,
+  title={BARO: Robust root cause analysis for microservices via multivariate bayesian online change point detection},
+  author={Pham, Luan and Ha, Huong and Zhang, Hongyu},
+  journal={Proceedings of the ACM on Software Engineering},
+  volume={1},
+  number={FSE},
+  pages={2214--2237},
+  year={2024},
 }
 ```
 
