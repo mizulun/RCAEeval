@@ -19,7 +19,7 @@ RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) w
 </p>
 
 [IEEE/ACM ASE 2024](https://dl.acm.org/doi/abs/10.1145/3691620.3695065)
-[ACM WWW 2025](https://arxiv.org/pdf/2412.17015)
+[ACM WWW 2025](https://dl.acm.org/doi/10.1145/3701716.3715290)
 
 **Table of Contents** 
   * [Prerequisites](#prerequisites)
