@@ -346,7 +346,7 @@ We would like to express our sincere gratitude to the researchers and developers
 ```
 
 ```bibtex
-@article{pham2024baro,
+@inproceedings{pham2024baro,
   title={BARO: Robust root cause analysis for microservices via multivariate bayesian online change point detection},
   author={Pham, Luan and Ha, Huong and Zhang, Hongyu},
   journal={Proceedings of the ACM on Software Engineering},
