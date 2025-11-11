@@ -8,7 +8,7 @@
 [![Upload Python Package](https://github.com/phamquiluan/RCAEval/actions/workflows/python-publish.yml/badge.svg)](https://github.com/phamquiluan/RCAEval/actions/workflows/python-publish.yml)
 
 
-RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) with 735 failure cases, and an evaluation framework for root cause analysis (RCA) in microservice systems. It includes 15 reproducible baselines covering metric-based, trace-based, and multi-source RCA methods.
+RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) with 735 real failure cases, and an evaluation framework for root cause analysis (RCA) in microservice systems. It includes 15 reproducible baselines covering metric-based, trace-based, and multi-source RCA methods.
 
 
 
