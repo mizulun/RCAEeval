@@ -7,6 +7,8 @@
 [![Build and test](https://github.com/phamquiluan/RCAEval/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/phamquiluan/RCAEval/actions/workflows/build-and-test.yml)
 [![Upload Python Package](https://github.com/phamquiluan/RCAEval/actions/workflows/python-publish.yml/badge.svg)](https://github.com/phamquiluan/RCAEval/actions/workflows/python-publish.yml)
 
+[ACM WWW 2025](https://dl.acm.org/doi/10.1145/3701716.3715290)
+[IEEE/ACM ASE 2024](https://dl.acm.org/doi/abs/10.1145/3691620.3695065)
 
 RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) with 735 real failure cases, and an evaluation framework for root cause analysis (RCA) in microservice systems. It includes 15 reproducible baselines covering metric-based, trace-based, and multi-source RCA methods.
 
@@ -17,9 +19,6 @@ RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) w
 <p align="center">
 <img width=1000 src= "./docs/readme.jpg"/>
 </p>
-
-[IEEE/ACM ASE 2024](https://dl.acm.org/doi/abs/10.1145/3691620.3695065)
-[ACM WWW 2025](https://dl.acm.org/doi/10.1145/3701716.3715290)
 
 **Table of Contents** 
   * [Prerequisites](#prerequisites)
