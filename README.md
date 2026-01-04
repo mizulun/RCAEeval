@@ -10,7 +10,7 @@
 [ACM WWW 2025](https://dl.acm.org/doi/10.1145/3701716.3715290)
 [IEEE/ACM ASE 2024](https://dl.acm.org/doi/abs/10.1145/3691620.3695065)
 
-RCAEval is an open-source benchmark that offers three datasets (RE1, RE2, RE3) with 735 real failure cases, and an evaluation framework for root cause analysis (RCA) in microservice systems. It includes 15 reproducible baselines covering metric-based, trace-based, and multi-source RCA methods.
+RCAEval is an open-source benchmark that offers nine datasets with 735 real failure cases, and an evaluation framework for root cause analysis (RCA) in microservice systems. It includes 15 reproducible baselines covering metric-based, trace-based, and multi-source RCA methods.
 
 
 
@@ -147,13 +147,7 @@ A tutorial of using BARO to diagnose code-level faults is presented in [docs/cod
 
 ## Available Datasets
 
-RCAEval benchmark includes three datasets: RE1, RE2, and RE3, designed to comprehensively support benchmarking RCA in microservice systems. Together, our three datasets feature 735 failure cases collected from three microservice systems (Online Boutique, Sock Shop, and Train Ticket) and including 11 fault types. Each failure case also includes annotated root cause service and root cause indicator (e.g., specific metric or log indicating the root cause). The statistics of the datasets are presented in the Table below.
-
-|   Dataset   |   Systems  |   Fault Types            |   Cases  |   Metrics  |   Logs (millions)  |   Traces (millions)  |
-|-------------|------------|--------------------------|----------|------------|--------------------|----------------------|
-|   RE1       |   3        |   3 Resource, 2 Network  |   375    |   49-212   |   N/A              |   N/A                |
-|   RE2       |   3        |   4 Resource, 2 Network  |   270    |   77-376   |   8.6-26.9         |   39.6-76.7          |
-|   RE3       |   3        |   5 Code-level           |   90     |   68-322   |   1.7-2.7          |   4.5-4.7            |
+RCAEval benchmark includes nine datasets designed to comprehensively support benchmarking RCA in microservice systems. Together, our datasets feature 735 failure cases in total collected from three microservice systems (Online Boutique, Sock Shop, and Train Ticket) and including 11 fault types. Each failure case also includes annotated root cause service and root cause indicator (e.g., specific metric or log indicating the root cause). The statistics of the datasets are presented in the Table below.
 
 Our datasets and their description are publicly available in Zenodo repository with the following information:
 - Dataset DOI: https://doi.org/10.5281/zenodo.14590730
