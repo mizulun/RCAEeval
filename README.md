@@ -147,7 +147,33 @@ A tutorial of using BARO to diagnose code-level faults is presented in [docs/cod
 
 ## Available Datasets
 
-RCAEval benchmark includes nine datasets designed to comprehensively support benchmarking RCA in microservice systems. Together, our datasets feature 735 failure cases in total collected from three microservice systems (Online Boutique, Sock Shop, and Train Ticket) and including 11 fault types. Each failure case also includes annotated root cause service and root cause indicator (e.g., specific metric or log indicating the root cause). The statistics of the datasets are presented in the Table below.
+RCAEval benchmark includes nine datasets organized into three benchmark suites (RE1, RE2, RE3), each covering three microservice systems (Online Boutique, Sock Shop, Train Ticket). Together, these datasets feature 735 failure cases with 11 fault types. Each failure case includes annotated root cause service and root cause indicator (e.g., specific metric or log indicating the root cause).
+
+| Dataset | System | Cases | Fault Types | Metrics | Logs | Traces |
+|---------|--------|-------|-------------|---------|------|--------|
+| RE1-OB | Online Boutique | 125 | cpu, mem, disk, delay, loss | 49-59 | N/A | N/A |
+| RE1-SS | Sock Shop | 125 | cpu, mem, disk, delay, loss | 57-63 | N/A | N/A |
+| RE1-TT | Train Ticket | 125 | cpu, mem, disk, delay, loss | 198-238 | N/A | N/A |
+| RE2-OB | Online Boutique | 90 | cpu, mem, disk, delay, loss, socket | 69-77 | Yes | Yes |
+| RE2-SS | Sock Shop | 90 | cpu, mem, disk, delay, loss, socket | 74-82 | Yes | Yes |
+| RE2-TT | Train Ticket | 90 | cpu, mem, disk, delay, loss, socket | 340-376 | Yes | Yes |
+| RE3-OB | Online Boutique | 30 | f1, f2, f3, f4, f5 | 68-101 | Yes | Yes |
+| RE3-SS | Sock Shop | 30 | f1, f2, f3, f4, f5 | 80-107 | Yes | Yes |
+| RE3-TT | Train Ticket | 30 | f1, f2, f3, f4, f5 | 294-322 | Yes | Yes |
+
+**RE1 Datasets (375 cases):** Metric-only data supporting metric-based RCA methods. Five fault types (CPU, MEM, DISK, DELAY, LOSS) across five services per system, with five repetitions per fault-service pair.
+
+**RE2 Datasets (270 cases):** Multi-source data (metrics, logs, traces) supporting multi-source RCA methods. Six fault types (adds SOCKET) across five services per system, with three repetitions per fault-service pair.
+
+**RE3 Datasets (90 cases):** Multi-source data focusing on code-level faults (F1-F5). Supports diagnosing code-level faults through telemetry data, e.g., leveraging stack traces in logs or response codes in traces.
+
+### File Structure
+
+Each dataset directory follows the naming convention: `{benchmark}_{service}_{fault}_{instance}`
+- `metrics.json`: Time-series metrics data
+- `inject_time.txt`: Fault injection timestamp (Unix timestamp)
+- `logs.csv`: Log data (RE2 and RE3 only)
+- `traces.csv`: Trace data (RE2 and RE3 only)
 
 Our datasets and their description are publicly available in Zenodo repository with the following information:
 - Dataset DOI: https://doi.org/10.5281/zenodo.14590730
