@@ -175,9 +175,9 @@ Each dataset directory follows the naming convention: `{benchmark}_{service}_{fa
 - `logs.csv`: Log data (RE2 and RE3 only)
 - `traces.csv`: Trace data (RE2 and RE3 only)
 
-Our datasets and their description are publicly available in Zenodo repository with the following information:
-- Dataset DOI: https://doi.org/10.5281/zenodo.14590730
-- Dataset URL: [https://zenodo.org/records/14590730](https://zenodo.org/records/14590730)
+Our datasets and their description are publicly available with the following information:
+- Zenodo: [https://zenodo.org/records/14590730](https://zenodo.org/records/14590730) (DOI: https://doi.org/10.5281/zenodo.14590730)
+- Figshare: [https://figshare.com/articles/dataset/RCAEval_A_Benchmark_for_Root_Cause_Analysis_of_Microservice_Systems/31048672](https://figshare.com/articles/dataset/RCAEval_A_Benchmark_for_Root_Cause_Analysis_of_Microservice_Systems/31048672) (more structured format)
 
 We also provide utility functions to download our datasets using Python. The downloaded datasets will be available at directory `data`.
 
