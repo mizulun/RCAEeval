@@ -107,11 +107,11 @@ class LogTemplate(Template):
                 match = False
                 for template in templates:
                     if template.is_match(line):
-                        df = df._append({'log': line, 'event type': template.template}, ignore_index=True)
+                        df = pd.concat([df, pd.DataFrame([{'log': line, 'event type': template.template}])], ignore_index=True)
                         match = True
                         break
                 if not match:
-                    df = df._append({'log': line, 'event type': None}, ignore_index=True)
+                    df = pd.concat([df, pd.DataFrame([{'log': line, 'event type': None}])], ignore_index=True)
         log_file.close()
         return df
 
