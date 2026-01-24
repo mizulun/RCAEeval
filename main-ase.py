@@ -198,7 +198,7 @@ def process(data_path):
     data = data.replace([np.inf, -np.inf], np.nan)
 
     # handle na
-    data = data.fillna(method="ffill")
+    data = data.ffill()
     data = data.fillna(0)
 
     cut_length = 0

@@ -6,7 +6,7 @@ def fci_default(data: pd.DataFrame):
     node_names = data.columns.to_list()
 
     # fill nan by ffill
-    data = data.fillna(method="ffill")
+    data = data.ffill()
 
     data = data.to_numpy().astype(float)
 

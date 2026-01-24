@@ -577,7 +577,7 @@ if __name__ == '__main__':
         inject_time = int(f.readlines()[0].strip())
     data = data.loc[:, ~data.columns.str.endswith("_latency-50")]
     data = data.replace([np.inf, -np.inf], np.nan)
-    data = data.fillna(method="ffill")
+    data = data.ffill()
     data = data.fillna(0)
 
     # select only n time series

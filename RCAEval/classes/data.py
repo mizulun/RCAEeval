@@ -101,7 +101,7 @@ class DataLoader(ABC):
         data_frame[0] = pd.to_datetime(data_frame[0], unit=kwargs.get("unit", "s"), utc=True)
         data_frame: pd.DataFrame = data_frame.set_index(0).resample(interval, origin="start").mean()
         data_frame.interpolate(method="time", limit_direction="both", inplace=True)
-        data_frame.fillna(method="bfill", inplace=True)
+        data_frame.bfill(inplace=True)
 
         # 3. Return values only
         data_frame.sort_index(inplace=True)

@@ -91,7 +91,7 @@ def mmnsigma(data, inject_time=None, dataset=None, num_loop=None, sli=None, anom
 
     # == traces_err ==
     if dataset == "mm-tt" or dataset == "mm-ob":
-        traces_err = traces_err.fillna(method='ffill')
+        traces_err = traces_err.ffill()
         traces_err = traces_err.fillna(0)
         traces_err = drop_constant(traces_err)
 
@@ -100,7 +100,7 @@ def mmnsigma(data, inject_time=None, dataset=None, num_loop=None, sli=None, anom
     
      # == traces_lat ==
     if dataset == "mm-tt" or dataset == "mm-ob":
-        traces_lat = traces_lat.fillna(method='ffill')
+        traces_lat = traces_lat.ffill()
         traces_lat = traces_lat.fillna(0)
         traces_lat = drop_constant(traces_lat)
         normal_traces_lat = traces_lat[traces_lat["time"] < inject_time].drop(columns=["time"])

@@ -220,7 +220,7 @@ def process(data_path):
 
 
     # == PROCESS ==
-    data = data.fillna(method="ffill")
+    data = data.ffill()
     data = data.fillna(value=0)
     np_data = np.absolute(data.to_numpy().astype(float))
 
