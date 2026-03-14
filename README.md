@@ -155,10 +155,10 @@ RCAEval benchmark includes nine datasets organized into three benchmark suites (
 | RE1-SS | Sock Shop | 125 | cpu, mem, disk, delay, loss | 57-63 | N/A | N/A |
 | RE1-TT | Train Ticket | 125 | cpu, mem, disk, delay, loss | 198-238 | N/A | N/A |
 | RE2-OB | Online Boutique | 90 | cpu, mem, disk, delay, loss, socket | 69-77 | Yes | Yes |
-| RE2-SS | Sock Shop | 90 | cpu, mem, disk, delay, loss, socket | 74-82 | Yes | Yes |
+| RE2-SS | Sock Shop | 90 | cpu, mem, disk, delay, loss, socket | 74-82 | Yes | N/A |
 | RE2-TT | Train Ticket | 90 | cpu, mem, disk, delay, loss, socket | 340-376 | Yes | Yes |
 | RE3-OB | Online Boutique | 30 | f1, f2, f3, f4, f5 | 68-101 | Yes | Yes |
-| RE3-SS | Sock Shop | 30 | f1, f2, f3, f4, f5 | 80-107 | Yes | Yes |
+| RE3-SS | Sock Shop | 30 | f1, f2, f3, f4, f5 | 80-107 | Yes | N/A |
 | RE3-TT | Train Ticket | 30 | f1, f2, f3, f4, f5 | 294-322 | Yes | Yes |
 
 **RE1 Datasets (375 cases):** Metric-only data supporting metric-based RCA methods. Five fault types (CPU, MEM, DISK, DELAY, LOSS) across five services per system, with five repetitions per fault-service pair.
