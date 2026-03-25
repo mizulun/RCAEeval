@@ -76,7 +76,7 @@ kombu==5.2.4
 lazy_loader==0.2
 littleutils==0.2.2
 numpy<2
-llvmlite
+llvmlite==0.43.0
 markdown-it-py==2.2.0
 mdurl==0.1.2
 multidict>=6.0.4
@@ -89,7 +89,7 @@ omegaconf==2.3.0
 openpyxl==3.1.2
 orjson==3.8.12
 outdated==0.2.2
-packaging==23.1
+packaging>=24.0
 pandas>2.0.1
 parso==0.8.3
 pathspec==0.11.1

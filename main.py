@@ -23,6 +23,7 @@ from RCAEval.utility import (
     dump_json,
     is_py38,
     is_py312,
+    is_py310,
     load_json,
     download_online_boutique_dataset,
     download_sock_shop_1_dataset,
@@ -37,7 +38,7 @@ from RCAEval.utility import (
 )
 
 
-if is_py312():
+if is_py310():
     from RCAEval.e2e import (
         baro,
         causalrca,
@@ -65,12 +66,13 @@ if is_py312():
         pc_randomwalk,
         run,
         tracerca,
+        banzhaf,
     )
 
-elif is_py38():
+elif is_py312():
     from RCAEval.e2e import dummy, e_diagnosis, ht, rcd, mmrcd
 else:
-    print("Please use Python 3.8 or 3.12")
+    print("Please use Python 3.10 or 3.12")
     exit(1)
 
 try:
@@ -91,6 +93,7 @@ def parse_args():
     parser.add_argument("--length", type=int, default=20, help="Time series length (RQ4)")
     parser.add_argument("--tdelta", type=int, default=0, help="Specify $t_delta$ to simulate delay in anomaly detection")
     parser.add_argument("--test", action="store_true", help="Perform smoke test on certain methods without fully run on all data")
+    parser.add_argument("--result-dir", type=str, default=None, help="Override result output directory")
     args = parser.parse_args()
 
     if args.method not in globals():
@@ -161,7 +164,7 @@ from tempfile import TemporaryDirectory
 # output_path = TemporaryDirectory().name
 output_path = "output"
 report_path = join(output_path, f"report.xlsx")
-result_path = join(output_path, "results")
+result_path = args.result_dir if args.result_dir else join(output_path, "results")
 os.makedirs(result_path, exist_ok=True)
 
 
@@ -345,7 +348,7 @@ for service in services:
                     else []
                 )
 
-                f_ranks = [Node(x.split("_")[0], x.split("_")[1]) for x in ranks]
+                f_ranks = [Node(x.split("_")[0], x.split("_")[1] if "_" in x else "unknown") for x in ranks]
 
                 s_evaluator.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                 f_evaluator.add_case(ranks=f_ranks, answer=Node(service, fault))
@@ -426,7 +429,10 @@ for name, s_evaluator, f_evaluator in [
         name = "disk"
 
     if s_evaluator.average(5) is not None:
-        print( f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
+        print(f"AC@1-{name.upper()}:".ljust(12), round(s_evaluator.accuracy(1), 2))
+        print(f"AC@3-{name.upper()}:".ljust(12), round(s_evaluator.accuracy(3), 2))
+        print(f"AC@5-{name.upper()}:".ljust(12), round(s_evaluator.accuracy(5), 2))
+        print(f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
 
 
 print("---")

@@ -127,7 +127,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+py310/
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -179,6 +179,8 @@ env10
 debug
 notebook.ipynb
 data/_syn_rcd
+data/
+output/
 /output-parameter-tuning
 /output-various-length
 /output-rca-synthetic
