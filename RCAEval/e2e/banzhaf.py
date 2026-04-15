@@ -1,6 +1,6 @@
 """Banzhaf RCA: inference-only GAT + continuous cooperative game utility."""
 from __future__ import annotations
-import os, warnings
+import os, time, warnings
 from collections import defaultdict
 import numpy as np
 import pandas as pd
@@ -8,33 +8,70 @@ from RCAEval.io.time_series import preprocess
 
 warnings.filterwarnings("ignore")
 
-from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+
+def _to_rate(X: np.ndarray, warmup: int) -> np.ndarray:
+    """Convert counter columns to per-step rates via differencing.
+
+    A column is classified as a counter if its values are monotonically
+    non-decreasing in the warmup window (allowing ≤5% non-increasing steps,
+    to tolerate occasional resets or jitter). Counters are replaced by their
+    first-difference; the first row is forward-filled with row 1.
+    """
+    is_counter = np.zeros(X.shape[1], dtype=bool)
+    for j in range(X.shape[1]):
+        col = X[:warmup, j]
+        diffs = np.diff(col)
+        non_increasing = (diffs < -1e-9).sum()
+        if non_increasing <= max(1, int(len(diffs) * 0.05)):
+            is_counter[j] = True
+
+    if not is_counter.any():
+        return X
+
+    X = X.copy()
+    for j in np.where(is_counter)[0]:
+        rate = np.empty(X.shape[0])
+        rate[1:] = np.diff(X[:, j])
+        rate[0] = rate[1]          # forward-fill first row
+        rate = np.clip(rate, 0., None)  # counter resets produce negatives → zero
+        X[:, j] = rate
+    return X
+
 
 def _gmm_change_point_robust(
     data: pd.DataFrame,
     warmup_frac: float = 0.30,
-    fpr: float = 5.0  # 容許 5% 的假陽性
+    fpr: float = 5.0,
 ) -> int:
-    num_cols = [c for c in data.columns if c not in _NON_SLI_COLUMNS and pd.api.types.is_numeric_dtype(data[c])]
+    from sklearn.mixture import GaussianMixture
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    num_cols = [c for c in data.columns if c not in _NON_SLI and pd.api.types.is_numeric_dtype(data[c])]
     if not num_cols: return -1
 
     X = np.nan_to_num(data[num_cols].values, nan=0.0)
     T = len(X)
     warmup = max(10, int(T * warmup_frac))
+
+    X = _to_rate(X, warmup)
+
     X_train = X[:warmup]
 
-    # [關鍵修正] 必須標準化並降維，否則 N_samples < N_features 時 GMM 必當機
+    active = X_train.std(axis=0) > 1e-6
+    if active.sum() < 2:
+        active = np.ones(X_train.shape[1], dtype=bool)
+    X_train = X_train[:, active]
+    X = X[:, active]
+
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    
-    n_comp = min(5, len(X_train) - 1, len(num_cols))
+
+    n_comp = min(5, len(X_train) - 1, X_train.shape[1])
     pca = PCA(n_components=n_comp)
     X_train_pca = pca.fit_transform(X_train_scaled)
 
     try:
-        # 由於數據量少，建議 n_components 設為 1，退化為多元高斯分佈
         gmm = GaussianMixture(n_components=1, covariance_type='diag', random_state=42)
         gmm.fit(X_train_pca)
     except Exception:
@@ -43,10 +80,9 @@ def _gmm_change_point_robust(
     train_scores = gmm.score_samples(X_train_pca)
     threshold = np.percentile(train_scores, fpr)
 
-    # 檢測後續數據
     X_test_pca = pca.transform(scaler.transform(X[warmup:]))
     test_scores = gmm.score_samples(X_test_pca)
-    
+
     anomalies = np.where(test_scores < threshold)[0]
     if len(anomalies) > 0:
         return warmup + anomalies[0]
@@ -116,29 +152,6 @@ def _cusum_cp(series, warmup_frac=0.30, h=5.0, k=0.5):
         S = max(0., S + (x[t] - mu) / sigma - k)
         if S > h: return t
     return -1
-
-def _detect_split(data, sli_col, h=5.0, k=0.5, min_frac=0.30, max_frac=0.80):
-    T = len(data)
-    lo, hi = max(1, int(T * min_frac)), min(T - 1, int(T * max_frac))
-    def _try(series):
-        cp = _cusum_cp(series, warmup_frac=min_frac, h=h, k=k)
-        return cp if lo <= cp <= hi else -1
-    cp = -1
-    if sli_col and sli_col in data.columns:
-        cp = _try(_to_1d_float(pd.to_numeric(data[sli_col], errors="coerce").fillna(0).values))
-    if cp < 0:
-        num_cols = [c for c in data.columns if c not in _NON_SLI and pd.api.types.is_numeric_dtype(data[c])]
-        if num_cols:
-            w = max(3, lo)
-            comp = np.zeros(T)
-            for col in num_cols:
-                x = _to_1d_float(pd.to_numeric(data[col], errors="coerce").fillna(0).values)
-                mu, sig = float(np.mean(x[:w])), max(float(np.std(x[:w])), float(np.std(x)), 1e-9)
-                comp += np.abs((x - mu) / sig)
-            comp /= max(len(num_cols), 1)
-            cp = _try(comp)
-    if cp < 0 or cp < lo: return lo
-    return min(cp, hi)
 
 # ── Service / metric parsing ─────────────────────────────────────────────────
 
@@ -492,6 +505,8 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
     subk     = int(kw.get("subgraph_k", 2))
     use_gat  = str(kw.get("use_gat", "true")).lower() != "false"
     rng = np.random.default_rng(int(os.getenv("LOCAL_BANZHAF_SEED", 7)))
+    _timings: dict = {}
+    _t0 = _t = time.perf_counter()
 
     # Resolve SLI
     if sli_mode == "auto":
@@ -502,47 +517,39 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
         effective_sli = sli
 
     # [1] Window split
-    inject_time = None
-    anomalies = None
-    # ==========================================================
-
-    split_source = "unknown"
-    try:
-        if anomalies is not None:
-            sr = int(anomalies[0]); normal_raw = data.head(sr); anomal_raw = data.tail(len(data)-sr)
-            split_source = "anomalies"
-        elif inject_time is not None and "time" in data.columns:
-            normal_raw = data[data["time"] < inject_time]
-            anomal_raw = data[data["time"] >= inject_time]
-            split_source = "inject_time"
-        else:
-            # ==========================================================
-            # [關鍵修正 2] 加上 method="gmm"，迫使底層使用 GMM 來找異常點
-            sr = _detect_split(data, effective_sli, method="gmm") 
-            # ==========================================================
-            normal_raw = data.head(sr); anomal_raw = data.tail(len(data)-sr)
-            split_source = "gmm"  # 將這裡的來源標籤改為 gmm，方便你後續觀察輸出
-        if len(normal_raw) == 0 or len(anomal_raw) == 0: raise ValueError("empty window")
-    except Exception:
-        return _fallback(data, inject_time, dataset, anomalies, **kw)
+    if anomalies is not None:
+        sr = int(anomalies[0])
+        split_source = "anomalies"
+    elif inject_time is not None and "time" in data.columns:
+        sr = int((data["time"] < inject_time).sum())
+        split_source = "inject_time"
+    else:
+        sr = _gmm_change_point_robust(data)
+        if sr < 0:
+            sr = max(1, int(len(data) * 0.30))
+        split_source = "gmm"
+    normal_raw = data.head(sr)
+    anomal_raw = data.tail(len(data) - sr)
+    if len(normal_raw) == 0 or len(anomal_raw) == 0:
+        raise ValueError(f"empty window after split: sr={sr}, T={len(data)}")
     sli = effective_sli
+    _timings["[1] anomaly detection"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [2] Preprocess jointly (preserves fault-signal cols constant in normal)
-    try:
-        dk = kw.get("dk_select_useful", False)
-        n_rows = len(normal_raw)
-        full_proc = preprocess(pd.concat([normal_raw, anomal_raw], ignore_index=True), dataset, dk)
-        normal_df = full_proc.iloc[:n_rows].reset_index(drop=True)
-        anomal_df = full_proc.iloc[n_rows:].reset_index(drop=True)
-        shared = [c for c in normal_df.columns if c in anomal_df.columns]
-        normal_df = normal_df[shared]; anomal_df = anomal_df[shared]
-        if normal_df.shape[1] == 0: raise ValueError("no cols")
-        ml = min(len(normal_df), len(anomal_df))
-        if ml >= 3:
-            normal_df = normal_df.tail(ml); anomal_df = anomal_df.head(ml)
-        full_df = pd.concat([normal_df, anomal_df], ignore_index=True)
-    except Exception:
-        return _fallback(data, inject_time, dataset, anomalies, **kw)
+    dk = kw.get("dk_select_useful", False)
+    n_rows = len(normal_raw)
+    full_proc = preprocess(pd.concat([normal_raw, anomal_raw], ignore_index=True), dataset, dk)
+    normal_df = full_proc.iloc[:n_rows].reset_index(drop=True)
+    anomal_df = full_proc.iloc[n_rows:].reset_index(drop=True)
+    shared = [c for c in normal_df.columns if c in anomal_df.columns]
+    normal_df = normal_df[shared]; anomal_df = anomal_df[shared]
+    if normal_df.shape[1] == 0:
+        raise ValueError("no numeric columns after preprocess")
+    ml = min(len(normal_df), len(anomal_df))
+    if ml >= 3:
+        normal_df = normal_df.tail(ml); anomal_df = anomal_df.head(ml)
+    full_df = pd.concat([normal_df, anomal_df], ignore_index=True)
+    _timings["[2] preprocess"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [3] Anomaly scoring
     all_cols = list(normal_df.columns)
@@ -634,6 +641,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
     seed_pre  = [s for s, _ in sorted(svc_anom.items(), key=lambda x: x[1], reverse=True)[:seed_m] if s]
     _, lam_cov, lam_aln, lam_tmp, _ = _calibrate_expand(
         svc_series, anom_start, sli, col_idx, z_fn, onset_pre, max_anom)
+    _timings["[3] anomaly scoring"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [4] Build call graph
     args_obj = kw.get("args", None)
@@ -643,6 +651,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
         svc_series, corr_thr,
         max_in=int(kw.get("max_in", 3)), max_out=int(kw.get("max_out", 3)))
     out_n, in_n = _build_nbr(all_edges)
+    _timings["[4] call graph"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [5] Seed services + local subgraph
     seeds = [s for s, _ in sorted(svc_anom.items(), key=lambda x: x[1], reverse=True)[:seed_m] if s]
@@ -653,10 +662,12 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
             seeds.append(sv); seed_set.add(sv)
     if first_rep and first_rep not in seed_set: seeds.insert(0, first_rep)
     local_svcs = _khop_subgraph(seeds, out_n, in_n, svc_anom, k=subk, nmax=nmax)
-    if not local_svcs: return _fallback(data, inject_time, dataset, anomalies, **kw)
+    if not local_svcs:
+        raise ValueError("subgraph extraction returned empty: no services with anomaly signal found")
     local_set = set(local_svcs)
     loc_edges = [(u, v) for u, v in all_edges if u in local_set and v in local_set]
     loc_out, loc_in = _build_nbr(loc_edges)
+    _timings["[5] subgraph"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [6] Weight signals
     w_loc_raw = {s: float(svc_anom.get(s, 0.)) for s in local_svcs}
@@ -708,6 +719,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
                                    rt, ot, at, prune_mk)
     else:
         pool, pruned_svcs = no_sli[:], []
+    _timings["[6] weight signals"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [7] GAT
     nf = _node_feats(local_svcs, w_loc, w_res, onset_sc, w_sli, w_prop, loc_out, loc_in)
@@ -718,6 +730,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
         for src in set(u for u, _ in loc_edges):
             oe = [(u, v) for u, v in loc_edges if u == src]
             for e in oe: gat_ew[e] = 1. / max(1, len(oe))
+    _timings["[7] GAT"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [8] Candidates + influence matrix
     cands = [s for s, _ in sorted(w_comb.items(), key=lambda x: x[1], reverse=True)
@@ -748,6 +761,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
             if sj_ >= 0:
                 sli_reach = np.array([inf_loc[li[c], sj_] if c in li else float(w_sli_raw.get(c, 0.))
                                       for c in nodes], dtype=float)
+    _timings["[8] influence matrix"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [9] Banzhaf
     def u(mask): return _utility(mask, K, w_an_arr, w_sl_arr, infl, edge_mat, temp_mat,
@@ -782,6 +796,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
         top_a = sorted(range(K), key=lambda i: float(ra[i]), reverse=True)[:tk]
         top_b = sorted(range(K), key=lambda i: float(rb[i]), reverse=True)[:tk]
         stab = {"kendall_tau": kt, "top_k_overlap": float(len(set(top_a)&set(top_b))/max(1,tk))}
+    _timings["[9] banzhaf MC"] = round(time.perf_counter() - _t, 4); _t = time.perf_counter()
 
     # [10] Final score + rank
     w_cn = _min_max_norm({n: float(w_comb.get(n, 0.)) for n in nodes})
@@ -805,6 +820,14 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
         for j in range(i+1, K):
             s = u((1<<i)|(1<<j))
             if s > best_u: best_u = s; best_coal = [nodes[i], nodes[j]]
+    _timings["[10] ranking + coalition"] = round(time.perf_counter() - _t, 4)
+    _timings["[total]"] = round(time.perf_counter() - _t0, 4)
+
+    # print step timings
+    print(f"  [banzhaf timing]", flush=True)
+    for step, sec in _timings.items():
+        bar = "█" * int(sec / _timings["[total]"] * 20)
+        print(f"    {step:<26} {sec:.4f}s  {bar}", flush=True)
 
     top_ew = sorted([(u_s,v_s,w) for (u_s,v_s),w in gat_ew.items()], key=lambda x: x[2], reverse=True)[:10]
     return {
@@ -815,7 +838,7 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
         "gat_edge_weights": {f"{u_s}→{v_s}": round(w,4) for u_s,v_s,w in top_ew},
         "local_services": local_svcs, "seed_services": seeds,
         "used_traces": trace_edges is not None,
-        "split_source": split_source, "effective_sli": effective_sli,
+        "split_source": split_source, "split_index": sr, "effective_sli": effective_sli,
         "sli_service_excluded": _sli_svc if _sli_excl else None,
         "first_reporter": first_rep,
         "per_service_onset": {s: int(v) for s, v in per_onset.items()},
@@ -825,37 +848,6 @@ def local_banzhaf(data, inject_time=None, dataset=None, num_loop=None,
                        "expand_rho": 0.01, "lam_cov": round(lam_cov,4),
                        "lam_aln": round(lam_aln,4), "lam_tmp": round(lam_tmp,4)},
     }
-
-# ── Fallback ─────────────────────────────────────────────────────────────────
-
-def _fallback(data, inject_time=None, dataset=None, anomalies=None, **kw):
-    try:
-        from sklearn.preprocessing import RobustScaler as RS
-        if anomalies is not None:
-            nd, ad = data.head(anomalies[0]), data.tail(len(data)-anomalies[0])
-        elif inject_time is not None and "time" in data.columns:
-            nd, ad = data[data["time"] < inject_time], data[data["time"] >= inject_time]
-        else:
-            sr = _detect_split(data, _auto_select_sli(data))
-            nd, ad = data.head(sr), data.tail(len(data)-sr)
-        nd = preprocess(nd, dataset, kw.get("dk_select_useful", False))
-        ad = preprocess(ad, dataset, kw.get("dk_select_useful", False))
-        shared = [c for c in nd.columns if c in ad.columns]
-        nd, ad = nd[shared], ad[shared]
-        scores = []
-        for col in nd.columns:
-            a = _to_1d_float(nd[col].values); b = _to_1d_float(ad[col].values)
-            if a.size < 2 or b.size == 0: scores.append((col, 0.)); continue
-            sc = RS().fit(a.reshape(-1,1))
-            scores.append((col, float(np.max(np.abs(np.clip(sc.transform(b.reshape(-1,1))[:,0], 0., 100.))))))
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return {"node_names": list(nd.columns), "ranks": [c for c,_ in scores]}
-    except Exception:
-        try:
-            d = preprocess(data, dataset, kw.get("dk_select_useful", False))
-            return {"node_names": list(d.columns), "ranks": list(d.columns)}
-        except Exception:
-            return {"node_names": [], "ranks": []}
 
 
 banzhaf = local_banzhaf

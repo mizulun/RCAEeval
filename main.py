@@ -60,6 +60,7 @@ if is_py310():
         microrank,
         mscred,
         nsigma,
+        crfd,
         ntlr_pagerank,
         ntlr_randomwalk,
         pc_pagerank,
@@ -70,7 +71,7 @@ if is_py310():
     )
 
 elif is_py312():
-    from RCAEval.e2e import dummy, e_diagnosis, ht, rcd, mmrcd
+    from RCAEval.e2e import dummy, e_diagnosis, ht, rcd, mmrcd, crfd
 else:
     print("Please use Python 3.10 or 3.12")
     exit(1)
@@ -204,7 +205,8 @@ def process(data_path):
     data = data.fillna(0)
 
     with open(join(data_dir, "inject_time.txt")) as f:
-        inject_time = int(f.readlines()[0].strip()) + args.tdelta
+        inject_time_raw = int(f.readlines()[0].strip())
+    inject_time = inject_time_raw + args.tdelta
     # for metrics, minutes -> seconds // 2
     normal_df = data[data["time"] < inject_time].tail(args.length * 60 // 2)
     anomal_df = data[data["time"] >= inject_time].head(args.length * 60 // 2)
@@ -254,7 +256,7 @@ def process(data_path):
         
         out = func(
             data,
-            inject_time,
+            None if func.__name__ == "local_banzhaf" else inject_time,
             dataset=args.dataset,
             anomalies=None,
             dk_select_useful=False,
@@ -267,7 +269,14 @@ def process(data_path):
         # print("==============")
         # print(f"{data_path=}")
         # print(root_causes[:5])
-        dump_json(filename=rp, data={0: root_causes})
+        save_data = {"0": root_causes, "inject_time": inject_time_raw}
+        # if the method self-detected the anomaly split point, record its timestamp
+        if "split_index" in out and "time" in data.columns:
+            sr = out["split_index"]
+            if 0 <= sr < len(data):
+                save_data["detected_time"] = int(data["time"].iloc[sr])
+            save_data["split_source"] = out.get("split_source")
+        dump_json(filename=rp, data=save_data)
     except Exception as e:
         raise e
         print(f"{args.method=} failed on {data_path=}")
@@ -334,6 +343,8 @@ for service in services:
                 continue  # ignore
 
             for i, ranks in data.items():
+                if not str(i).isdigit():
+                    continue  # skip metadata keys (inject_time, detected_time, …)
                 s_ranks = [Node(x.split("_")[0].replace("-db", ""), "unknown") for x in ranks]
                 # remove duplication
                 old_s_ranks = s_ranks.copy()
