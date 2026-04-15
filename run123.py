@@ -17,6 +17,7 @@ RCAEval 自動化測試腳本
 
 import argparse
 import csv
+import glob
 import json
 import os
 import re
@@ -25,7 +26,19 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
+
+DATASET_DIR_MAP = {
+    "re1-ob": "data/online-boutique",
+    "re1-ss": "data/sock-shop-2",
+    "re1-tt": "data/train-ticket",
+    "re2-ob": "data/RE2/RE2-OB",
+    "re2-ss": "data/RE2/RE2-SS",
+    "re2-tt": "data/RE2/RE2-TT",
+    "re3-ob": "data/RE3/RE3-OB",
+    "re3-ss": "data/RE3/RE3-SS",
+    "re3-tt": "data/RE3/RE3-TT",
+}
 
 RE1_DATASETS = ["re1-ob", "re1-ss", "re1-tt"]
 RE2_DATASETS = ["re2-ob", "re2-ss", "re2-tt"]
@@ -37,7 +50,7 @@ DEFAULT_METHODS = [
     "pc_pagerank", "fci_pagerank", "ges_pagerank",
     "lingam_pagerank", "granger_pagerank", "ntlr_pagerank",
     "circa", "microcause", "cloudranger", "easyrca",
-    "microrank", "tracerca",
+    "microrank", "tracerca", "crfd",
 ]
 
 # 保存每個 (method, dataset) 的詳細結果（用於後續 print）
@@ -237,6 +250,217 @@ def print_per_dataset_results(records, methods, datasets):
     print("\n" + "=" * 60)
 
 
+def collect_inject_times(datasets):
+    """
+    掃描各資料集目錄下所有 inject_time.txt，回傳:
+    { dataset: [ {service, fault, case, timestamp, datetime_str}, ... ] }
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    result = {}
+    for ds in datasets:
+        data_dir = DATASET_DIR_MAP.get(ds)
+        if not data_dir:
+            continue
+        abs_dir = os.path.join(root, data_dir)
+        if not os.path.isdir(abs_dir):
+            continue
+        entries = []
+        for path in sorted(glob.glob(
+                os.path.join(abs_dir, "*", "*", "inject_time.txt"))):
+            try:
+                with open(path) as f:
+                    ts = int(f.read().strip())
+                # path: abs_dir / service_fault / case / inject_time.txt
+                parts = path.replace(abs_dir + os.sep, "").split(os.sep)
+                sf = parts[0]          # e.g. "adservice_cpu"
+                case = parts[1]        # e.g. "1"
+                idx = sf.rfind("_")
+                service = sf[:idx] if idx != -1 else sf
+                fault   = sf[idx+1:].upper() if idx != -1 else "?"
+                dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                entries.append({
+                    "service": service, "fault": fault,
+                    "case": case, "timestamp": ts, "datetime": dt_str,
+                })
+            except Exception:
+                continue
+        if entries:
+            result[ds] = entries
+    return result
+
+
+def print_inject_times(datasets):
+    """印出各資料集所有 case 的異常注入時間。"""
+    data = collect_inject_times(datasets)
+    if not data:
+        return
+
+    print("\n" + "=" * 60)
+    print("各 Case 異常注入時間 (inject_time)")
+    for ds in datasets:
+        entries = data.get(ds)
+        if not entries:
+            continue
+        print(f"\n{'━'*60}")
+        print(f"  資料集: {ds}")
+        print(f"  {'服務':<30} {'故障':<8} {'Case':<6} {'注入時間'}")
+        print(f"  {'-'*30} {'-'*8} {'-'*6} {'-'*19}")
+        for e in entries:
+            print(f"  {e['service']:<30} {e['fault']:<8} {e['case']:<6} {e['datetime']}")
+    print("=" * 60)
+
+
+def compare_anomaly_detection(methods, datasets):
+    """
+    比對各方法自行偵測的異常時間 vs 資料集的真實 inject_time。
+    只顯示結果 JSON 中含有 detected_time 與 inject_time 的 case（即方法自行偵測者）。
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    rows = []
+
+    for method in methods:
+        for dataset in datasets:
+            rdir = result_dir_for(method, dataset)
+            if not os.path.isdir(rdir):
+                continue
+            for jpath in sorted(glob.glob(os.path.join(rdir, "*.json"))):
+                try:
+                    with open(jpath, encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                if "detected_time" not in d or "inject_time" not in d:
+                    continue
+                detected = d["detected_time"]
+                inject   = d["inject_time"]
+                if detected is None:
+                    continue
+                err_sec = detected - inject
+                fname = os.path.basename(jpath).replace(".json", "")
+                parts = fname.split("_")
+                case  = parts[-1] if parts else "?"
+                fault = parts[-2].upper() if len(parts) >= 2 else "?"
+                svc   = "_".join(parts[:-2]) if len(parts) >= 3 else fname
+                rows.append({
+                    "method": method, "dataset": dataset,
+                    "service": svc, "fault": fault, "case": case,
+                    "inject_time": inject, "detected_time": detected,
+                    "error_sec": err_sec,
+                    "split_source": d.get("split_source", "?"),
+                })
+
+    if not rows:
+        return
+
+    def _stats(errs_signed):
+        """回傳 (count, mean_abs, median_abs, max_abs, p90_abs) 或 None。"""
+        if not errs_signed:
+            return None
+        abs_e = [abs(e) for e in errs_signed]
+        abs_e_sorted = sorted(abs_e)
+        n = len(abs_e_sorted)
+        p90 = abs_e_sorted[int(n * 0.9)] if n >= 2 else abs_e_sorted[-1]
+        return {
+            "n":      n,
+            "mean":   sum(abs_e) / n,
+            "median": abs_e_sorted[n // 2],
+            "max":    abs_e_sorted[-1],
+            "p90":    p90,
+        }
+
+    def _print_stats_block(label, errs_signed, indent="    "):
+        st = _stats(errs_signed)
+        if st is None:
+            return
+        print(f"{indent}{label}  n={st['n']}")
+        print(f"{indent}  平均絕對誤差={st['mean']:.1f}s  "
+              f"中位數={st['median']:.0f}s  "
+              f"P90={st['p90']:.0f}s  "
+              f"最大={st['max']:.0f}s")
+
+    print("\n" + "=" * 70)
+    print("異常時間偵測比對（detected_time vs inject_time）")
+    print(f"  共 {len(rows)} 個 case 有自行偵測結果")
+    print("=" * 70)
+
+    # ── 依 dataset × method 分組，逐 case 列表 ────────────────────────────
+    seen_datasets = list(dict.fromkeys(r["dataset"] for r in rows))
+    for ds in seen_datasets:
+        ds_rows = [r for r in rows if r["dataset"] == ds]
+        seen_methods = list(dict.fromkeys(r["method"] for r in ds_rows))
+        for m in seen_methods:
+            m_rows = [r for r in ds_rows if r["method"] == m]
+
+            early = [r for r in m_rows if r["error_sec"] < 0]
+            late  = [r for r in m_rows if r["error_sec"] > 0]
+            exact = [r for r in m_rows if r["error_sec"] == 0]
+
+            print(f"\n{'━'*70}")
+            print(f"  方法={m}  資料集={ds}  ({len(m_rows)} cases: "
+                  f"提早={len(early)}  延後={len(late)}  精確={len(exact)})")
+            print(f"{'━'*70}")
+
+            hdr = (f"  {'服務':<28} {'故障':<7} {'Case':<5}"
+                   f" {'inject':>8} {'detected':>8} {'誤差(s)':>8}  方向")
+            sep = "  " + "-" * 68
+            print(hdr)
+            print(sep)
+
+            for r in sorted(m_rows, key=lambda x: (x["fault"], x["service"], x["case"])):
+                inj_str = datetime.fromtimestamp(r["inject_time"]).strftime("%H:%M:%S")
+                det_str = datetime.fromtimestamp(r["detected_time"]).strftime("%H:%M:%S")
+                err     = r["error_sec"]
+                if err < 0:
+                    direction = f"↑提早 {abs(err):>4}s"
+                elif err > 0:
+                    direction = f"↓延後 {err:>4}s"
+                else:
+                    direction = "  精確    "
+                print(f"  {r['service']:<28} {r['fault']:<7} {r['case']:<5}"
+                      f" {inj_str:>8} {det_str:>8} {err:>+8}  {direction}")
+
+            # ── 分類統計 ──────────────────────────────────────────────────
+            print(sep)
+            _print_stats_block("【提早偵測】", [r["error_sec"] for r in early])
+            _print_stats_block("【延後偵測】", [r["error_sec"] for r in late])
+            _print_stats_block("【全體    】", [r["error_sec"] for r in m_rows])
+
+            # ── 依 fault type 細分 ────────────────────────────────────────
+            fault_types = sorted(set(r["fault"] for r in m_rows))
+            if len(fault_types) > 1:
+                print(f"    ── 依故障類型 ──")
+                for ft in fault_types:
+                    ft_rows = [r for r in m_rows if r["fault"] == ft]
+                    ft_early = sum(1 for r in ft_rows if r["error_sec"] < 0)
+                    ft_late  = sum(1 for r in ft_rows if r["error_sec"] > 0)
+                    ft_errs  = [abs(r["error_sec"]) for r in ft_rows]
+                    mean_e   = sum(ft_errs) / len(ft_errs) if ft_errs else 0
+                    print(f"    {ft:<8}  n={len(ft_rows)}  "
+                          f"提早={ft_early}  延後={ft_late}  "
+                          f"平均|誤差|={mean_e:.1f}s")
+
+    # ── 全體跨 dataset/method 統計 ────────────────────────────────────────
+    all_early = [r for r in rows if r["error_sec"] < 0]
+    all_late  = [r for r in rows if r["error_sec"] > 0]
+    all_abs   = [abs(r["error_sec"]) for r in rows]
+    within_30  = sum(1 for e in all_abs if e <= 30)
+    within_60  = sum(1 for e in all_abs if e <= 60)
+    within_120 = sum(1 for e in all_abs if e <= 120)
+    N = len(rows)
+
+    print(f"\n{'═'*70}")
+    print(f"  全體總計  N={N}  "
+          f"提早={len(all_early)} ({100*len(all_early)/N:.0f}%)  "
+          f"延後={len(all_late)} ({100*len(all_late)/N:.0f}%)")
+    _print_stats_block("", [r["error_sec"] for r in rows], indent="  ")
+    print(f"  誤差區間分佈：")
+    print(f"    ≤ 30s : {within_30:>4}/{N}  ({100*within_30/N:.0f}%)")
+    print(f"    ≤ 60s : {within_60:>4}/{N}  ({100*within_60/N:.0f}%)")
+    print(f"    ≤120s : {within_120:>4}/{N}  ({100*within_120/N:.0f}%)")
+    print(f"    >120s : {N-within_120:>4}/{N}  ({100*(N-within_120)/N:.0f}%)")
+    print("═" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser(description="RCAEval 自動化測試")
     parser.add_argument("--methods", nargs="+", default=None,
@@ -337,6 +561,8 @@ def main():
 
     print_table(records)
     print_per_dataset_results(records, methods, datasets)
+    print_inject_times(datasets)
+    compare_anomaly_detection(methods, datasets)
     save_csv(records, args.output)
     save_json(records, args.output)
 
