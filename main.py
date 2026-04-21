@@ -68,6 +68,8 @@ if is_py310():
         tracerca,
         banzhaf,
         gabanzhaf,
+        gabanzhaf_nogat,
+        gabanzhaf_ssl,
     )
 
 elif is_py312():
