@@ -2,7 +2,6 @@ import warnings
 import numpy as np
 import pandas as pd
 import networkx as nx
-import ruptures as rpt
 import torch
 import torch.nn.functional as F
 from sklearn.cluster import AgglomerativeClustering
@@ -60,10 +59,9 @@ def _redundancy_filtering(df, max_features=150):
 
 
 def _approximate_banzhaf_ga(normal_arr, anomal_arr, n_generations=15,
-                             pop_size=40, ema_alpha=0.2, rng=None):
+                            pop_size=40, ema_alpha=0.2, rng=None):
     """
-    GA-based Banzhaf approximation using IQR z-scores as the coverage signal.
-    Returns per-metric Banzhaf weights (1-D array, length = n_metrics).
+    GA-Banzhaf with MMR Fitness, Guided Mutation (delayed), and Linear Penalty.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -75,20 +73,47 @@ def _approximate_banzhaf_ga(normal_arr, anomal_arr, n_generations=15,
     anom_scores = z_an.max(axis=0)
     denom = max(1., float(anom_scores.sum()))
 
+    anom_df = pd.DataFrame(anomal_arr)
+    corr_matrix = anom_df.corr().abs().fillna(0).values
+
     num_metrics = normal_arr.shape[1]
     ema_banzhaf = np.zeros(num_metrics)
 
-    for _ in range(n_generations):
-        pop = (rng.random((pop_size, num_metrics)) < 0.5).astype(float)
+    # GA 參數
+    p_min, p_max = 0.1, 0.8
+    alpha_mmr = 0.15        # 降低冗餘懲罰，避免過度過濾同服務相關 metrics
+    warmup_gens = n_generations // 3  # 前 1/3 代使用均勻取樣，避免早期偏差固化
+
+    for gen in range(n_generations):
+        # ── Guided Mutation（warmup 期後才啟用）──
+        if gen < warmup_gens or ema_banzhaf.max() == 0:
+            # warmup 期間用均勻 p=0.5，保持充分探索
+            p_selection = np.full(num_metrics, 0.5)
+        else:
+            b_norm = (ema_banzhaf - ema_banzhaf.min()) / (ema_banzhaf.max() - ema_banzhaf.min() + 1e-9)
+            p_selection = p_min + (p_max - p_min) * b_norm
+
+        pop = (rng.random((pop_size, num_metrics)) < p_selection).astype(float)
         fitness = np.zeros(pop_size)
+
+        # 線性增長的稀疏懲罰，最大值限制在 0.1
+        dynamic_penalty_weight = min(0.1, 0.05 * (1.0 + gen / n_generations))
 
         for i in range(pop_size):
             sel = np.where(pop[i] == 1)[0]
             if len(sel) == 0:
                 continue
+
             coverage = float(anom_scores[sel].sum()) / denom
-            penalty = len(sel) * 0.1 / max(1, num_metrics)
-            fitness[i] = coverage - penalty
+
+            redundancy = 0.0
+            if len(sel) > 1:
+                sub_corr = corr_matrix[np.ix_(sel, sel)]
+                redundancy = (np.sum(sub_corr) - len(sel)) / (len(sel) * (len(sel) - 1))
+
+            sparsity_penalty = len(sel) * dynamic_penalty_weight / max(1, num_metrics)
+
+            fitness[i] = coverage - (alpha_mmr * redundancy) - sparsity_penalty
 
         current = np.zeros(num_metrics)
         for m in range(num_metrics):
@@ -123,17 +148,15 @@ def _build_topology(svc_names, svc_series, corr_thr=0.30):
     return edges
 
 
-def _gat_ranking(node_list, svc_banzhaf, topology_edges):
-    """GAT re-ranking using Banzhaf weights as node features."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _build_pyg_data(node_list, svc_banzhaf, topology_edges, device):
+    """Build shared PyG Data object and node_banzhaf list."""
     G = nx.DiGraph()
     G.add_nodes_from(node_list)
     G.add_edges_from([(u, v) for u, v in topology_edges
                       if u in node_list and v in node_list])
     node_idx = {n: i for i, n in enumerate(node_list)}
 
-    node_features = []
-    node_banzhaf = []
+    node_features, node_banzhaf = [], []
     for nd in node_list:
         bw = float(svc_banzhaf.get(nd, 0.))
         node_features.append([bw, bw ** 2, float(bw > 0), 1.])
@@ -148,31 +171,59 @@ def _gat_ranking(node_list, svc_banzhaf, topology_edges):
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long).to(device)
 
-    data = Data(x=x, edge_index=edge_index)
+    return Data(x=x, edge_index=edge_index), node_banzhaf
+
+
+def _gat_ranking(node_list, svc_banzhaf, topology_edges):
+    """Random-init GAT re-ranking (no training)."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data, node_banzhaf = _build_pyg_data(node_list, svc_banzhaf, topology_edges, device)
     model = BanzhafAwareGAT(num_node_features=4).to(device)
     model.eval()
     with torch.no_grad():
         scores = model(data, node_banzhaf).cpu().numpy().flatten()
+    return {node_list[i]: float(scores[i]) for i in range(len(node_list))}
 
+
+def _gat_ranking_ssl(node_list, svc_banzhaf, topology_edges, n_epochs=50, lr=0.01):
+    """
+    Self-supervised GAT: train to reconstruct normalised Banzhaf scores
+    as pseudo-labels (transductive, on the current graph), then re-rank.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data, node_banzhaf = _build_pyg_data(node_list, svc_banzhaf, topology_edges, device)
+
+    # Pseudo-labels: min-max normalised Banzhaf scores
+    bz = torch.tensor(node_banzhaf, dtype=torch.float32).to(device)
+    bz_min, bz_max = bz.min(), bz.max()
+    labels = (bz - bz_min) / (bz_max - bz_min + 1e-9)
+
+    model = BanzhafAwareGAT(num_node_features=4).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    model.train()
+    for _ in range(n_epochs):
+        optimizer.zero_grad()
+        out = model(data, node_banzhaf).squeeze()
+        loss = F.mse_loss(out, labels)
+        loss.backward()
+        optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        scores = model(data, node_banzhaf).cpu().numpy().flatten()
     return {node_list[i]: float(scores[i]) for i in range(len(node_list))}
 
 
 # ==========================================
-# RCAEval entry point
+# Shared core pipeline (steps 1–5)
 # ==========================================
 
-def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
-              sli=None, anomalies=None, **kwargs):
+def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     """
-    GA-Banzhaf with GAT re-ranking for root cause analysis.
+    Shared pipeline: window split → preprocess → dim-reduction → GA-Banzhaf → topology.
 
-    Signature compatible with RCAEval evaluation framework.
-
-    Returns
-    -------
-    dict
-        'ranks'      : list of metric/column names ordered by RCA score
-        'node_names' : list of all column names (same order as processed data)
+    Returns a dict with all intermediate results needed by the entry points.
     """
     n_generations = int(kwargs.get("n_generations", 15))
     pop_size      = int(kwargs.get("pop_size", 40))
@@ -193,7 +244,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
         normal_raw = data.head(sr)
         anomal_raw = data.tail(len(data) - sr)
 
-    # ── 2. Preprocess (jointly to keep consistent columns) ───────────────────
+    # ── 2. Preprocess jointly ────────────────────────────────────────────────
     dk = kwargs.get("dk_select_useful", False)
     n_rows = len(normal_raw)
     full_proc = preprocess(
@@ -210,8 +261,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
     normal_df = normal_df.tail(ml).reset_index(drop=True)
     anomal_df = anomal_df.head(ml).reset_index(drop=True)
 
-    all_cols   = list(normal_df.columns)
-    node_names = all_cols
+    all_cols = list(normal_df.columns)
 
     # ── 3. Dimensionality reduction ──────────────────────────────────────────
     full_df = pd.concat([normal_df, anomal_df], ignore_index=True)
@@ -238,7 +288,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
         svc = _parse_svc(col)
         svc_banzhaf[svc] = svc_banzhaf.get(svc, 0.) + bw
 
-    # ── 5. Build topology from temporal correlations ──────────────────────────
+    # ── 5. Build topology ────────────────────────────────────────────────────
     svc_names = sorted(set(_parse_svc(c) for c in all_cols))
     svc_series = {}
     for svc in svc_names:
@@ -248,13 +298,60 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
 
     topology_edges = _build_topology(svc_names, svc_series)
 
-    # ── 6. GAT re-ranking ────────────────────────────────────────────────────
-    svc_scores = _gat_ranking(svc_names, svc_banzhaf, topology_edges)
+    return dict(
+        all_cols=all_cols,
+        metric_banzhaf=metric_banzhaf,
+        svc_banzhaf=svc_banzhaf,
+        svc_names=svc_names,
+        topology_edges=topology_edges,
+    )
 
-    # ── 7. Rank columns ───────────────────────────────────────────────────────
+
+def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf):
     def _col_score(col):
         svc = _parse_svc(col)
         return float(svc_scores.get(svc, 0.)) * 0.6 + float(metric_banzhaf.get(col, 0.)) * 0.4
+    return sorted(all_cols, key=_col_score, reverse=True)
 
-    ranks = sorted(all_cols, key=_col_score, reverse=True)
-    return {"ranks": ranks, "node_names": node_names}
+
+# ==========================================
+# RCAEval entry points
+# ==========================================
+
+def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
+              sli=None, anomalies=None, **kwargs):
+    """GA-Banzhaf + GAT re-ranking."""
+    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    svc_scores = _gat_ranking(
+        core["svc_names"], core["svc_banzhaf"], core["topology_edges"]
+    )
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], svc_scores, core["metric_banzhaf"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
+
+
+def gabanzhaf_nogat(data, inject_time=None, dataset=None, num_loop=None,
+                    sli=None, anomalies=None, **kwargs):
+    """GA-Banzhaf only — no GAT re-ranking (ablation baseline)."""
+    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], core["svc_banzhaf"], core["metric_banzhaf"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
+
+
+def gabanzhaf_ssl(data, inject_time=None, dataset=None, num_loop=None,
+                  sli=None, anomalies=None, **kwargs):
+    """GA-Banzhaf + self-supervised GAT (Banzhaf scores as pseudo-labels)."""
+    n_epochs = int(kwargs.get("ssl_epochs", 50))
+    lr       = float(kwargs.get("ssl_lr", 0.01))
+    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    svc_scores = _gat_ranking_ssl(
+        core["svc_names"], core["svc_banzhaf"], core["topology_edges"],
+        n_epochs=n_epochs, lr=lr,
+    )
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], svc_scores, core["metric_banzhaf"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
