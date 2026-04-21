@@ -58,6 +58,7 @@ if is_py310() or is_py312():
     from .mscred import mscred
     from .tracerca import tracerca
     from .banzhaf import local_banzhaf as banzhaf
+    from .gabanzhaf import gabanzhaf
 else:
     from .rcd import rcd
     from .mmrcd import mmrcd

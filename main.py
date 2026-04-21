@@ -67,6 +67,7 @@ if is_py310():
         run,
         tracerca,
         banzhaf,
+        gabanzhaf,
     )
 
 elif is_py312():
