@@ -186,7 +186,7 @@ def _approximate_banzhaf_ga(normal_arr, anomal_arr, n_generations=15,
     return ema_banzhaf
 
 
-def _build_topology(svc_names, svc_series, corr_thr=0.50):
+def _build_topology(svc_names, svc_series, corr_thr=0.30):
     """Build directed topology from lag-1 cross-correlations between services."""
     edges = []
     svcs = list(svc_names)
@@ -465,13 +465,18 @@ def _upstream_damping(svc_scores, topology_edges, beta=0.5):
     return damped
 
 
-def _reverse_pagerank(svc_scores, topology_edges, alpha=0.85, max_iter=200):
+def _reverse_pagerank(svc_scores, topology_edges, alpha=0.85, max_iter=200,
+                      svc_anom=None, anom_weight=0.3):
     """方案二：Personalized PageRank on the reversed causal graph.
 
     Root causes tend to sit upstream.  Running PPR on the *reversed*
     graph propagates probability mass toward nodes that can explain many
-    downstream anomalies.  The personalization vector is the normalised
-    Banzhaf / anomaly score so high-signal services seed the walk.
+    downstream anomalies.
+
+    Personalization vector combines Banzhaf scores and (optionally) anomaly
+    scores so that high-signal services seed the random walk more strongly:
+        p(s) ∝ (1 - anom_weight) × banzhaf_norm(s)
+               + anom_weight      × anom_norm(s)
     """
     G = nx.DiGraph()
     G.add_nodes_from(svc_scores.keys())
@@ -479,8 +484,22 @@ def _reverse_pagerank(svc_scores, topology_edges, alpha=0.85, max_iter=200):
         if u in svc_scores and v in svc_scores:
             G.add_edge(v, u)          # reversed edge: downstream → upstream
 
-    total = sum(svc_scores.values()) or 1.
-    personalization = {s: sc / total for s, sc in svc_scores.items()}
+    def _norm(d):
+        lo, hi = min(d.values(), default=0.), max(d.values(), default=1.)
+        span = hi - lo if hi > lo else 1.
+        return {k: (v - lo) / span for k, v in d.items()}
+
+    nb = _norm(svc_scores)
+    if svc_anom:
+        na = _norm(svc_anom)
+        combined = {s: (1. - anom_weight) * nb.get(s, 0.)
+                       + anom_weight       * na.get(s, 0.)
+                    for s in svc_scores}
+    else:
+        combined = nb
+
+    total = sum(combined.values()) or 1.
+    personalization = {s: v / total for s, v in combined.items()}
 
     if G.number_of_edges() == 0:
         return dict(svc_scores)       # no topology → fall back to raw scores
@@ -528,12 +547,15 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
 
     After computing per-service Banzhaf scores, run PPR on the reversed
     causal topology so that upstream root causes receive higher probability
-    mass than downstream victims.
+    mass than downstream victims.  The personalization vector blends
+    Banzhaf scores (70%) with anomaly scores (30%) for richer seeding.
     """
-    alpha = float(kwargs.get("pr_alpha", 0.85))
+    alpha       = float(kwargs.get("pr_alpha", 0.85))
+    anom_weight = float(kwargs.get("pr_anom_weight", 0.3))
     core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
     svc_scores = _reverse_pagerank(
-        core["svc_banzhaf"], core["topology_edges"], alpha=alpha
+        core["svc_banzhaf"], core["topology_edges"], alpha=alpha,
+        svc_anom=core["svc_anom"], anom_weight=anom_weight,
     )
     ranks = _rank_from_svc_scores(
         core["all_cols"], svc_scores, core["metric_banzhaf"],
@@ -591,16 +613,18 @@ def gabanzhaf_upstream(data, inject_time=None, dataset=None, num_loop=None,
 
 def gabanzhaf_pagerank(data, inject_time=None, dataset=None, num_loop=None,
                        sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + Reversed Personalized PageRank (方案二).
+    """GA-Banzhaf + Reversed Personalized PageRank (方案二, ablation).
 
     Run Personalized PageRank on the reversed causal graph, seeded by
     Banzhaf scores.  Nodes that can causally explain many downstream
     anomalies receive high probability mass.
     """
-    alpha = float(kwargs.get("pr_alpha", 0.85))
+    alpha       = float(kwargs.get("pr_alpha", 0.85))
+    anom_weight = float(kwargs.get("pr_anom_weight", 0.3))
     core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
     svc_scores = _reverse_pagerank(
-        core["svc_banzhaf"], core["topology_edges"], alpha=alpha
+        core["svc_banzhaf"], core["topology_edges"], alpha=alpha,
+        svc_anom=core["svc_anom"], anom_weight=anom_weight,
     )
     ranks = _rank_from_svc_scores(
         core["all_cols"], svc_scores, core["metric_banzhaf"],
