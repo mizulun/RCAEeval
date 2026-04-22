@@ -60,7 +60,7 @@ if is_py310() or is_py312():
     from .banzhaf import local_banzhaf as banzhaf
     from .gabanzhaf import (gabanzhaf, gabanzhaf_nogat, gabanzhaf_ssl,
                             gabanzhaf_upstream, gabanzhaf_pagerank, gabanzhaf_topo,
-                            gabanzhaf_prefilt)
+                            gabanzhaf_prefilt, gabanzhaf_normtopo)
 else:
     from .rcd import rcd
     from .mmrcd import mmrcd
