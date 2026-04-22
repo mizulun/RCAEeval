@@ -524,11 +524,20 @@ def _topo_penalty(svc_scores, topology_edges, gamma=0.5):
 
 def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf with anomaly-score-fused ranking (no random-init GAT)."""
-    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    """GA-Banzhaf + Reversed Personalized PageRank (main method).
+
+    After computing per-service Banzhaf scores, run PPR on the reversed
+    causal topology so that upstream root causes receive higher probability
+    mass than downstream victims.
+    """
+    alpha = float(kwargs.get("pr_alpha", 0.85))
+    core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    svc_scores = _reverse_pagerank(
+        core["svc_banzhaf"], core["topology_edges"], alpha=alpha
+    )
     ranks = _rank_from_svc_scores(
-        core["all_cols"], core["svc_banzhaf"],
-        core["metric_banzhaf"], svc_anom=core["svc_anom"]
+        core["all_cols"], svc_scores, core["metric_banzhaf"],
+        svc_anom=core["svc_anom"]
     )
     return {"ranks": ranks, "node_names": core["all_cols"]}
 
