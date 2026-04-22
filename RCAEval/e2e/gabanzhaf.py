@@ -43,25 +43,71 @@ def _parse_svc(col):
     return parts[0] if len(parts) == 2 else col
 
 
-def _redundancy_filtering(df, max_features=150):
-    """Agglomerative clustering to reduce metric dimensionality."""
+def _redundancy_filtering(df, max_features=150, anom_scores=None):
+    """Two-stage dimensionality reduction.
+
+    Stage 1 — Pre-filter by anomaly score: if n_cols > 2×max_features,
+    keep only the top-2×max_features most anomalous columns.  This
+    guarantees the highest-signal metrics survive before clustering.
+
+    Stage 2 — Agglomerative clustering to max_features: each cluster's
+    representative is the column with the highest anomaly score.
+    """
     df = df.dropna(axis=1)
     if df.shape[1] <= max_features:
         return df
+
+    # Stage 1: anomaly-score pre-filter
+    if anom_scores is not None and df.shape[1] > max_features * 2:
+        top_k = max_features * 2
+        ranked = sorted(df.columns, key=lambda c: anom_scores.get(c, 0.), reverse=True)
+        df = df[ranked[:top_k]]
+
+    # Stage 2: agglomerative clustering
     corr = df.corr().abs().fillna(0)
     dist = (1 - corr).clip(0., 1.)
     labels = AgglomerativeClustering(
         n_clusters=max_features, metric="precomputed", linkage="complete"
     ).fit_predict(dist.values)
-    selected = [df.columns[labels == k][0] for k in np.unique(labels)]
+    if anom_scores is not None:
+        selected = [
+            max(df.columns[labels == k], key=lambda c: anom_scores.get(c, 0.))
+            for k in np.unique(labels)
+        ]
+    else:
+        selected = [df.columns[labels == k][0] for k in np.unique(labels)]
     return df[selected]
 
+
+
+def _eval_fitness(pop, anom_scores, denom, corr_matrix, num_metrics,
+                  alpha_mmr, penalty_weight):
+    """Evaluate fitness for all individuals in the population."""
+    fitness = np.zeros(len(pop))
+    for i, ind in enumerate(pop):
+        sel = np.where(ind == 1)[0]
+        if len(sel) == 0:
+            continue
+        coverage = float(anom_scores[sel].sum()) / denom
+        redundancy = 0.0
+        if len(sel) > 1:
+            sub_corr = corr_matrix[np.ix_(sel, sel)]
+            redundancy = (np.sum(sub_corr) - len(sel)) / (len(sel) * (len(sel) - 1))
+        sparsity_penalty = len(sel) * penalty_weight / max(1, num_metrics)
+        fitness[i] = coverage - alpha_mmr * redundancy - sparsity_penalty
+    return fitness
+
+
+def _tournament_select(pop, fitness, rng, k=3):
+    """Tournament selection: pick best among k random individuals."""
+    idx = rng.choice(len(pop), size=k, replace=False)
+    return pop[idx[np.argmax(fitness[idx])]].copy()
 
 
 def _approximate_banzhaf_ga(normal_arr, anomal_arr, n_generations=15,
                             pop_size=40, ema_alpha=0.2, rng=None):
     """
-    GA-Banzhaf with MMR Fitness, Guided Mutation (delayed), and Linear Penalty.
+    GA-Banzhaf with Elitism, Tournament Selection, Crossover, and Guided Mutation.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -79,55 +125,68 @@ def _approximate_banzhaf_ga(normal_arr, anomal_arr, n_generations=15,
     num_metrics = normal_arr.shape[1]
     ema_banzhaf = np.zeros(num_metrics)
 
-    # GA 參數
-    p_min, p_max = 0.1, 0.8
-    alpha_mmr = 0.15        # 降低冗餘懲罰，避免過度過濾同服務相關 metrics
-    warmup_gens = n_generations // 3  # 前 1/3 代使用均勻取樣，避免早期偏差固化
+    alpha_mmr   = 0.15
+    elite_k     = max(2, pop_size // 10)   # 精英數量：約 10%
+    p_mut_base  = 1.0 / max(1, num_metrics) # 每個 bit 的基礎突變率
+    warmup_gens = n_generations // 3
+
+    # 初始族群：均勻隨機
+    pop = (rng.random((pop_size, num_metrics)) < 0.5).astype(float)
 
     for gen in range(n_generations):
-        # ── Guided Mutation（warmup 期後才啟用）──
-        if gen < warmup_gens or ema_banzhaf.max() == 0:
-            # warmup 期間用均勻 p=0.5，保持充分探索
-            p_selection = np.full(num_metrics, 0.5)
-        else:
-            b_norm = (ema_banzhaf - ema_banzhaf.min()) / (ema_banzhaf.max() - ema_banzhaf.min() + 1e-9)
-            p_selection = p_min + (p_max - p_min) * b_norm
+        # 線性增長的稀疏懲罰，上限 0.1
+        penalty_weight = min(0.1, 0.05 * (1.0 + gen / n_generations))
 
-        pop = (rng.random((pop_size, num_metrics)) < p_selection).astype(float)
-        fitness = np.zeros(pop_size)
+        fitness = _eval_fitness(pop, anom_scores, denom, corr_matrix,
+                                num_metrics, alpha_mmr, penalty_weight)
 
-        # 線性增長的稀疏懲罰，最大值限制在 0.1
-        dynamic_penalty_weight = min(0.1, 0.05 * (1.0 + gen / n_generations))
-
-        for i in range(pop_size):
-            sel = np.where(pop[i] == 1)[0]
-            if len(sel) == 0:
-                continue
-
-            coverage = float(anom_scores[sel].sum()) / denom
-
-            redundancy = 0.0
-            if len(sel) > 1:
-                sub_corr = corr_matrix[np.ix_(sel, sel)]
-                redundancy = (np.sum(sub_corr) - len(sel)) / (len(sel) * (len(sel) - 1))
-
-            sparsity_penalty = len(sel) * dynamic_penalty_weight / max(1, num_metrics)
-
-            fitness[i] = coverage - (alpha_mmr * redundancy) - sparsity_penalty
-
+        # ── Banzhaf 邊際貢獻估計 ──
         current = np.zeros(num_metrics)
         for m in range(num_metrics):
-            w = pop[:, m] == 1
+            w  = pop[:, m] == 1
             wo = ~w
             if w.sum() > 0 and wo.sum() > 0:
                 current[m] = max(0., float(fitness[w].mean()) - float(fitness[wo].mean()))
-
         ema_banzhaf = ema_alpha * current + (1 - ema_alpha) * ema_banzhaf
+
+        # ── 精英保留 ──
+        elite_idx = np.argsort(fitness)[-elite_k:]
+        next_pop  = list(pop[elite_idx])
+
+        # ── Guided Mutation 參數（warmup 後啟用）──
+        if gen >= warmup_gens and ema_banzhaf.max() > 0:
+            b_norm = ((ema_banzhaf - ema_banzhaf.min()) /
+                      (ema_banzhaf.max() - ema_banzhaf.min() + 1e-9))
+            # 低 Banzhaf 的 bit：較高翻轉率；高 Banzhaf 的 bit：保留
+            p_flip = p_mut_base * (1.0 + (1.0 - b_norm))
+        else:
+            p_flip = np.full(num_metrics, p_mut_base * 2)
+
+        # ── Tournament Selection + Uniform Crossover + Mutation ──
+        while len(next_pop) < pop_size:
+            p1 = _tournament_select(pop, fitness, rng)
+            p2 = _tournament_select(pop, fitness, rng)
+
+            # Uniform crossover
+            mask  = rng.random(num_metrics) < 0.5
+            child = np.where(mask, p1, p2).copy()
+
+            # Bit-flip mutation
+            flip  = rng.random(num_metrics) < p_flip
+            child[flip] = 1.0 - child[flip]
+
+            # 確保至少有一個特徵被選中
+            if child.sum() == 0:
+                child[rng.integers(num_metrics)] = 1.0
+
+            next_pop.append(child)
+
+        pop = np.array(next_pop[:pop_size])
 
     return ema_banzhaf
 
 
-def _build_topology(svc_names, svc_series, corr_thr=0.30):
+def _build_topology(svc_names, svc_series, corr_thr=0.50):
     """Build directed topology from lag-1 cross-correlations between services."""
     edges = []
     svcs = list(svc_names)
@@ -266,9 +325,38 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     # ── 3. Dimensionality reduction ──────────────────────────────────────────
     full_df = pd.concat([normal_df, anomal_df], ignore_index=True)
     no_time = full_df.drop(columns=["time"], errors="ignore")
-    reduced  = _redundancy_filtering(no_time, max_features=max_features)
-    red_cols = list(reduced.columns)
 
+    # Pre-compute per-column anomaly scores for anomaly-aware cluster selection.
+    # Use robust z-score on the anomaly window only.
+    _nm = normal_df.drop(columns=["time"], errors="ignore").reindex(columns=no_time.columns).values.astype(float)
+    _am = anomal_df.drop(columns=["time"], errors="ignore").reindex(columns=no_time.columns).values.astype(float)
+    _med = np.nanmedian(_nm, axis=0)
+    _iqr = np.nanpercentile(_nm, 75, axis=0) - np.nanpercentile(_nm, 25, axis=0)
+    _sc  = np.where(_iqr > 0, _iqr, 1.)
+    _pre_anom = dict(zip(
+        no_time.columns,
+        np.clip(np.abs((_am - _med) / _sc), 0., 100.).max(axis=0)
+    ))
+
+    reduced  = _redundancy_filtering(no_time, max_features=max_features, anom_scores=_pre_anom)
+
+    # ── Force service coverage ───────────────────────────────────────────────
+    # For any service not represented after filtering, add its single most
+    # anomalous metric so GA can still evaluate it.
+    covered_svcs = set(_parse_svc(c) for c in reduced.columns)
+    svc_to_cols: dict = {}
+    for c in no_time.columns:
+        svc_to_cols.setdefault(_parse_svc(c), []).append(c)
+
+    extra_cols = []
+    for svc, cols in svc_to_cols.items():
+        if svc not in covered_svcs:
+            best = max(cols, key=lambda c: _pre_anom.get(c, 0.))
+            extra_cols.append(best)
+    if extra_cols:
+        reduced = pd.concat([reduced, no_time[extra_cols]], axis=1)
+
+    red_cols = list(reduced.columns)
     red_normal = reduced.values[:ml].astype(float)
     red_anomal = reduced.values[ml:].astype(float)
 
@@ -283,10 +371,19 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     metric_banzhaf = {red_cols[i]: float(banzhaf_w[i]) for i in range(len(red_cols))}
 
+    # svc_banzhaf: max over per-service metric Banzhaf values
     svc_banzhaf: dict = {}
     for col, bw in metric_banzhaf.items():
         svc = _parse_svc(col)
-        svc_banzhaf[svc] = svc_banzhaf.get(svc, 0.) + bw
+        svc_banzhaf[svc] = max(svc_banzhaf.get(svc, 0.), bw)
+
+    # svc_anom: max anomaly score per service from ALL original columns
+    # (pre-filtering), so every service is covered even if it has no
+    # post-filtering representative.
+    svc_anom: dict = {}
+    for col, score in _pre_anom.items():
+        svc = _parse_svc(col)
+        svc_anom[svc] = max(svc_anom.get(svc, 0.), score)
 
     # ── 5. Build topology ────────────────────────────────────────────────────
     svc_names = sorted(set(_parse_svc(c) for c in all_cols))
@@ -302,15 +399,42 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         all_cols=all_cols,
         metric_banzhaf=metric_banzhaf,
         svc_banzhaf=svc_banzhaf,
+        svc_anom=svc_anom,
         svc_names=svc_names,
         topology_edges=topology_edges,
     )
 
 
-def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf):
+def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf, svc_anom=None):
+    """Rank columns by combined service and metric scores.
+
+    Weights:
+      - svc_scores   : primary service-level signal  (0.5)
+      - svc_anom     : anomaly score (fallback signal) (0.3) — when provided
+      - metric_banzhaf: metric-level fine-grained signal (0.2 / 0.4)
+
+    All signals are min-max normalised before combining so no single
+    component dominates due to scale differences.
+    """
+    def _norm(d):
+        vals = list(d.values())
+        lo, hi = min(vals, default=0.), max(vals, default=1.)
+        span = hi - lo if hi > lo else 1.
+        return {k: (v - lo) / span for k, v in d.items()}
+
+    norm_svc  = _norm(svc_scores)
+    norm_mb   = _norm(metric_banzhaf)
+    norm_anom = _norm(svc_anom) if svc_anom else {}
+
     def _col_score(col):
         svc = _parse_svc(col)
-        return float(svc_scores.get(svc, 0.)) * 0.6 + float(metric_banzhaf.get(col, 0.)) * 0.4
+        bz  = norm_svc.get(svc, 0.)
+        mb  = norm_mb.get(col, 0.)
+        if norm_anom:
+            an = norm_anom.get(svc, 0.)
+            return bz * 0.5 + an * 0.3 + mb * 0.2
+        return bz * 0.6 + mb * 0.4
+
     return sorted(all_cols, key=_col_score, reverse=True)
 
 
@@ -320,13 +444,11 @@ def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf):
 
 def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + GAT re-ranking."""
+    """GA-Banzhaf with anomaly-score-fused ranking (no random-init GAT)."""
     core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
-    svc_scores = _gat_ranking(
-        core["svc_names"], core["svc_banzhaf"], core["topology_edges"]
-    )
     ranks = _rank_from_svc_scores(
-        core["all_cols"], svc_scores, core["metric_banzhaf"]
+        core["all_cols"], core["svc_banzhaf"],
+        core["metric_banzhaf"], svc_anom=core["svc_anom"]
     )
     return {"ranks": ranks, "node_names": core["all_cols"]}
 
@@ -336,7 +458,8 @@ def gabanzhaf_nogat(data, inject_time=None, dataset=None, num_loop=None,
     """GA-Banzhaf only — no GAT re-ranking (ablation baseline)."""
     core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
     ranks = _rank_from_svc_scores(
-        core["all_cols"], core["svc_banzhaf"], core["metric_banzhaf"]
+        core["all_cols"], core["svc_banzhaf"],
+        core["metric_banzhaf"], svc_anom=core["svc_anom"]
     )
     return {"ranks": ranks, "node_names": core["all_cols"]}
 
