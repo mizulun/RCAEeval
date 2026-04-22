@@ -187,24 +187,38 @@ def _approximate_banzhaf_ga(normal_arr, anomal_arr, n_generations=15,
 
 
 def _build_topology(svc_names, svc_series, corr_thr=0.30):
-    """Build directed topology from lag-1 cross-correlations between services."""
-    edges = []
-    svcs = list(svc_names)
-    for i, s1 in enumerate(svcs):
-        for j, s2 in enumerate(svcs):
-            if i == j:
-                continue
-            x1 = svc_series.get(s1)
-            x2 = svc_series.get(s2)
-            if x1 is None or x2 is None:
-                continue
-            n = min(len(x1), len(x2)) - 1
-            if n < 3:
-                continue
-            c = float(np.corrcoef(x1[:n], x2[1:n + 1])[0, 1])
-            if c > corr_thr:
-                edges.append((s1, s2))
-    return edges
+    """Build directed topology from lag-1 cross-correlations between services.
+
+    Vectorised: stacks all available service series into a matrix and
+    computes the full n_svc × n_svc lag-1 correlation matrix in one
+    numpy matmul instead of a nested Python loop.  ~100× faster for
+    systems with many services.
+    """
+    svcs = [s for s in svc_names if svc_series.get(s) is not None]
+    if len(svcs) < 2:
+        return []
+
+    T = min(len(svc_series[s]) for s in svcs) - 1
+    if T < 3:
+        return []
+
+    # Stack: (n_svcs, T)
+    X = np.array([svc_series[s][:T]   for s in svcs], dtype=float)  # current
+    Y = np.array([svc_series[s][1:T+1] for s in svcs], dtype=float)  # lag-1
+
+    # Z-score each row
+    X -= X.mean(axis=1, keepdims=True)
+    Y -= Y.mean(axis=1, keepdims=True)
+    xn = np.linalg.norm(X, axis=1, keepdims=True) + 1e-9
+    yn = np.linalg.norm(Y, axis=1, keepdims=True) + 1e-9
+    X /= xn;  Y /= yn
+
+    # Lag-1 correlation matrix: C[i,j] = corr(X[i], Y[j]) = X_i leads Y_j
+    C = X @ Y.T  # (n_svcs, n_svcs)
+    np.fill_diagonal(C, 0.)
+
+    rows, cols = np.where(C > corr_thr)
+    return [(svcs[i], svcs[j]) for i, j in zip(rows, cols)]
 
 
 def _build_pyg_data(node_list, svc_banzhaf, topology_edges, device):
@@ -421,17 +435,40 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     full_df = pd.concat([normal_df, anomal_df], ignore_index=True)
     no_time = full_df.drop(columns=["time"], errors="ignore")
 
-    # Pre-compute per-column anomaly scores for anomaly-aware cluster selection.
-    # Use robust z-score on the anomaly window only.
     _nm = normal_df.drop(columns=["time"], errors="ignore").reindex(columns=no_time.columns).values.astype(float)
     _am = anomal_df.drop(columns=["time"], errors="ignore").reindex(columns=no_time.columns).values.astype(float)
-    _med = np.nanmedian(_nm, axis=0)
-    _iqr = np.nanpercentile(_nm, 75, axis=0) - np.nanpercentile(_nm, 25, axis=0)
+
+    # Fast Stage-1 pre-score: mean ± std (O(n)) to rank columns quickly.
+    # Used only to select the top-2×max_features candidates; the expensive
+    # robust z-score (nanmedian / IQR) is then computed on that smaller set.
+    if _nm.shape[1] > max_features * 2:
+        _fast_mean = _nm.mean(axis=0)
+        _fast_std  = _nm.std(axis=0)
+        _fast_sc   = np.where(_fast_std > 0, _fast_std, 1.)
+        _fast_anom = np.abs((_am - _fast_mean) / _fast_sc).max(axis=0)
+        _top_idx   = np.argpartition(_fast_anom, -max_features * 2)[-max_features * 2:]
+        _top_cols  = no_time.columns[_top_idx]
+        _nm2 = _nm[:, _top_idx]
+        _am2 = _am[:, _top_idx]
+        _cols2 = _top_cols
+    else:
+        _nm2, _am2, _cols2 = _nm, _am, no_time.columns
+
+    # Robust z-score on the reduced column set
+    _med = np.nanmedian(_nm2, axis=0)
+    _iqr = np.nanpercentile(_nm2, 75, axis=0) - np.nanpercentile(_nm2, 25, axis=0)
     _sc  = np.where(_iqr > 0, _iqr, 1.)
-    _pre_anom = dict(zip(
-        no_time.columns,
-        np.clip(np.abs((_am - _med) / _sc), 0., 100.).max(axis=0)
-    ))
+    _pre_anom_reduced = np.clip(np.abs((_am2 - _med) / _sc), 0., 100.).max(axis=0)
+
+    # Build full _pre_anom dict: robust score for top cols, fast score for rest
+    if _nm.shape[1] > max_features * 2:
+        _pre_anom = dict(zip(no_time.columns,
+                             np.abs((_am - _nm.mean(axis=0)) /
+                                    np.where(_nm.std(axis=0) > 0, _nm.std(axis=0), 1.)).max(axis=0)))
+        for col, score in zip(_cols2, _pre_anom_reduced):
+            _pre_anom[col] = float(score)   # overwrite with robust score
+    else:
+        _pre_anom = dict(zip(_cols2, _pre_anom_reduced))
 
     reduced  = _redundancy_filtering(no_time, max_features=max_features, anom_scores=_pre_anom)
 
@@ -480,15 +517,18 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         svc = _parse_svc(col)
         svc_anom[svc] = max(svc_anom.get(svc, 0.), score)
 
-    # ── 5. Build topology ────────────────────────────────────────────────────
+    # ── 5. Build topology from combined data ─────────────────────────────────
+    # Combined (normal + anomaly) data preserves fault-propagation edges that
+    # PPR needs to trace back to the root cause.  Using only normal-period data
+    # removes these edges and hurts PPR recall.
     svc_names = sorted(set(_parse_svc(c) for c in all_cols))
-    svc_series = {}
+    svc_series_all = {}
     for svc in svc_names:
         idxs = [i for i, c in enumerate(red_cols) if _parse_svc(c) == svc]
         if idxs:
-            svc_series[svc] = reduced.values[:, idxs].max(axis=1).astype(float)
+            svc_series_all[svc] = reduced.values[:, idxs].max(axis=1).astype(float)
 
-    topology_edges = _build_topology(svc_names, svc_series)
+    topology_edges = _build_topology(svc_names, svc_series_all)
 
     return dict(
         all_cols=all_cols,
@@ -925,6 +965,36 @@ def gabanzhaf_prefilt(data, inject_time=None, dataset=None, num_loop=None,
     core = _gabanzhaf_core_prefilt(data, inject_time, dataset, anomalies, kwargs)
     svc_scores = _reverse_pagerank(
         core["svc_banzhaf"], core["topology_edges"], alpha=alpha,
+        svc_anom=core["svc_anom"], anom_weight=anom_weight,
+    )
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], svc_scores, core["metric_banzhaf"],
+        svc_anom=core["svc_anom"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
+
+
+def gabanzhaf_normtopo(data, inject_time=None, dataset=None, num_loop=None,
+                       sli=None, anomalies=None, **kwargs):
+    """Direction B ablation: GA-Banzhaf + PPR on normal-period topology only.
+
+    Uses _gabanzhaf_core_prefilt with top_k=all_services (no hard filter) so
+    the only difference from gabanzhaf is that topology is built from the
+    pre-injection window instead of combined data.
+    """
+    alpha       = float(kwargs.get("pr_alpha", 0.85))
+    anom_weight = float(kwargs.get("pr_anom_weight", 0.3))
+
+    # Run main GA pipeline for Banzhaf scores
+    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+
+    # Build normal-period topology via prefilt core with no filtering
+    kwargs2 = dict(kwargs)
+    kwargs2["prefilt_top_k"] = len(core["svc_names"])  # keep ALL services
+    core_norm = _gabanzhaf_core_prefilt(data, inject_time, dataset, anomalies, kwargs2)
+
+    svc_scores = _reverse_pagerank(
+        core["svc_banzhaf"], core_norm["topology_edges"], alpha=alpha,
         svc_anom=core["svc_anom"], anom_weight=anom_weight,
     )
     ranks = _rank_from_svc_scores(
