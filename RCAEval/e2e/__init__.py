@@ -59,8 +59,7 @@ if is_py310() or is_py312():
     from .tracerca import tracerca
     from .banzhaf import local_banzhaf as banzhaf
     from .gabanzhaf import (gabanzhaf, gabanzhaf_nogat, gabanzhaf_ssl,
-                            gabanzhaf_upstream, gabanzhaf_pagerank, gabanzhaf_topo,
-                            gabanzhaf_prefilt, gabanzhaf_normtopo)
+                            gabanzhaf_upstream, gabanzhaf_pagerank, gabanzhaf_topo)
 else:
     from .rcd import rcd
     from .mmrcd import mmrcd

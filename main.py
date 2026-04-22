@@ -73,8 +73,6 @@ if is_py310():
         gabanzhaf_upstream,
         gabanzhaf_pagerank,
         gabanzhaf_topo,
-        gabanzhaf_prefilt,
-        gabanzhaf_normtopo,
     )
 
 elif is_py312():
