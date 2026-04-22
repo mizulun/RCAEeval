@@ -439,6 +439,86 @@ def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf, svc_anom=None):
 
 
 # ==========================================
+# Causal-topology adjustments (Steps A/B/C)
+# ==========================================
+
+def _upstream_damping(svc_scores, topology_edges, beta=0.5):
+    """方案一：Upstream Damping.
+
+    Dampen a service's score proportionally to how much of the total
+    anomaly signal sits in its direct predecessors.  If A→B and A is
+    highly scored, B's score is reduced because B's anomaly is likely
+    *caused* by A rather than being a root cause itself.
+    """
+    total = sum(svc_scores.values()) or 1.
+    # build predecessor map
+    predecessors: dict = {s: [] for s in svc_scores}
+    for u, v in topology_edges:
+        if u in svc_scores and v in predecessors:
+            predecessors[v].append(u)
+
+    damped = {}
+    for svc, score in svc_scores.items():
+        upstream_sum = sum(svc_scores.get(p, 0.) for p in predecessors[svc])
+        ratio = upstream_sum / total          # how much upstream explains
+        damped[svc] = score * (1. - beta * ratio)
+    return damped
+
+
+def _reverse_pagerank(svc_scores, topology_edges, alpha=0.85, max_iter=200):
+    """方案二：Personalized PageRank on the reversed causal graph.
+
+    Root causes tend to sit upstream.  Running PPR on the *reversed*
+    graph propagates probability mass toward nodes that can explain many
+    downstream anomalies.  The personalization vector is the normalised
+    Banzhaf / anomaly score so high-signal services seed the walk.
+    """
+    G = nx.DiGraph()
+    G.add_nodes_from(svc_scores.keys())
+    for u, v in topology_edges:
+        if u in svc_scores and v in svc_scores:
+            G.add_edge(v, u)          # reversed edge: downstream → upstream
+
+    total = sum(svc_scores.values()) or 1.
+    personalization = {s: sc / total for s, sc in svc_scores.items()}
+
+    if G.number_of_edges() == 0:
+        return dict(svc_scores)       # no topology → fall back to raw scores
+
+    try:
+        pr = nx.pagerank(G, alpha=alpha, personalization=personalization,
+                         max_iter=max_iter)
+    except nx.PowerIterationFailedConvergence:
+        return dict(svc_scores)
+    return pr
+
+
+def _topo_penalty(svc_scores, topology_edges, gamma=0.5):
+    """方案三：Topological Penalty.
+
+    Penalise services whose predecessors already have high scores.
+    The penalty per predecessor is its score divided by its out-degree
+    (i.e. how much causal "blame" it can distribute).
+    """
+    predecessors: dict = {s: [] for s in svc_scores}
+    out_degree: dict = {s: 0 for s in svc_scores}
+    for u, v in topology_edges:
+        if u in svc_scores and v in predecessors:
+            predecessors[v].append(u)
+        if u in out_degree:
+            out_degree[u] += 1
+
+    penalized = {}
+    for svc, score in svc_scores.items():
+        penalty = sum(
+            svc_scores.get(p, 0.) / max(1, out_degree.get(p, 1))
+            for p in predecessors[svc]
+        )
+        penalized[svc] = score - gamma * penalty
+    return penalized
+
+
+# ==========================================
 # RCAEval entry points
 # ==========================================
 
@@ -476,5 +556,64 @@ def gabanzhaf_ssl(data, inject_time=None, dataset=None, num_loop=None,
     )
     ranks = _rank_from_svc_scores(
         core["all_cols"], svc_scores, core["metric_banzhaf"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
+
+
+def gabanzhaf_upstream(data, inject_time=None, dataset=None, num_loop=None,
+                       sli=None, anomalies=None, **kwargs):
+    """GA-Banzhaf + Upstream Damping (方案一).
+
+    Dampen a service's Banzhaf score when its direct predecessors in the
+    causal topology already carry high scores — the service is likely a
+    downstream victim rather than the root cause.
+    """
+    beta = float(kwargs.get("upstream_beta", 0.5))
+    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    svc_scores = _upstream_damping(
+        core["svc_banzhaf"], core["topology_edges"], beta=beta
+    )
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], svc_scores, core["metric_banzhaf"],
+        svc_anom=core["svc_anom"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
+
+
+def gabanzhaf_pagerank(data, inject_time=None, dataset=None, num_loop=None,
+                       sli=None, anomalies=None, **kwargs):
+    """GA-Banzhaf + Reversed Personalized PageRank (方案二).
+
+    Run Personalized PageRank on the reversed causal graph, seeded by
+    Banzhaf scores.  Nodes that can causally explain many downstream
+    anomalies receive high probability mass.
+    """
+    alpha = float(kwargs.get("pr_alpha", 0.85))
+    core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    svc_scores = _reverse_pagerank(
+        core["svc_banzhaf"], core["topology_edges"], alpha=alpha
+    )
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], svc_scores, core["metric_banzhaf"],
+        svc_anom=core["svc_anom"]
+    )
+    return {"ranks": ranks, "node_names": core["all_cols"]}
+
+
+def gabanzhaf_topo(data, inject_time=None, dataset=None, num_loop=None,
+                   sli=None, anomalies=None, **kwargs):
+    """GA-Banzhaf + Topological Penalty (方案三).
+
+    Penalise services whose causal predecessors are already highly scored,
+    redistributing "blame" toward upstream root causes.
+    """
+    gamma = float(kwargs.get("topo_gamma", 0.5))
+    core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
+    svc_scores = _topo_penalty(
+        core["svc_banzhaf"], core["topology_edges"], gamma=gamma
+    )
+    ranks = _rank_from_svc_scores(
+        core["all_cols"], svc_scores, core["metric_banzhaf"],
+        svc_anom=core["svc_anom"]
     )
     return {"ranks": ranks, "node_names": core["all_cols"]}
