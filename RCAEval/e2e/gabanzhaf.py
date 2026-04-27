@@ -2,35 +2,11 @@ import warnings
 import numpy as np
 import pandas as pd
 import networkx as nx
-import torch
-import torch.nn.functional as F
 from sklearn.cluster import AgglomerativeClustering
-from torch_geometric.nn import GATConv
-from torch_geometric.data import Data
 
 warnings.filterwarnings("ignore")
 
 from RCAEval.io.time_series import preprocess
-
-
-# ==========================================
-# Module 1: Banzhaf-Aware GAT
-# ==========================================
-class BanzhafAwareGAT(torch.nn.Module):
-    def __init__(self, num_node_features, hidden_channels=8):
-        super().__init__()
-        self.conv1 = GATConv(num_node_features, hidden_channels, heads=4, concat=True)
-        self.conv2 = GATConv(hidden_channels * 4, 1, heads=1, concat=False)
-
-    def forward(self, data, banzhaf_weights):
-        x, edge_index = data.x, data.edge_index
-        banzhaf_tensor = torch.tensor(banzhaf_weights, dtype=torch.float32).view(-1, 1)
-        x = x * banzhaf_tensor
-        x = self.conv1(x, edge_index)
-        x = F.elu(x)
-        x = F.dropout(x, p=0.4, training=self.training)
-        x = self.conv2(x, edge_index)
-        return torch.sigmoid(x)
 
 
 # ==========================================
@@ -77,7 +53,6 @@ def _redundancy_filtering(df, max_features=150, anom_scores=None):
     else:
         selected = [df.columns[labels == k][0] for k in np.unique(labels)]
     return df[selected]
-
 
 
 def _eval_fitness(pop, anom_scores, denom, corr_matrix, num_metrics,
@@ -221,63 +196,6 @@ def _build_topology(svc_names, svc_series, corr_thr=0.30):
     return [(svcs[i], svcs[j]) for i, j in zip(rows, cols)]
 
 
-def _build_pyg_data(node_list, svc_banzhaf, topology_edges, device):
-    """Build shared PyG Data object and node_banzhaf list."""
-    G = nx.DiGraph()
-    G.add_nodes_from(node_list)
-    G.add_edges_from([(u, v) for u, v in topology_edges
-                      if u in node_list and v in node_list])
-    node_idx = {n: i for i, n in enumerate(node_list)}
-
-    node_features, node_banzhaf = [], []
-    for nd in node_list:
-        bw = float(svc_banzhaf.get(nd, 0.))
-        node_features.append([bw, bw ** 2, float(bw > 0), 1.])
-        node_banzhaf.append(bw)
-
-    x = torch.tensor(node_features, dtype=torch.float32).to(device)
-    edges = list(G.edges())
-    if edges:
-        edge_index = torch.tensor(
-            [[node_idx[u], node_idx[v]] for u, v in edges], dtype=torch.long
-        ).t().contiguous().to(device)
-    else:
-        edge_index = torch.zeros((2, 0), dtype=torch.long).to(device)
-
-    return Data(x=x, edge_index=edge_index), node_banzhaf
-
-
-
-def _gat_ranking_ssl(node_list, svc_banzhaf, topology_edges, n_epochs=50, lr=0.01):
-    """
-    Self-supervised GAT: train to reconstruct normalised Banzhaf scores
-    as pseudo-labels (transductive, on the current graph), then re-rank.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data, node_banzhaf = _build_pyg_data(node_list, svc_banzhaf, topology_edges, device)
-
-    # Pseudo-labels: min-max normalised Banzhaf scores
-    bz = torch.tensor(node_banzhaf, dtype=torch.float32).to(device)
-    bz_min, bz_max = bz.min(), bz.max()
-    labels = (bz - bz_min) / (bz_max - bz_min + 1e-9)
-
-    model = BanzhafAwareGAT(num_node_features=4).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    model.train()
-    for _ in range(n_epochs):
-        optimizer.zero_grad()
-        out = model(data, node_banzhaf).squeeze()
-        loss = F.mse_loss(out, labels)
-        loss.backward()
-        optimizer.step()
-
-    model.eval()
-    with torch.no_grad():
-        scores = model(data, node_banzhaf).cpu().numpy().flatten()
-    return {node_list[i]: float(scores[i]) for i in range(len(node_list))}
-
-
 # ==========================================
 # Shared core pipeline (steps 1–5)
 # ==========================================
@@ -413,6 +331,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         svc = _parse_svc(col)
         svc_anom[svc] = max(svc_anom.get(svc, 0.), score)
 
+
     # ── 5. Build topology from combined data ─────────────────────────────────
     # Combined (normal + anomaly) data preserves fault-propagation edges that
     # PPR needs to trace back to the root cause.  Using only normal-period data
@@ -434,7 +353,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         svc_names=svc_names,
         topology_edges=topology_edges,
     )
-
 
 
 def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf, svc_anom=None):
@@ -470,36 +388,9 @@ def _rank_from_svc_scores(all_cols, svc_scores, metric_banzhaf, svc_anom=None):
     return sorted(all_cols, key=_col_score, reverse=True)
 
 
-# ==========================================
-# Causal-topology adjustments (Steps A/B/C)
-# ==========================================
-
-def _upstream_damping(svc_scores, topology_edges, beta=0.5):
-    """方案一：Upstream Damping.
-
-    Dampen a service's score proportionally to how much of the total
-    anomaly signal sits in its direct predecessors.  If A→B and A is
-    highly scored, B's score is reduced because B's anomaly is likely
-    *caused* by A rather than being a root cause itself.
-    """
-    total = sum(svc_scores.values()) or 1.
-    # build predecessor map
-    predecessors: dict = {s: [] for s in svc_scores}
-    for u, v in topology_edges:
-        if u in svc_scores and v in predecessors:
-            predecessors[v].append(u)
-
-    damped = {}
-    for svc, score in svc_scores.items():
-        upstream_sum = sum(svc_scores.get(p, 0.) for p in predecessors[svc])
-        ratio = upstream_sum / total          # how much upstream explains
-        damped[svc] = score * (1. - beta * ratio)
-    return damped
-
-
 def _reverse_pagerank(svc_scores, topology_edges, alpha=0.85, max_iter=200,
                       svc_anom=None, anom_weight=0.3):
-    """方案二：Personalized PageRank on the reversed causal graph.
+    """Personalized PageRank on the reversed causal graph.
 
     Root causes tend to sit upstream.  Running PPR on the *reversed*
     graph propagates probability mass toward nodes that can explain many
@@ -544,38 +435,13 @@ def _reverse_pagerank(svc_scores, topology_edges, alpha=0.85, max_iter=200,
     return pr
 
 
-def _topo_penalty(svc_scores, topology_edges, gamma=0.5):
-    """方案三：Topological Penalty.
-
-    Penalise services whose predecessors already have high scores.
-    The penalty per predecessor is its score divided by its out-degree
-    (i.e. how much causal "blame" it can distribute).
-    """
-    predecessors: dict = {s: [] for s in svc_scores}
-    out_degree: dict = {s: 0 for s in svc_scores}
-    for u, v in topology_edges:
-        if u in svc_scores and v in predecessors:
-            predecessors[v].append(u)
-        if u in out_degree:
-            out_degree[u] += 1
-
-    penalized = {}
-    for svc, score in svc_scores.items():
-        penalty = sum(
-            svc_scores.get(p, 0.) / max(1, out_degree.get(p, 1))
-            for p in predecessors[svc]
-        )
-        penalized[svc] = score - gamma * penalty
-    return penalized
-
-
 # ==========================================
-# RCAEval entry points
+# RCAEval entry point
 # ==========================================
 
 def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + Reversed Personalized PageRank (main method).
+    """GA-Banzhaf + Reversed Personalized PageRank.
 
     After computing per-service Banzhaf scores, run PPR on the reversed
     causal topology so that upstream root causes receive higher probability
@@ -594,93 +460,3 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
         svc_anom=core["svc_anom"]
     )
     return {"ranks": ranks, "node_names": core["all_cols"]}
-
-
-def gabanzhaf_nogat(data, inject_time=None, dataset=None, num_loop=None,
-                    sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf only — no GAT re-ranking (ablation baseline)."""
-    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
-    ranks = _rank_from_svc_scores(
-        core["all_cols"], core["svc_banzhaf"],
-        core["metric_banzhaf"], svc_anom=core["svc_anom"]
-    )
-    return {"ranks": ranks, "node_names": core["all_cols"]}
-
-
-def gabanzhaf_ssl(data, inject_time=None, dataset=None, num_loop=None,
-                  sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + self-supervised GAT (Banzhaf scores as pseudo-labels)."""
-    n_epochs = int(kwargs.get("ssl_epochs", 50))
-    lr       = float(kwargs.get("ssl_lr", 0.01))
-    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
-    svc_scores = _gat_ranking_ssl(
-        core["svc_names"], core["svc_banzhaf"], core["topology_edges"],
-        n_epochs=n_epochs, lr=lr,
-    )
-    ranks = _rank_from_svc_scores(
-        core["all_cols"], svc_scores, core["metric_banzhaf"]
-    )
-    return {"ranks": ranks, "node_names": core["all_cols"]}
-
-
-def gabanzhaf_upstream(data, inject_time=None, dataset=None, num_loop=None,
-                       sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + Upstream Damping (方案一).
-
-    Dampen a service's Banzhaf score when its direct predecessors in the
-    causal topology already carry high scores — the service is likely a
-    downstream victim rather than the root cause.
-    """
-    beta = float(kwargs.get("upstream_beta", 0.5))
-    core = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
-    svc_scores = _upstream_damping(
-        core["svc_banzhaf"], core["topology_edges"], beta=beta
-    )
-    ranks = _rank_from_svc_scores(
-        core["all_cols"], svc_scores, core["metric_banzhaf"],
-        svc_anom=core["svc_anom"]
-    )
-    return {"ranks": ranks, "node_names": core["all_cols"]}
-
-
-def gabanzhaf_pagerank(data, inject_time=None, dataset=None, num_loop=None,
-                       sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + Reversed Personalized PageRank (方案二, ablation).
-
-    Run Personalized PageRank on the reversed causal graph, seeded by
-    Banzhaf scores.  Nodes that can causally explain many downstream
-    anomalies receive high probability mass.
-    """
-    alpha       = float(kwargs.get("pr_alpha", 0.85))
-    anom_weight = float(kwargs.get("pr_anom_weight", 0.3))
-    core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
-    svc_scores = _reverse_pagerank(
-        core["svc_banzhaf"], core["topology_edges"], alpha=alpha,
-        svc_anom=core["svc_anom"], anom_weight=anom_weight,
-    )
-    ranks = _rank_from_svc_scores(
-        core["all_cols"], svc_scores, core["metric_banzhaf"],
-        svc_anom=core["svc_anom"]
-    )
-    return {"ranks": ranks, "node_names": core["all_cols"]}
-
-
-def gabanzhaf_topo(data, inject_time=None, dataset=None, num_loop=None,
-                   sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf + Topological Penalty (方案三).
-
-    Penalise services whose causal predecessors are already highly scored,
-    redistributing "blame" toward upstream root causes.
-    """
-    gamma = float(kwargs.get("topo_gamma", 0.5))
-    core  = _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
-    svc_scores = _topo_penalty(
-        core["svc_banzhaf"], core["topology_edges"], gamma=gamma
-    )
-    ranks = _rank_from_svc_scores(
-        core["all_cols"], svc_scores, core["metric_banzhaf"],
-        svc_anom=core["svc_anom"]
-    )
-    return {"ranks": ranks, "node_names": core["all_cols"]}
-
-
