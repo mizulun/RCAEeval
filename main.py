@@ -68,11 +68,6 @@ if is_py310():
         tracerca,
         banzhaf,
         gabanzhaf,
-        gabanzhaf_nogat,
-        gabanzhaf_ssl,
-        gabanzhaf_upstream,
-        gabanzhaf_pagerank,
-        gabanzhaf_topo,
     )
 
 elif is_py312():
