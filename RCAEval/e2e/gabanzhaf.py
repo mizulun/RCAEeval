@@ -1,14 +1,70 @@
-import warnings
 import numpy as np
 import pandas as pd
-import networkx as nx
+from sklearn.mixture import GaussianMixture
 from sklearn.cluster import AgglomerativeClustering
+import networkx as nx
+import warnings
 
 warnings.filterwarnings("ignore")
 
 from RCAEval.io.time_series import preprocess
 
+def _symptom_cluster(cols, anom_scores):
+    """
+    TORAI SymptomCluster 實作：
+    為每個服務建立嚴重度向量，並使用 GMM 進行聚類，找出異常行為相似的服務群組。
+    """
+    svc_to_scores = {}
+    for col, score in zip(cols, anom_scores):
+        svc = _parse_svc(col)
+        svc_to_scores.setdefault(svc, []).append(score)
 
+    svcs = list(svc_to_scores.keys())
+    severity_vectors = []
+    
+    for svc in svcs:
+        scores = np.array(svc_to_scores[svc])
+        # 建立 Severity Vector: [最大嚴重度, 平均嚴重度, 90百分位數]
+        # 這模擬了 TORAI 中考量多維度 (Metrics, Logs, Traces) 病徵的思想
+        severity_vectors.append([
+            np.max(scores), 
+            np.mean(scores), 
+            np.percentile(scores, 90) if len(scores) > 1 else np.max(scores)
+        ])
+
+    X = np.array(severity_vectors)
+    n_components = min(4, len(svcs)) # 最多分為 4 個嚴重度等級
+
+    # 服務數量極少時防呆
+    if n_components < 2:
+        return {svcs[0]: 0}, {0: float(np.mean(X[:, 0]))}
+
+    # 使用 BIC (Bayesian Information Criterion) 尋找最佳聚類數
+    # reg_covar 防止 collapsed samples（所有值相同）導致 ill-defined covariance
+    best_gmm = None
+    best_bic = np.inf
+    for k in range(1, n_components + 1):
+        try:
+            gmm = GaussianMixture(n_components=k, random_state=42, reg_covar=1e-3)
+            gmm.fit(X)
+            bic = gmm.bic(X)
+            if bic < best_bic:
+                best_bic = bic
+                best_gmm = gmm
+        except ValueError:
+            continue
+
+    if best_gmm is None:
+        # 全部 k 都失敗（極端情況：全服務 severity 相同），視為同一群
+        return {svc: 0 for svc in svcs}, {0: float(X[:, 0].mean())}
+
+    labels = best_gmm.predict(X)
+    
+    # 計算每個 Cluster 的平均「最大嚴重度」，用以排序 Cluster 威脅程度
+    cluster_severities = {k: float(np.mean(X[labels == k][:, 0])) for k in np.unique(labels)}
+    svc_cluster_map = {svcs[i]: labels[i] for i in range(len(svcs))}
+
+    return svc_cluster_map, cluster_severities
 # ==========================================
 # Internal helpers
 # ==========================================
@@ -195,9 +251,7 @@ def _build_topology(svc_names, svc_series, corr_thr=0.30):
 
 def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     """
-    Shared pipeline: window split → preprocess → dim-reduction → GA-Banzhaf → topology.
-
-    Returns a dict with all intermediate results needed by the entry points.
+    Shared pipeline: window split → robust score → symptom clustering → dim-reduction → GA-Banzhaf → topology.
     """
     n_generations = int(kwargs.get("n_generations", 8))
     pop_size      = int(kwargs.get("pop_size", 20))
@@ -221,9 +275,8 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     # ── 2. Preprocess jointly ────────────────────────────────────────────────
     dk = kwargs.get("dk_select_useful", False)
     n_rows = len(normal_raw)
-    full_proc = preprocess(
-        pd.concat([normal_raw, anomal_raw], ignore_index=True), dataset, dk
-    )
+    full_proc = preprocess(pd.concat([normal_raw, anomal_raw], ignore_index=True), dataset, dk)
+    
     normal_df = full_proc.iloc[:n_rows].reset_index(drop=True)
     anomal_df = full_proc.iloc[n_rows:].reset_index(drop=True)
 
@@ -234,56 +287,73 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     ml = min(len(normal_df), len(anomal_df))
     normal_df = normal_df.tail(ml).reset_index(drop=True)
     anomal_df = anomal_df.head(ml).reset_index(drop=True)
-
+    
     all_cols = list(normal_df.columns)
+    no_time = pd.concat([normal_df, anomal_df], ignore_index=True).drop(columns=["time"], errors="ignore")
+    cols = no_time.columns
 
-    # ── 3. Anomaly pre-score + dimensionality reduction ──────────────────────
-    full_df = pd.concat([normal_df, anomal_df], ignore_index=True)
-    no_time = full_df.drop(columns=["time"], errors="ignore")
+    _nm = normal_df.drop(columns=["time"], errors="ignore").values.astype(float)
+    _am = anomal_df.drop(columns=["time"], errors="ignore").values.astype(float)
 
-    _nm = normal_df.drop(columns=["time"], errors="ignore").reindex(columns=no_time.columns).values.astype(float)
-    _am = anomal_df.drop(columns=["time"], errors="ignore").reindex(columns=no_time.columns).values.astype(float)
-
-    if _nm.shape[1] > max_features * 2:
-        _fast_mean = _nm.mean(axis=0)
-        _fast_std  = _nm.std(axis=0)
-        _fast_sc   = np.where(_fast_std > 0, _fast_std, 1.)
-        _fast_anom = np.abs((_am - _fast_mean) / _fast_sc).max(axis=0)
-        _top_idx   = np.argpartition(_fast_anom, -max_features * 2)[-max_features * 2:]
-        _top_cols  = no_time.columns[_top_idx]
-        _nm2 = _nm[:, _top_idx]
-        _am2 = _am[:, _top_idx]
-        _cols2 = _top_cols
-    else:
-        _nm2, _am2, _cols2 = _nm, _am, no_time.columns
-
-    _med = np.nanmedian(_nm2, axis=0)
-    _iqr = np.nanpercentile(_nm2, 75, axis=0) - np.nanpercentile(_nm2, 25, axis=0)
+    # ── 3. 引入 TORAI 邏輯：魯棒性嚴重度計算 (Median & IQR) ──────────────────────
+    # 避免 LOSS 造成的短暫極值污染正常區間的統計資料
+    _med = np.nanmedian(_nm, axis=0)
+    _iqr = np.nanpercentile(_nm, 75, axis=0) - np.nanpercentile(_nm, 25, axis=0)
     _sc  = np.where(_iqr > 0, _iqr, 1.)
-    _pre_anom_reduced = np.clip(np.abs((_am2 - _med) / _sc), 0., 100.).max(axis=0)
+    
+    # TORAI 定義的 Severity Score 為時間序列中最大的 a_t
+    anom_scores = np.nanmax(np.abs((_am - _med) / _sc), axis=0)
+    _pre_anom = dict(zip(cols, anom_scores))
 
-    if _nm.shape[1] > max_features * 2:
-        _pre_anom = dict(zip(no_time.columns,
-                             np.abs((_am - _nm.mean(axis=0)) /
-                                    np.where(_nm.std(axis=0) > 0, _nm.std(axis=0), 1.)).max(axis=0)))
-        for col, score in zip(_cols2, _pre_anom_reduced):
-            _pre_anom[col] = float(score)
-    else:
-        _pre_anom = dict(zip(_cols2, _pre_anom_reduced))
+    # ── 4. 提前建拓樸 (用全部服務的資料) ────────────────────────────────────
+    # 在 GMM 篩選之前先建好，這樣才能把 target_svcs 的上游服務也拉進來，
+    # 避免 LOSS 根因（upstream、信號弱）在 GMM 階段就被排除。
+    svc_names = sorted(set(_parse_svc(c) for c in all_cols))
+    svc_series_full = {}
+    for svc in svc_names:
+        svc_col_idxs = [i for i, c in enumerate(cols) if _parse_svc(c) == svc]
+        if svc_col_idxs:
+            svc_series_full[svc] = no_time.values[:, svc_col_idxs].max(axis=1).astype(float)
+    topology_edges = _build_topology(svc_names, svc_series_full)
 
-    reduced = _redundancy_filtering(no_time, max_features=max_features, anom_scores=_pre_anom)
+    # upstream_map[v] = {u | u→v 存在於拓樸} (即 v 的直接上游)
+    upstream_map: dict = {s: set() for s in svc_names}
+    for u, v in topology_edges:
+        upstream_map.get(v, set()).add(u)
 
-    # ── Force service coverage ───────────────────────────────────────────────
+    # ── 5. TORAI Symptom Clustering (GMM 分群) ──────────────────────────────
+    svc_cluster_map, cluster_severities = _symptom_cluster(cols, anom_scores)
+
+    sorted_clusters = sorted(cluster_severities.keys(), key=lambda k: cluster_severities[k], reverse=True)
+    top_clusters = sorted_clusters[:2] if len(sorted_clusters) > 2 else sorted_clusters[:1]
+    target_svcs = {svc for svc, c_id in svc_cluster_map.items() if c_id in top_clusters}
+
+    # ── LOSS 補救：把 target_svcs 的直接上游也加入 ────────────────────────────
+    # LOSS 根因 A 的 metric 信號弱 → GMM 不會把 A 選進 top cluster。
+    # 但 A→B/C/D 的邊在拓樸裡存在，所以把 B/C/D 的上游（即 A）補進來。
+    upstream_of_targets = set()
+    for svc in target_svcs:
+        upstream_of_targets |= upstream_map.get(svc, set())
+    target_svcs |= upstream_of_targets
+
+    # 只保留目標服務的特徵進行後續運算
+    # 若 target_svcs 為空（極端情況）則退回全部欄位
+    target_cols = [c for c in cols if _parse_svc(c) in target_svcs]
+    no_time_filtered = no_time[target_cols] if target_cols else no_time
+
+    # ── 6. Dimensionality Reduction (針對高危險群 + 上游服務) ────────────────
+    reduced = _redundancy_filtering(no_time_filtered, max_features=max_features, anom_scores=_pre_anom)
+
+    # 確保每個 target 服務至少有一個代表性指標
     covered_svcs = set(_parse_svc(c) for c in reduced.columns)
-    svc_to_cols: dict = {}
-    for c in no_time.columns:
-        svc_to_cols.setdefault(_parse_svc(c), []).append(c)
-
     extra_cols = []
-    for svc, cols in svc_to_cols.items():
+    for svc in target_svcs:
         if svc not in covered_svcs:
-            best = max(cols, key=lambda c: _pre_anom.get(c, 0.))
-            extra_cols.append(best)
+            svc_cols = [c for c in cols if _parse_svc(c) == svc]
+            if svc_cols:
+                best = max(svc_cols, key=lambda c: _pre_anom.get(c, 0.))
+                extra_cols.append(best)
+
     if extra_cols:
         reduced = pd.concat([reduced, no_time[extra_cols]], axis=1)
 
@@ -291,7 +361,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     red_normal = reduced.values[:ml].astype(float)
     red_anomal = reduced.values[ml:].astype(float)
 
-    # ── 4. GA-Banzhaf ────────────────────────────────────────────────────────
+    # ── 7. GA-Banzhaf ────────────────────────────────────────────────────────
     banzhaf_w = _approximate_banzhaf_ga(
         red_normal, red_anomal,
         n_generations=n_generations,
@@ -311,15 +381,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     for col, score in _pre_anom.items():
         svc = _parse_svc(col)
         svc_anom[svc] = max(svc_anom.get(svc, 0.), score)
-
-    # ── 5. Topology (cross-correlation) ──────────────────────────────────────
-    svc_names = sorted(set(_parse_svc(c) for c in all_cols))
-    svc_series_all = {}
-    for svc in svc_names:
-        idxs = [i for i, c in enumerate(red_cols) if _parse_svc(c) == svc]
-        if idxs:
-            svc_series_all[svc] = reduced.values[:, idxs].max(axis=1).astype(float)
-    topology_edges = _build_topology(svc_names, svc_series_all)
 
     return dict(
         all_cols=all_cols,
