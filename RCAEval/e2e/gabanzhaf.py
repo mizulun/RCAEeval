@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import pandas as pd
-from sklearn.mixture import GaussianMixture
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -106,56 +105,6 @@ def _trace_onset_scores(case_dir, inject_time):
         return None
 
 
-def _symptom_cluster(cols, anom_scores):
-    """
-    TORAI SymptomCluster 實作：
-    為每個服務建立嚴重度向量，並使用 GMM 進行聚類，找出異常行為相似的服務群組。
-    """
-    svc_to_scores = {}
-    for col, score in zip(cols, anom_scores):
-        svc = _parse_svc(col)
-        svc_to_scores.setdefault(svc, []).append(score)
-
-    svcs = list(svc_to_scores.keys())
-    severity_vectors = []
-
-    for svc in svcs:
-        scores = np.array(svc_to_scores[svc])
-        severity_vectors.append([
-            np.max(scores),
-            np.mean(scores),
-            np.percentile(scores, 90) if len(scores) > 1 else np.max(scores)
-        ])
-
-    X = np.array(severity_vectors)
-    n_components = min(4, len(svcs))
-
-    if n_components < 2:
-        return {svcs[0]: 0}, {0: float(np.mean(X[:, 0]))}
-
-    best_gmm = None
-    best_bic = np.inf
-    for k in range(1, n_components + 1):
-        try:
-            gmm = GaussianMixture(n_components=k, random_state=42, reg_covar=1e-3)
-            gmm.fit(X)
-            bic = gmm.bic(X)
-            if bic < best_bic:
-                best_bic = bic
-                best_gmm = gmm
-        except ValueError:
-            continue
-
-    if best_gmm is None:
-        return {svc: 0 for svc in svcs}, {0: float(X[:, 0].mean())}
-
-    labels = best_gmm.predict(X)
-    cluster_severities = {k: float(np.mean(X[labels == k][:, 0])) for k in np.unique(labels)}
-    svc_cluster_map = {svcs[i]: labels[i] for i in range(len(svcs))}
-
-    return svc_cluster_map, cluster_severities
-
-
 # ==========================================
 # Internal helpers
 # ==========================================
@@ -165,6 +114,121 @@ def _parse_svc(col):
     """Parse service name from a metric column (last underscore separator)."""
     parts = col.rsplit("_", 1)
     return parts[0] if len(parts) == 2 else col
+
+
+def _norm01_arr(a):
+    a = np.asarray(a, dtype=float)
+    lo = np.nanmin(a) if a.size else 0.
+    hi = np.nanmax(a) if a.size else 1.
+    return (a - lo) / (hi - lo + 1e-9)
+
+
+def _norm_dict(d):
+    lo, hi = min(d.values(), default=0.), max(d.values(), default=1.)
+    span = hi - lo if hi > lo else 1.
+    return {k: (v - lo) / span for k, v in d.items()}
+
+
+def _metric_evidence(normal_mat, anomal_mat, cols):
+    """Metric-level evidence from robust magnitude, persistence and peak.
+
+    The score remains unsupervised: it only compares the post-injection window
+    with the pre-injection baseline.  Percentile and persistence terms reduce
+    the chance that a single noisy spike dominates the ranking.
+    """
+    med = np.nanmedian(normal_mat, axis=0)
+    q75 = np.nanpercentile(normal_mat, 75, axis=0)
+    q25 = np.nanpercentile(normal_mat, 25, axis=0)
+    iqr = np.where((q75 - q25) > 0, q75 - q25, 1.)
+
+    rz = np.abs((anomal_mat - med) / iqr)
+    rz = np.nan_to_num(rz, nan=0., posinf=0., neginf=0.)
+
+    mag = _norm01_arr(np.nanpercentile(rz, 95, axis=0))
+    peak = _norm01_arr(np.nanmax(rz, axis=0))
+    persistence = _norm01_arr(np.mean(rz > 3.0, axis=0))
+    raw = 0.55 * mag + 0.30 * persistence + 0.15 * peak
+    score = _norm01_arr(raw)
+
+    return {
+        col: {
+            "score": float(score[i]),
+            "mag": float(mag[i]),
+            "persistence": float(persistence[i]),
+            "peak": float(peak[i]),
+        }
+        for i, col in enumerate(cols)
+    }
+
+
+def _service_evidence(cols, metric_ev):
+    """Aggregate metric evidence into service evidence.
+
+    Two complementary signals are blended:
+
+    1. Aggregate (70 %): percentile-weighted blend of a service's own metric
+       scores — the primary signal for clearly localised faults.
+
+    2. Metric-type dominance (30 %): for each metric type (the suffix after
+       the last underscore, e.g. "cpu", "mem", "latency") the service with the
+       highest score earns a bonus proportional to its margin over the
+       runner-up.  This is decisive for broadcast faults (e.g. CPU injection)
+       where every service shows elevated metrics: the injected service still
+       leads in the fault-relevant metric type even when absolute levels are
+       similar across the system.
+
+    No ground truth is used; no branching on system size.
+    """
+    svc_to_cols: dict = {}
+    for col in cols:
+        svc_to_cols.setdefault(_parse_svc(col), []).append(col)
+
+    # ── 1. Per-service aggregate score ───────────────────────────────────────
+    svc_agg: dict = {}
+    for svc, svc_cols in svc_to_cols.items():
+        arr = np.asarray([metric_ev[c]["score"] for c in svc_cols], dtype=float)
+        top = np.sort(arr)[-min(3, len(arr)):]
+        svc_agg[svc] = float(
+            0.50 * np.percentile(arr, 95)
+            + 0.30 * np.mean(top)
+            + 0.20 * np.max(arr)
+        )
+
+    # ── 2. Metric-type dominance ─────────────────────────────────────────────
+    # Track the top-2 scores per metric type across services.
+    # "metric type" = everything after the service prefix  (e.g. "cpu", "mem").
+    type_best: dict   = {}   # mtype -> (winning_svc, score)
+    type_second: dict = {}   # mtype -> best score from a *different* service
+
+    for col in cols:
+        svc   = _parse_svc(col)
+        mtype = col[len(svc) + 1:] if col.startswith(svc + "_") else col
+        sc    = metric_ev[col]["score"]
+
+        if mtype not in type_best or sc > type_best[mtype][1]:
+            prev = type_best.get(mtype)
+            if prev is not None and prev[0] != svc:
+                # Previous winner (different service) becomes second-best candidate
+                if prev[1] > type_second.get(mtype, 0.):
+                    type_second[mtype] = prev[1]
+            type_best[mtype] = (svc, sc)
+        elif svc != type_best[mtype][0] and sc > type_second.get(mtype, 0.):
+            type_second[mtype] = sc
+
+    dom: dict = {svc: 0. for svc in svc_agg}
+    for mtype, (best_svc, best_sc) in type_best.items():
+        margin = best_sc - type_second.get(mtype, 0.)
+        dom[best_svc] = dom.get(best_svc, 0.) + margin
+
+    dom_max  = max(dom.values(), default=1.)
+    dom_norm = {s: v / (dom_max + 1e-9) for s, v in dom.items()}
+
+    # ── 3. Blend ─────────────────────────────────────────────────────────────
+    svc_scores = {
+        svc: 0.70 * svc_agg[svc] + 0.30 * dom_norm.get(svc, 0.)
+        for svc in svc_agg
+    }
+    return _norm_dict(svc_scores)
 
 
 def _eval_fitness_svc(pop, svc_anom_arr, topo_matrix, alpha_topo, penalty_weight):
@@ -179,8 +243,8 @@ def _eval_fitness_svc(pop, svc_anom_arr, topo_matrix, alpha_topo, penalty_weight
     n_svcs       = pop.shape[1]
     sel_size     = pop.sum(axis=1)                               # (P,)
     coverage     = pop @ svc_anom_arr                            # (P,)
-    upstream_sel = pop @ topo_matrix                             # (P, S)
-    explained    = (upstream_sel > 0).astype(np.float32) * pop  # (P, S)
+    upstream_sel = np.clip(pop @ topo_matrix, 0., 1.)            # (P, S)
+    explained    = upstream_sel * pop                            # (P, S)
     topo_redund  = explained @ svc_anom_arr                      # (P,)
     sparsity     = sel_size * penalty_weight / max(1, n_svcs)
     fitness      = coverage - alpha_topo * topo_redund - sparsity
@@ -201,8 +265,8 @@ def _approximate_banzhaf_ga_svc(svc_anom_arr, topo_matrix, high_sev_mask,
     selected upstream) are penalised, so their Banzhaf values converge lower
     than the true root cause without any separate PageRank step.
 
-    GA population is initialised with a GMM-derived bias: high-severity
-    services (from symptom clustering) have p=0.7, others p=0.3.
+    GA population is initialised with a soft high-evidence bias: services with
+    stronger unsupervised evidence are sampled more often in the initial pool.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -213,7 +277,7 @@ def _approximate_banzhaf_ga_svc(svc_anom_arr, topo_matrix, high_sev_mask,
     p_mut_base  = 1.0 / max(1, n_svcs)
     warmup_gens = n_generations // 3
 
-    # GMM-biased initialisation
+    # Evidence-biased initialisation
     p_init = np.where(high_sev_mask > 0, 0.7, 0.3)
     pop    = (rng.random((pop_size, n_svcs)) < p_init).astype(np.float32)
     empty  = pop.sum(axis=1) == 0
@@ -268,13 +332,13 @@ def _approximate_banzhaf_ga_svc(svc_anom_arr, topo_matrix, high_sev_mask,
     return ema_banzhaf
 
 
-def _build_topology(svc_names, svc_series, corr_thr=0.30):
-    """Build directed topology from lag-1 cross-correlations between services.
+def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
+    """Build weighted directed topology from asymmetric lag-1 correlations.
 
     Vectorised: stacks all available service series into a matrix and
     computes the full n_svc × n_svc lag-1 correlation matrix in one
-    numpy matmul instead of a nested Python loop.  ~100× faster for
-    systems with many services.
+    numpy matmul.  Edge confidence is asymmetric: u→v is strong only when
+    u leads v more than v leads u.
     """
     svcs = [s for s in svc_names if svc_series.get(s) is not None]
     if len(svcs) < 2:
@@ -295,12 +359,21 @@ def _build_topology(svc_names, svc_series, corr_thr=0.30):
     yn = np.linalg.norm(Y, axis=1, keepdims=True) + 1e-9
     X /= xn;  Y /= yn
 
-    # Lag-1 correlation matrix: C[i,j] = corr(X[i], Y[j]) = X_i leads Y_j
+    # Lag-1 correlation matrix: C[i,j] = corr(X[i], Y[j]) = X_i leads Y_j.
     C = X @ Y.T  # (n_svcs, n_svcs)
     np.fill_diagonal(C, 0.)
 
-    rows, cols = np.where(C > corr_thr)
-    return [(svcs[i], svcs[j]) for i, j in zip(rows, cols)]
+    confidence = np.maximum(0., C - C.T)
+    np.fill_diagonal(confidence, 0.)
+
+    edges = []
+    for j, v in enumerate(svcs):
+        parents = np.where(confidence[:, j] > corr_thr)[0]
+        if len(parents) > max_in:
+            parents = parents[np.argsort(confidence[parents, j])[-max_in:]]
+        for i in parents:
+            edges.append((svcs[i], v, float(confidence[i, j])))
+    return edges
 
 
 # ==========================================
@@ -310,15 +383,17 @@ def _build_topology(svc_names, svc_series, corr_thr=0.30):
 
 def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     """
-    Pipeline: window split → z-score → topology → pre-filter → GMM bias
-              → service-level GA-Banzhaf (topology in fitness) → rank
+    Pipeline: window split → metric evidence → service evidence
+              → bounded weighted topology → GA-Banzhaf → metric ranking
     """
     n_generations = int(kwargs.get("n_generations", 10))
     pop_size      = int(kwargs.get("pop_size", 20))
     ema_alpha     = float(kwargs.get("ema_alpha", 0.2))
     top_k_svcs    = int(kwargs.get("top_k_svcs", 15))
+    max_cand      = int(kwargs.get("max_candidate_svcs", top_k_svcs + 5))
     rng           = np.random.default_rng(int(kwargs.get("seed", 42)))
     trace_scores  = kwargs.get("trace_scores", None)
+    sli           = kwargs.get("sli", None)
 
     # ── 1. Window split ──────────────────────────────────────────────────────
     if anomalies is not None:
@@ -349,102 +424,122 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     normal_df = normal_df.tail(ml).reset_index(drop=True)
     anomal_df = anomal_df.head(ml).reset_index(drop=True)
 
-    all_cols = list(normal_df.columns)
     no_time  = pd.concat([normal_df, anomal_df], ignore_index=True).drop(columns=["time"], errors="ignore")
-    cols     = no_time.columns
+    cols     = list(no_time.columns)
+    all_cols = cols
 
     _nm = normal_df.drop(columns=["time"], errors="ignore").values.astype(float)
     _am = anomal_df.drop(columns=["time"], errors="ignore").values.astype(float)
 
-    # ── 3. Per-metric anomaly score (IQR z-score) ────────────────────────────
-    _med = np.nanmedian(_nm, axis=0)
-    _iqr = np.nanpercentile(_nm, 75, axis=0) - np.nanpercentile(_nm, 25, axis=0)
-    _sc  = np.where(_iqr > 0, _iqr, 1.)
+    # ── 3. Metric and service evidence ───────────────────────────────────────
+    metric_ev = _metric_evidence(_nm, _am, cols)
+    metric_score = {c: metric_ev[c]["score"] for c in cols}
+    svc_anom_dict = _service_evidence(cols, metric_ev)
+    svc_names = sorted(svc_anom_dict.keys())
 
-    def _norm01(a):
-        lo, hi = a.min(), a.max()
-        return (a - lo) / (hi - lo + 1e-9)
+    # ── 4. Candidate-first bounded topology ──────────────────────────────────
+    svc_ranked = sorted(svc_names, key=lambda s: svc_anom_dict.get(s, 0.), reverse=True)
+    seed_svcs = set(svc_ranked[:top_k_svcs])
+    if sli:
+        seed_svcs.add(_parse_svc(str(sli)))
 
-    anom_scores = _norm01(np.nanmax(np.abs((_am - _med) / _sc), axis=0))
-    _pre_anom   = dict(zip(cols, anom_scores))
+    pool_k = min(len(svc_ranked), max(top_k_svcs * 2, top_k_svcs + 5))
+    pool_svcs = set(svc_ranked[:pool_k]) | seed_svcs
 
-    # Per-service: take max across all its metrics
-    svc_anom_dict: dict = {}
-    for col, score in _pre_anom.items():
-        svc = _parse_svc(col)
-        svc_anom_dict[svc] = max(svc_anom_dict.get(svc, 0.), score)
-
-    # ── 4. Build topology (adaptive corr_thr) ────────────────────────────────
-    svc_names = sorted(set(_parse_svc(c) for c in all_cols))
     svc_series_full = {}
-    for svc in svc_names:
+    for svc in pool_svcs:
         idxs = [i for i, c in enumerate(cols) if _parse_svc(c) == svc]
         if idxs:
             svc_series_full[svc] = no_time.values[:, idxs].max(axis=1).astype(float)
 
-    n_svcs_count = len(svc_names)
-    corr_thr = 0.30 if n_svcs_count <= 10 else (0.40 if n_svcs_count <= 20 else 0.50)
-    topology_edges = _build_topology(svc_names, svc_series_full, corr_thr=corr_thr)
+    topology_edges = _build_topology(sorted(pool_svcs), svc_series_full)
 
     upstream_map: dict = {s: set() for s in svc_names}
-    for u, v in topology_edges:
+    edge_conf: dict = {}
+    for u, v, w in topology_edges:
         upstream_map.get(v, set()).add(u)
+        edge_conf[(u, v)] = w
 
-    # ── 5. Pre-filter: top-K services by svc_anom + upstream rescue ──────────
-    svc_ranked     = sorted(svc_names, key=lambda s: svc_anom_dict.get(s, 0.), reverse=True)
-    candidate_svcs = set(svc_ranked[:top_k_svcs])
-    for svc in list(candidate_svcs):           # upstream rescue for LOSS/DELAY
+    # ── 5. Pre-filter with upstream rescue, then bound runtime ───────────────
+    candidate_svcs = set(seed_svcs)
+    for svc in list(candidate_svcs):
         candidate_svcs |= upstream_map.get(svc, set())
+    if len(candidate_svcs) > max_cand:
+        candidate_svcs = set(sorted(candidate_svcs,
+                                    key=lambda s: svc_anom_dict.get(s, 0.),
+                                    reverse=True)[:max_cand])
 
     cand_list = sorted(candidate_svcs)
     n_cand    = len(cand_list)
     svc_idx   = {s: i for i, s in enumerate(cand_list)}
 
-    # ── 6. GMM symptom clustering → high-severity mask ───────────────────────
-    svc_cluster_map, cluster_severities = _symptom_cluster(cols, anom_scores)
-    sorted_clusters = sorted(cluster_severities.keys(),
-                             key=lambda k: cluster_severities[k], reverse=True)
-    top_clusters  = sorted_clusters[:2] if len(sorted_clusters) > 2 else sorted_clusters[:1]
-    high_sev_svcs = {svc for svc, c_id in svc_cluster_map.items() if c_id in top_clusters}
-    high_sev_mask = np.array([1. if s in high_sev_svcs else 0. for s in cand_list])
+    # ── 6. Soft high-evidence mask for GA initialisation ─────────────────────
+    cand_anom_vals = np.array([svc_anom_dict.get(s, 0.) for s in cand_list])
+    high_cut = np.percentile(cand_anom_vals, 60) if len(cand_anom_vals) else 1.
+    high_sev_mask = np.array([1. if svc_anom_dict.get(s, 0.) >= high_cut else 0.
+                              for s in cand_list])
 
-    # ── 7. Service-level topology matrix + anomaly array (candidates only) ───
-    svc_anom_arr = np.array([svc_anom_dict.get(s, 0.) for s in cand_list])
-    topo_matrix  = np.zeros((n_cand, n_cand), dtype=np.float32)
-    for u, v in topology_edges:
+    # ── 7. Weighted residual + topology matrix ───────────────────────────────
+    svc_residual: dict = {}
+    for svc, score in svc_anom_dict.items():
+        explained = max(
+            (svc_anom_dict.get(u, 0.) * edge_conf.get((u, svc), 0.)
+             for u in upstream_map.get(svc, set())),
+            default=0.
+        )
+        svc_residual[svc] = max(0., score - explained)
+
+    svc_anom_arr     = np.array([svc_anom_dict.get(s, 0.)  for s in cand_list])
+    svc_residual_arr = np.array([svc_residual.get(s, 0.)   for s in cand_list])
+
+    conf_vals = np.array([w for _, _, w in topology_edges], dtype=float)
+    topo_rel = float(np.clip(np.mean(conf_vals) * 2.0, 0.0, 0.65)) if conf_vals.size else 0.0
+    res_w = 0.30 + 0.50 * topo_rel
+    fitness_signal = res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
+
+    topo_matrix = np.zeros((n_cand, n_cand), dtype=np.float32)
+    for u, v, w in topology_edges:
         if u in svc_idx and v in svc_idx:
-            topo_matrix[svc_idx[u], svc_idx[v]] = 1.
+            topo_matrix[svc_idx[u], svc_idx[v]] = w
 
-    # ── 8. Service-level GA-Banzhaf ───────────────────────────────────────────
-    ema_banzhaf = _approximate_banzhaf_ga_svc(
-        svc_anom_arr, topo_matrix, high_sev_mask,
+    # ── 8. Bounded GA-Banzhaf computation ────────────────────────────────────
+    banzhaf_w = _approximate_banzhaf_ga_svc(
+        fitness_signal, topo_matrix, high_sev_mask,
         n_generations=n_generations,
         pop_size=pop_size,
         ema_alpha=ema_alpha,
         rng=rng,
     )
-    svc_banzhaf = {cand_list[i]: float(ema_banzhaf[i]) for i in range(n_cand)}
+    svc_banzhaf = {cand_list[i]: float(banzhaf_w[i]) for i in range(n_cand)}
 
-    # ── 9. Final ranking ──────────────────────────────────────────────────────
-    # Signals: Banzhaf (causal contribution) + svc_anom (direct signal)
-    #          + trace (error rate / duration ratio, if available)
-    def _norm(d):
-        lo, hi = min(d.values(), default=0.), max(d.values(), default=1.)
-        span = hi - lo if hi > lo else 1.
-        return {k: (v - lo) / span for k, v in d.items()}
-
-    nb = _norm(svc_banzhaf)
-    na = _norm(svc_anom_dict)
+    # ── 9. Final metric-level ranking ────────────────────────────────────────
+    nb = _norm_dict(svc_banzhaf)
+    nr = _norm_dict(svc_residual)
+    na = _norm_dict(svc_anom_dict)
+    nm = _norm_dict(metric_score)
 
     if trace_scores:
-        nt = _norm({s: trace_scores.get(s, 0.) for s in svc_anom_dict})
-        def _col_score(col):
-            svc = _parse_svc(col)
-            return nb.get(svc, 0.) * 0.60 + na.get(svc, 0.) * 0.25 + nt.get(svc, 0.) * 0.15
+        trace_cov = sum(1 for s in svc_anom_dict if s in trace_scores) / max(1, len(svc_anom_dict))
+        trace_rel = float(np.clip(trace_cov, 0.0, 0.25))
+        nt = _norm_dict({s: trace_scores.get(s, 0.) for s in svc_anom_dict})
     else:
-        def _col_score(col):
-            svc = _parse_svc(col)
-            return nb.get(svc, 0.) * 0.70 + na.get(svc, 0.) * 0.30
+        trace_rel = 0.0
+        nt = {}
+
+    def _col_score(col):
+        svc = _parse_svc(col)
+        service_root = (
+            0.45 * nb.get(svc, 0.)
+            + 0.30 * nr.get(svc, 0.)
+            + 0.25 * na.get(svc, 0.)
+        )
+        if trace_rel > 0:
+            service_root = (1.0 - trace_rel) * service_root + trace_rel * nt.get(svc, 0.)
+
+        metric_local = nm.get(col, 0.)
+        # Keep service causality primary, but let metric evidence decide the
+        # channel order inside a correctly localised service.
+        return 0.70 * service_root + 0.30 * metric_local + 0.20 * service_root * metric_local
 
     ranks = sorted(all_cols, key=_col_score, reverse=True)
     return {"ranks": ranks, "node_names": all_cols}
@@ -456,14 +551,15 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
 def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
-    """GA-Banzhaf with topology-aware fitness + multi-modal ranking.
+    """GA-Banzhaf with metric evidence, weighted topology and trace gating.
 
-    Service-level GA approximates Banzhaf power indices where the fitness
-    function directly penalises selecting downstream victims (causal
-    redundancy via topology), so no separate PageRank step is needed.
+    The same pipeline is used for small/large systems and with/without traces.
+    Missing modalities receive zero reliability instead of switching to a
+    separate ranking path.
 
-    Trace signals (error rate / duration ratio) are fused into the final
-    ranking when traces.csv is available.
+    Service-level GA approximates Banzhaf power indices while final ranking
+    keeps metric-local evidence so metric-level AC@k is not collapsed to a
+    service-only score.
     """
     args_ns  = kwargs.get("args")
     case_dir = (os.path.dirname(args_ns.data_path)
@@ -472,4 +568,5 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
     trace_scores = _trace_onset_scores(case_dir, _t_inject)
 
     kwargs["trace_scores"] = trace_scores
+    kwargs["sli"] = sli
     return _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
