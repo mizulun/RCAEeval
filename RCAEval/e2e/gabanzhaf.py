@@ -442,12 +442,8 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     Pipeline: window split → metric evidence → service evidence
               → bounded weighted topology → GA-Banzhaf → metric ranking
     """
-    n_generations = int(kwargs.get("n_generations", 10))
-    pop_size      = int(kwargs.get("pop_size", 20))
-    ema_alpha     = float(kwargs.get("ema_alpha", 0.2))
     top_k_svcs    = int(kwargs.get("top_k_svcs", 15))
     max_cand      = int(kwargs.get("max_candidate_svcs", top_k_svcs + 5))
-    rng           = np.random.default_rng(int(kwargs.get("seed", 42)))
     trace_scores  = kwargs.get("trace_scores", None)
     sli           = kwargs.get("sli", None)
 
@@ -554,12 +550,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     n_cand    = len(cand_list)
     svc_idx   = {s: i for i, s in enumerate(cand_list)}
 
-    # ── 6. Soft high-evidence mask for GA initialisation ─────────────────────
-    cand_anom_vals = np.array([svc_anom_dict.get(s, 0.) for s in cand_list])
-    high_cut = np.percentile(cand_anom_vals, 60) if len(cand_anom_vals) else 1.
-    high_sev_mask = np.array([1. if svc_anom_dict.get(s, 0.) >= high_cut else 0.
-                              for s in cand_list])
-
     # ── 7. Weighted residual + topology matrix ───────────────────────────────
     svc_residual: dict = {}
     for svc, score in svc_anom_dict.items():
@@ -585,13 +575,9 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         if u in svc_idx and v in svc_idx:
             topo_matrix[svc_idx[u], svc_idx[v]] = w
 
-    # ── 8. Bounded GA-Banzhaf computation ────────────────────────────────────
-    banzhaf_w = _approximate_banzhaf_ga_svc(
-        fitness_signal, topo_matrix, high_sev_mask,
-        n_generations=n_generations,
-        pop_size=pop_size,
-        ema_alpha=ema_alpha,
-        rng=rng,
+    # ── 8. Exact Banzhaf computation ─────────────────────────────────────────
+    banzhaf_w = _exact_banzhaf_topology(
+        fitness_signal, topo_matrix, alpha_topo=0.3
     )
     svc_banzhaf = {cand_list[i]: float(banzhaf_w[i]) for i in range(n_cand)}
 
