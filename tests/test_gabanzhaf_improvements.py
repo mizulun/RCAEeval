@@ -348,22 +348,23 @@ def test_exact_banzhaf_no_topology_proportional_to_anomaly():
 
 
 def test_exact_banzhaf_topology_promotes_root_cause():
-    """Topology penalty must increase the gap between root cause and victim.
+    """Topology reward must increase the gap between root cause and victim.
 
     Setup: n=2, A(idx=0) upstream of B(idx=1), A has higher anomaly score.
-    Analytical expected values:
+    Analytical expected values (reward-based v(S)):
       fitness = [0.9, 0.5], topo[0,1]=0.5, alpha=0.3
-      v({A})   = 0.9,  v({B})   = 0.5
-      v({A,B}) = 1.4 - 0.3*0.5 = 1.25   (B penalized: has upstream A in S)
-      Banzhaf(A) = (0.9 + 1.25-0.5) / 2  = (0.9 + 0.75) / 2 = 0.825
-      Banzhaf(B) = (0.5 + 1.25-0.9) / 2  = (0.5 + 0.35) / 2 = 0.425
+      v({A})   = 0.9
+      v({B})   = 0.5
+      v({A,B}) = 1.4 + 0.3*(0.5*0.5) = 1.475  (A→B edge bonus when both in S)
+      Banzhaf(A) = (0.9 + 1.475-0.5) / 2 = 0.9375
+      Banzhaf(B) = (0.5 + 1.475-0.9) / 2 = 0.5375
     """
     fs = np.array([0.9, 0.5], dtype=float)
     topo = np.zeros((2, 2), dtype=np.float32)
     topo[0, 1] = 0.5  # A(0) upstream of B(1)
     bz = _exact_banzhaf_topology(fs, topo, alpha_topo=0.3)
-    assert abs(bz[0] - 0.825) < 1e-6, f"Expected Banzhaf(A)=0.825, got {bz[0]}"
-    assert abs(bz[1] - 0.425) < 1e-6, f"Expected Banzhaf(B)=0.425, got {bz[1]}"
+    assert abs(bz[0] - 0.9375) < 1e-6, f"Expected Banzhaf(A)=0.9375, got {bz[0]}"
+    assert abs(bz[1] - 0.5375) < 1e-6, f"Expected Banzhaf(B)=0.5375, got {bz[1]}"
 
 
 def test_exact_banzhaf_topology_no_negative_values():
