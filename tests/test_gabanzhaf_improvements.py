@@ -379,30 +379,17 @@ def test_exact_banzhaf_topology_no_negative_values():
 
 
 def test_exact_banzhaf_mc_fallback_consistent_with_exact():
-    """MC fallback (n>20) must give rankings consistent with exact (tested on n=5).
+    """MC fallback (n>20) must rank the clear root cause first.
 
-    We compare rankings (not exact values) between exact (n=5) and MC with
-    large n_samples. Rankings must match for all pairs with clear gaps.
+    n=22 triggers MC path. service 0 has much higher anomaly (0.9 vs 0.3)
+    and is upstream of all others — it must have the highest Banzhaf value.
     """
-    rng = np.random.default_rng(42)
-    n = 5
-    fs = np.array([0.9, 0.7, 0.5, 0.3, 0.1])
-    topo = np.zeros((n, n), dtype=np.float32)
-    topo[0, 1] = 0.5  # 0 upstream of 1
-
-    # exact (EXACT_THRESHOLD >= n, so exact path used)
-    bz_exact = _exact_banzhaf_topology(fs, topo, alpha_topo=0.3, n_samples=500)
-
-    # Force MC path by monkey-patching threshold (we pass n_samples large to stabilise)
-    # We test MC path indirectly by using n > 20
-    # Build a n=22 case where manual ranking is known
     fs_big = np.array([0.9] + [0.3] * 21)
     topo_big = np.zeros((22, 22), dtype=np.float32)
-    # service 0 is upstream of all others
     for j in range(1, 22):
         topo_big[0, j] = 0.3
     bz_mc = _exact_banzhaf_topology(fs_big, topo_big, alpha_topo=0.3, n_samples=2000)
-    assert bz_mc[0] == bz_mc.max(), (
+    assert np.argmax(bz_mc) == 0, (
         f"Root cause (idx 0) should have max Banzhaf in MC path. bz={bz_mc}"
     )
 
