@@ -274,105 +274,118 @@ def _service_evidence(cols, metric_ev):
     return _norm_dict(svc_scores)
 
 
-def _eval_fitness_svc(pop, svc_anom_arr, topo_matrix, alpha_topo, penalty_weight):
-    """Vectorised fitness for service-level GA-Banzhaf.
+def _exact_banzhaf_topology(fitness_signal, topo_matrix, alpha_topo, n_samples=500):
+    """Exact or MC-sampled Banzhaf with topology-aware penalty.
 
-    coverage     = Σ svc_anom[v]  for selected v
-    topo_redund  = Σ svc_anom[v]  for selected v that has at least one
-                   selected upstream u→v  (v's anomaly is explained by u,
-                   so selecting v is redundant given u is already selected)
-    sparsity     = |S| × penalty / n_svcs
+    v(S) = coverage(S) - alpha_topo * topo_redundancy(S)
+
+    coverage(S)        = Σ_{i∈S} fitness_signal[i]
+    topo_redundancy(S) = Σ_{i∈S: ∃u∈S s.t. topo_matrix[u,i]>0} fitness_signal[i]
+
+    For n ≤ 20: exact enumeration over all 2^n subsets (vectorised).
+    For n > 20: uniform Monte Carlo with n_samples random subsets per service.
+
+    Returns non-negative Banzhaf values, one per service.
     """
-    n_svcs       = pop.shape[1]
-    sel_size     = pop.sum(axis=1)                               # (P,)
-    coverage     = pop @ svc_anom_arr                            # (P,)
-    upstream_sel = np.clip(pop @ topo_matrix, 0., 1.)            # (P, S)
-    explained    = upstream_sel * pop                            # (P, S)
-    topo_redund  = explained @ svc_anom_arr                      # (P,)
-    sparsity     = sel_size * penalty_weight / max(1, n_svcs)
-    fitness      = coverage - alpha_topo * topo_redund - sparsity
-    fitness[sel_size == 0] = 0.
-    return fitness
+    EXACT_THRESHOLD = 20
+    n = len(fitness_signal)
+
+    # upstream_masks[i] = integer bitmask of all u where topo_matrix[u, i] > 0
+    upstream_masks = np.zeros(n, dtype=np.int64)
+    for i in range(n):
+        for u in range(n):
+            if topo_matrix[u, i] > 0:
+                upstream_masks[i] |= np.int64(1 << u)
+
+    if n <= EXACT_THRESHOLD:
+        return _exact_banzhaf_enum(fitness_signal, upstream_masks, alpha_topo)
+    else:
+        return _mc_banzhaf(fitness_signal, upstream_masks, alpha_topo, n_samples)
 
 
-def _approximate_banzhaf_ga_svc(svc_anom_arr, topo_matrix, high_sev_mask,
-                                 n_generations=10, pop_size=20, ema_alpha=0.2,
-                                 alpha_topo=0.3, rng=None):
-    """Service-level GA-Banzhaf with topology-aware fitness.
+def _exact_banzhaf_enum(fitness_signal, upstream_masks, alpha_topo):
+    """Vectorised exact Banzhaf for n <= 20."""
+    n = len(fitness_signal)
+    N = 1 << n  # 2^n
+    all_S = np.arange(N, dtype=np.int64)
 
-    Binary vector over services: 1 = this service is part of the fault explanation.
+    # coverage[m] = Σ_{i: bit i set in m} fitness_signal[i]
+    coverage = np.zeros(N, dtype=float)
+    for i in range(n):
+        mask_i = np.int64(1 << i)
+        coverage[(all_S & mask_i) != 0] += fitness_signal[i]
 
-    fitness = coverage − alpha_topo × topo_redundancy − sparsity
+    # topo_red[m] = Σ_{i∈S: upstream_masks[i] & m ≠ 0} fitness_signal[i]
+    topo_red = np.zeros(N, dtype=float)
+    if alpha_topo > 0:
+        for i in range(n):
+            if upstream_masks[i] == 0:
+                continue
+            mask_i = np.int64(1 << i)
+            in_S = (all_S & mask_i) != 0
+            has_upstream = (all_S & upstream_masks[i]) != 0
+            topo_red[in_S & has_upstream] += fitness_signal[i]
 
-    Topology is baked into the fitness: downstream victims (explained by a
-    selected upstream) are penalised, so their Banzhaf values converge lower
-    than the true root cause without any separate PageRank step.
+    v = coverage - alpha_topo * topo_red
 
-    GA population is initialised with a soft high-evidence bias: services with
-    stronger unsupervised evidence are sampled more often in the initial pool.
+    # Banzhaf(i) = mean(v[S ∪ {i}] - v[S]) over S not containing i
+    banzhaf = np.zeros(n, dtype=float)
+    for i in range(n):
+        mask_i = np.int64(1 << i)
+        S_base = all_S[(all_S & mask_i) == 0]   # subsets not containing i
+        S_with = S_base | mask_i
+        banzhaf[i] = np.mean(v[S_with] - v[S_base])
+
+    return np.maximum(0., banzhaf)
+
+
+def _mc_banzhaf(fitness_signal, upstream_masks, alpha_topo, n_samples, seed=42):
+    """Monte Carlo Banzhaf estimation for n > 20.
+
+    Uses stratified coalition-size sampling (sizes 0 to n//2) to reduce
+    the variance that arises from large coalitions where upstream root-cause
+    marginals become negative due to the topology penalty.  Each sampled
+    coalition is drawn by first picking a coalition size k uniformly in
+    [0, n//2] and then choosing k services at random.
     """
-    if rng is None:
-        rng = np.random.default_rng(42)
+    n = len(fitness_signal)
+    rng = np.random.default_rng(seed)
+    banzhaf = np.zeros(n, dtype=float)
+    counts = np.zeros(n, dtype=float)
+    half_n = n // 2
 
-    n_svcs      = len(svc_anom_arr)
-    ema_banzhaf = np.zeros(n_svcs)
-    elite_k     = max(2, pop_size // 10)
-    p_mut_base  = 1.0 / max(1, n_svcs)
-    warmup_gens = n_generations // 3
+    def _v(m):
+        cov = 0.
+        topo_red = 0.
+        for i in range(n):
+            if (m >> i) & 1:
+                cov += fitness_signal[i]
+                if alpha_topo > 0 and upstream_masks[i] != 0 and (m & upstream_masks[i]):
+                    topo_red += fitness_signal[i]
+        return cov - alpha_topo * topo_red
 
-    # Evidence-biased initialisation
-    p_init = np.where(high_sev_mask > 0, 0.7, 0.3)
-    pop    = (rng.random((pop_size, n_svcs)) < p_init).astype(np.float32)
-    empty  = pop.sum(axis=1) == 0
-    if empty.any():
-        fix_idx = rng.integers(n_svcs, size=empty.sum())
-        pop[np.where(empty)[0], fix_idx] = 1.0
-
-    for gen in range(n_generations):
-        penalty_weight = min(0.1, 0.05 * (1.0 + gen / n_generations))
-
-        fitness = _eval_fitness_svc(pop, svc_anom_arr, topo_matrix,
-                                    alpha_topo, penalty_weight)
-
-        # ── Banzhaf marginal (vectorised over all services) ──────────────────
-        w_count  = pop.sum(axis=0)
-        wo_count = pop_size - w_count
-        w_sum    = (pop * fitness[:, None]).sum(axis=0)
-        wo_sum   = ((1. - pop) * fitness[:, None]).sum(axis=0)
-        w_mean   = np.where(w_count  > 0, w_sum  / np.maximum(w_count,  1.), 0.)
-        wo_mean  = np.where(wo_count > 0, wo_sum / np.maximum(wo_count, 1.), 0.)
-        current  = np.maximum(0., w_mean - wo_mean)
-        ema_banzhaf = ema_alpha * current + (1 - ema_alpha) * ema_banzhaf
-
-        # ── Elitism ──────────────────────────────────────────────────────────
-        elite_idx = np.argsort(fitness)[-elite_k:]
-        next_pop  = list(pop[elite_idx])
-
-        # ── Guided mutation (high-Banzhaf services mutate less) ──────────────
-        if gen >= warmup_gens and ema_banzhaf.max() > 0:
-            b_norm = ((ema_banzhaf - ema_banzhaf.min()) /
-                      (ema_banzhaf.max() - ema_banzhaf.min() + 1e-9))
-            p_flip = p_mut_base * (1.0 + (1.0 - b_norm))
+    for _ in range(n_samples):
+        k = int(rng.integers(0, half_n + 1))
+        if k == 0:
+            m = 0
         else:
-            p_flip = np.full(n_svcs, p_mut_base * 2)
+            bits = rng.choice(n, size=k, replace=False)
+            m = 0
+            for b in bits:
+                m |= (1 << int(b))
+        v_m = _v(m)
+        for i in range(n):
+            mask_i = 1 << i
+            if m & mask_i:
+                v_without = _v(m ^ mask_i)
+                banzhaf[i] += v_m - v_without
+            else:
+                v_with = _v(m | mask_i)
+                banzhaf[i] += v_with - v_m
+            counts[i] += 1
 
-        # ── Batch crossover + mutation ────────────────────────────────────────
-        n_offspring = pop_size - elite_k
-        p1_idx   = rng.integers(0, pop_size, size=n_offspring)
-        p2_idx   = rng.integers(0, pop_size, size=n_offspring)
-        mask     = rng.random((n_offspring, n_svcs)) < 0.5
-        children = np.where(mask, pop[p1_idx], pop[p2_idx]).copy()
-        flip     = rng.random((n_offspring, n_svcs)) < p_flip
-        children[flip] = 1.0 - children[flip]
-        empty    = children.sum(axis=1) == 0
-        if empty.any():
-            fix_idx = rng.integers(n_svcs, size=empty.sum())
-            children[np.where(empty)[0], fix_idx] = 1.0
-        next_pop.extend(list(children))
-
-        pop = np.array(next_pop[:pop_size], dtype=np.float32)
-
-    return ema_banzhaf
+    safe_counts = np.where(counts > 0, counts, 1.)
+    return np.maximum(0., banzhaf / safe_counts)
 
 
 def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
