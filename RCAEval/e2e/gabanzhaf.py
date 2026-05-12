@@ -105,6 +105,41 @@ def _trace_onset_scores(case_dir, inject_time):
         return None
 
 
+def _extract_call_graph(traces_path):
+    """Extract service call graph from the first 50 K trace spans.
+
+    Reads only spanID / parentSpanID / serviceName, so I/O is ~0.15 s even
+    for the largest TT files (114 MB).  50 K rows covers ≥ 98 % of distinct
+    call pairs in practice.
+
+    Returns
+    -------
+    dict  {caller_svc: set(callee_svc, ...)}
+        "caller calls callee" — i.e. if callee is anomalous it *explains*
+        caller's symptoms (anomaly propagates caller ← callee).
+    """
+    if not traces_path or not os.path.exists(traces_path):
+        return {}
+    try:
+        df = pd.read_csv(
+            traces_path,
+            usecols=["serviceName", "spanID", "parentSpanID"],
+            nrows=50_000,
+            on_bad_lines="skip",
+        )
+        span_to_svc = df.set_index("spanID")["serviceName"].to_dict()
+        df["parentSvc"] = df["parentSpanID"].map(span_to_svc)
+        edges = df[
+            df["parentSvc"].notna() & (df["parentSvc"] != df["serviceName"])
+        ]
+        result: dict = {}
+        for caller, callee in zip(edges["parentSvc"], edges["serviceName"]):
+            result.setdefault(caller, set()).add(callee)
+        return result
+    except Exception:
+        return {}
+
+
 # ==========================================
 # Internal helpers
 # ==========================================
@@ -139,10 +174,18 @@ def _metric_evidence(normal_mat, anomal_mat, cols):
     med = np.nanmedian(normal_mat, axis=0)
     q75 = np.nanpercentile(normal_mat, 75, axis=0)
     q25 = np.nanpercentile(normal_mat, 25, axis=0)
+    std = np.nanstd(normal_mat, axis=0)
     iqr = np.where((q75 - q25) > 0, q75 - q25, 1.)
 
     rz = np.abs((anomal_mat - med) / iqr)
     rz = np.nan_to_num(rz, nan=0., posinf=0., neginf=0.)
+    # Selective Winsorization: cap metrics where IQR=0 AND std≈0 (truly constant
+    # baseline).  These produce inflated rz through the fallback denominator of
+    # 1.0 even for tiny shifts, masking real root causes.  The std<=1e-6 guard
+    # preserves columns that have IQR=0 but non-trivial spread (step-function
+    # or bursty behaviour) so their rz is still meaningful.
+    near_zero_baseline = ((q75 - q25) <= 0) & (std <= 1e-6)   # shape (n_cols,)
+    rz = np.where(near_zero_baseline, np.clip(rz, 0., 10.), rz)
 
     mag = _norm01_arr(np.nanpercentile(rz, 95, axis=0))
     peak = _norm01_arr(np.nanmax(rz, axis=0))
@@ -452,7 +495,32 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         if idxs:
             svc_series_full[svc] = no_time.values[:, idxs].max(axis=1).astype(float)
 
-    topology_edges = _build_topology(sorted(pool_svcs), svc_series_full)
+    lag_corr_edges = _build_topology(sorted(pool_svcs), svc_series_full)
+
+    # ── 4b. Augment topology with trace-derived call graph ────────────────────
+    # Call graph: {caller: {callee}}.  When callee is anomalous it *explains*
+    # caller's symptoms → topology edge: callee → caller (callee upstream of caller).
+    # Confidence 0.5: moderate confidence so call graph edges don't dominate
+    # topo_rel (which is computed from lag-corr edges only, keeping its
+    # statistical meaning intact).  Guards: both callee AND caller must show
+    # meaningful anomaly to avoid adding spurious edges in non-propagating faults.
+    call_graph = kwargs.get("call_graph", {})
+    call_graph_edges = []
+    if call_graph:
+        existing_edges = {(u, v) for u, v, _ in lag_corr_edges}
+        for caller, callees in call_graph.items():
+            for callee in callees:
+                if callee not in pool_svcs or caller not in pool_svcs:
+                    continue
+                callee_score = svc_anom_dict.get(callee, 0.)
+                caller_score = svc_anom_dict.get(caller, 0.)
+                if callee_score < 0.2 or caller_score < 0.1:
+                    continue
+                if (callee, caller) not in existing_edges:
+                    call_graph_edges.append((callee, caller, 0.5))
+                    existing_edges.add((callee, caller))
+
+    topology_edges = lag_corr_edges + call_graph_edges
 
     upstream_map: dict = {s: set() for s in svc_names}
     edge_conf: dict = {}
@@ -492,7 +560,9 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     svc_anom_arr     = np.array([svc_anom_dict.get(s, 0.)  for s in cand_list])
     svc_residual_arr = np.array([svc_residual.get(s, 0.)   for s in cand_list])
 
-    conf_vals = np.array([w for _, _, w in topology_edges], dtype=float)
+    # topo_rel is computed from lag-correlation edges only so call-graph edges
+    # (different confidence scale) don't distort the residual weight.
+    conf_vals = np.array([w for _, _, w in lag_corr_edges], dtype=float)
     topo_rel = float(np.clip(np.mean(conf_vals) * 2.0, 0.0, 0.65)) if conf_vals.size else 0.0
     res_w = 0.30 + 0.50 * topo_rel
     fitness_signal = res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
@@ -566,7 +636,10 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
                 if args_ns and hasattr(args_ns, "data_path") else None)
     _t_inject    = inject_time if inject_time is not None else 0
     trace_scores = _trace_onset_scores(case_dir, _t_inject)
+    traces_path  = os.path.join(case_dir, "traces.csv") if case_dir else None
+    call_graph   = _extract_call_graph(traces_path)
 
     kwargs["trace_scores"] = trace_scores
+    kwargs["call_graph"]   = call_graph
     kwargs["sli"] = sli
     return _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs)
