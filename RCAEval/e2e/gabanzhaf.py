@@ -440,7 +440,7 @@ def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
 def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     """
     Pipeline: window split → metric evidence → service evidence
-              → bounded weighted topology → GA-Banzhaf → metric ranking
+              → bounded weighted topology → Banzhaf → metric ranking
     """
     top_k_svcs    = int(kwargs.get("top_k_svcs", 15))
     max_cand      = int(kwargs.get("max_candidate_svcs", top_k_svcs + 5))
@@ -626,7 +626,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
     Missing modalities receive zero reliability instead of switching to a
     separate ranking path.
 
-    Service-level GA approximates Banzhaf power indices while final ranking
+    Service-level Banzhaf (exact for n≤20, MC-sampled for larger systems) while final ranking
     keeps metric-local evidence so metric-level AC@k is not collapsed to a
     service-only score.
     """
