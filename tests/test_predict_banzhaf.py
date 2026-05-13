@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
 
+import RCAEval.e2e.predict_banzhaf as predict_banzhaf_module
 from RCAEval.e2e.predict_banzhaf import (
     _build_service_health_scores,
+    _forecast_service,
     _granger_edge_weight,
     _mc_banzhaf,
     _norm_dict,
@@ -80,3 +82,30 @@ def test_mc_banzhaf_promotes_root_over_downstream_victim():
 
     assert values.shape == (2,)
     assert values[0] > values[1]
+
+
+def test_forecast_service_ignores_errors_below_normal_median(monkeypatch):
+    y = np.zeros(8, dtype=float)
+    base = np.array([10.0, 10.0, 10.0, 10.0, 1.0, 1.0, 1.0, 1.0])
+    residual = np.zeros_like(y)
+
+    def fake_stl_decompose_health(health, split_idx):
+        return base, residual, True
+
+    def fake_residual_prediction(residual, split_idx, max_lag, random_state):
+        return np.zeros_like(residual)
+
+    monkeypatch.setattr(
+        predict_banzhaf_module,
+        "_stl_decompose_health",
+        fake_stl_decompose_health,
+    )
+    monkeypatch.setattr(
+        predict_banzhaf_module,
+        "_elasticnet_residual_prediction",
+        fake_residual_prediction,
+    )
+
+    _, _, score = _forecast_service(y, split_idx=4, max_lag=2, random_state=0)
+
+    assert score == 0.0
