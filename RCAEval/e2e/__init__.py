@@ -59,6 +59,7 @@ if is_py310() or is_py312():
     from .tracerca import tracerca
     from .banzhaf import local_banzhaf as banzhaf
     from .gabanzhaf import gabanzhaf
+    from .predict_banzhaf import predict_banzhaf
 else:
     from .rcd import rcd
     from .mmrcd import mmrcd
@@ -127,7 +128,6 @@ def nsigma(data, inject_time=None, dataset=None, num_loop=None, sli=None, anomal
         "node_names": normal_df.columns.to_list(),
         "ranks": ranks,
     }
-
 
 
 
@@ -252,7 +252,6 @@ def ht(data, inject_time=None, dataset=None, num_loop=None, sli=None, anomalies=
         "node_names": normal_df.columns.to_list(),
         "ranks": ranks,
     }
-
 
 
 

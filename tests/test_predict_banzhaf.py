@@ -1,7 +1,9 @@
+import importlib
+
 import numpy as np
 import pandas as pd
 
-import RCAEval.e2e.predict_banzhaf as predict_banzhaf_module
+predict_banzhaf_module = importlib.import_module("RCAEval.e2e.predict_banzhaf")
 from RCAEval.e2e.predict_banzhaf import (
     _build_adjacency,
     _build_service_health_scores,
@@ -260,3 +262,9 @@ def test_predict_banzhaf_is_deterministic_for_fixed_seed():
     assert first["ranks"] == second["ranks"]
     assert first["service_ranks"] == second["service_ranks"]
     assert np.allclose(first["adj"], second["adj"])
+
+
+def test_predict_banzhaf_exported_from_e2e_package():
+    from RCAEval.e2e import predict_banzhaf as exported
+
+    assert exported is predict_banzhaf
