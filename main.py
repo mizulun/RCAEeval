@@ -68,6 +68,7 @@ if is_py310():
         tracerca,
         banzhaf,
         gabanzhaf,
+        predict_banzhaf,
     )
 
 elif is_py312():
@@ -438,4 +439,3 @@ for name, s_evaluator, f_evaluator in [
 
 print("---")
 print("Avg speed:", avg_speed)
-
