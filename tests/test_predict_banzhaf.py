@@ -10,6 +10,7 @@ from RCAEval.e2e.predict_banzhaf import (
     _norm_dict,
     _parse_service_metric,
     _service_groups,
+    predict_banzhaf,
 )
 
 
@@ -109,3 +110,71 @@ def test_forecast_service_ignores_errors_below_normal_median(monkeypatch):
     _, _, score = _forecast_service(y, split_idx=4, max_lag=2, random_state=0)
 
     assert score == 0.0
+
+
+def _make_predict_banzhaf_frame(n=100, split=50):
+    rng = np.random.default_rng(11)
+    return pd.DataFrame(
+        {
+            "time": np.arange(n),
+            "root_cpu": np.r_[
+                rng.normal(0, 0.1, split), rng.normal(4, 0.2, n - split)
+            ],
+            "root_mem": np.r_[
+                rng.normal(0, 0.1, split), rng.normal(3, 0.2, n - split)
+            ],
+            "victim_latency": np.r_[
+                rng.normal(0, 0.1, split), rng.normal(2, 0.2, n - split)
+            ],
+            "quiet_cpu": rng.normal(0, 0.1, n),
+        }
+    )
+
+
+def test_predict_banzhaf_returns_rcaeval_format_trace_less():
+    df = _make_predict_banzhaf_frame()
+
+    result = predict_banzhaf(
+        df,
+        inject_time=50,
+        dataset=None,
+        banzhaf_samples=200,
+        top_k_svcs=10,
+        max_candidate_svcs=10,
+        random_state=3,
+    )
+
+    assert "ranks" in result
+    assert "node_names" in result
+    assert "service_ranks" in result
+    assert "adj" in result
+    assert set(result["ranks"]) == {
+        "root_cpu",
+        "root_mem",
+        "victim_latency",
+        "quiet_cpu",
+    }
+    assert result["node_names"] == [
+        "root_cpu",
+        "root_mem",
+        "victim_latency",
+        "quiet_cpu",
+    ]
+    assert result["ranks"][0].startswith("root_")
+
+
+def test_predict_banzhaf_is_deterministic_for_fixed_seed():
+    df = _make_predict_banzhaf_frame()
+    kwargs = {
+        "inject_time": 50,
+        "dataset": None,
+        "banzhaf_samples": 200,
+        "random_state": 123,
+    }
+
+    first = predict_banzhaf(df, **kwargs)
+    second = predict_banzhaf(df, **kwargs)
+
+    assert first["ranks"] == second["ranks"]
+    assert first["service_ranks"] == second["service_ranks"]
+    assert np.allclose(first["adj"], second["adj"])
