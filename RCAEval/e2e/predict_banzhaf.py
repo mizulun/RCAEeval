@@ -15,6 +15,7 @@ from RCAEval.io.time_series import preprocess
 
 
 _EPS = 1e-9
+_TRACE_ROW_LIMIT = 50000
 
 
 def _to_1d_float(x) -> np.ndarray:
@@ -44,6 +45,13 @@ def _norm_dict(values: Dict[str, float]) -> Dict[str, float]:
     if hi - lo < _EPS:
         return {k: 0.0 for k in keys}
     return {k: float((arr[i] - lo) / (hi - lo)) for i, k in enumerate(keys)}
+
+
+def _clean_trace_id(value) -> str | None:
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return None
+    return text
 
 
 def _parse_service_metric(col: str) -> Tuple[str, str]:
@@ -328,6 +336,22 @@ def _read_trace_edges(case_dir: str | None) -> List[Tuple[str, str, float]]:
         return []
     try:
         cols = set(pd.read_csv(path, nrows=0).columns)
+        if {"parentServiceName", "serviceName"}.issubset(cols):
+            edges = set()
+            for chunk in pd.read_csv(
+                path,
+                usecols=["parentServiceName", "serviceName"],
+                chunksize=10000,
+                nrows=_TRACE_ROW_LIMIT,
+                dtype=str,
+            ):
+                parents = chunk["parentServiceName"].map(_clean_trace_id)
+                services = chunk["serviceName"].map(_clean_trace_id)
+                for caller, callee in zip(parents, services):
+                    if caller and callee and caller != callee:
+                        edges.add((callee, caller, 1.0))
+            return sorted(edges)
+
         for caller, callee in [
             ("caller_service", "callee_service"),
             ("callerService", "calleeService"),
@@ -336,29 +360,65 @@ def _read_trace_edges(case_dir: str | None) -> List[Tuple[str, str, float]]:
         ]:
             if {caller, callee}.issubset(cols):
                 edges = set()
-                for chunk in pd.read_csv(path, usecols=[caller, callee], chunksize=10000):
-                    callers = chunk[caller].astype(str)
-                    callees = chunk[callee].astype(str)
+                for chunk in pd.read_csv(
+                    path,
+                    usecols=[caller, callee],
+                    chunksize=10000,
+                    nrows=_TRACE_ROW_LIMIT,
+                    dtype=str,
+                ):
+                    callers = chunk[caller].map(_clean_trace_id)
+                    callees = chunk[callee].map(_clean_trace_id)
                     for c, d in zip(callers, callees):
-                        if c and d and c.lower() != "nan" and d.lower() != "nan" and c != d:
+                        if c and d and c != d:
                             edges.add((d, c, 1.0))
-                    if len(edges) >= 1000:
-                        break
                 return sorted(edges)
 
         if {"serviceName", "spanID", "parentSpanID"}.issubset(cols):
+            trace_col = next(
+                (c for c in ["traceID", "trace_id", "traceId"] if c in cols),
+                None,
+            )
+            usecols = ["serviceName", "spanID", "parentSpanID"]
+            if trace_col is not None:
+                usecols.append(trace_col)
             df = pd.read_csv(
                 path,
-                usecols=["serviceName", "spanID", "parentSpanID"],
-                nrows=50000,
+                usecols=usecols,
+                nrows=_TRACE_ROW_LIMIT,
+                dtype=str,
                 on_bad_lines="skip",
             )
-            span_to_svc = df.set_index("spanID")["serviceName"].astype(str).to_dict()
-            df["parentSvc"] = df["parentSpanID"].map(span_to_svc)
+            for col in usecols:
+                df[col] = df[col].map(_clean_trace_id)
+            if trace_col is not None:
+                span_to_svc = {
+                    (trace_id, span_id): svc
+                    for trace_id, span_id, svc in zip(
+                        df[trace_col],
+                        df["spanID"],
+                        df["serviceName"],
+                    )
+                    if trace_id and span_id and svc
+                }
+                df["parentSvc"] = [
+                    span_to_svc.get((trace_id, parent_span_id))
+                    for trace_id, parent_span_id in zip(
+                        df[trace_col],
+                        df["parentSpanID"],
+                    )
+                ]
+            else:
+                span_to_svc = {
+                    span_id: svc
+                    for span_id, svc in zip(df["spanID"], df["serviceName"])
+                    if span_id and svc
+                }
+                df["parentSvc"] = df["parentSpanID"].map(span_to_svc)
             edges = set()
-            for caller, callee in zip(df["parentSvc"], df["serviceName"].astype(str)):
-                if pd.notna(caller) and str(caller) != str(callee):
-                    edges.add((str(callee), str(caller), 1.0))
+            for caller, callee in zip(df["parentSvc"], df["serviceName"]):
+                if caller and callee and caller != callee:
+                    edges.add((callee, caller, 1.0))
             return sorted(edges)
     except Exception:
         return []
@@ -374,18 +434,41 @@ def _candidate_services(
     max_candidate: int,
 ) -> List[str]:
     ranked = sorted(services, key=lambda s: (-anomaly_scores.get(s, 0.0), s))
-    candidates = set(ranked[: max(1, int(top_k))])
+    service_set = set(services)
+    cap = max(1, int(max_candidate))
+    sli_svc = None
+    must_keep = set()
     if sli:
         svc, _ = _parse_service_metric(sli)
-        if svc in services:
-            candidates.add(svc)
+        if svc in service_set:
+            sli_svc = svc
+            must_keep.add(svc)
     for u, v, _ in trace_edges:
-        if u in services:
-            candidates.add(u)
-        if v in services:
-            candidates.add(v)
-    capped = sorted(candidates, key=lambda s: (-anomaly_scores.get(s, 0.0), s))
-    return sorted(capped[: max(1, int(max_candidate))])
+        if u in service_set:
+            must_keep.add(u)
+        if v in service_set:
+            must_keep.add(v)
+
+    selected: List[str] = []
+    if sli_svc is not None:
+        selected.append(sli_svc)
+
+    remaining_must = sorted(
+        must_keep - set(selected),
+        key=lambda s: (-anomaly_scores.get(s, 0.0), s),
+    )
+    selected.extend(remaining_must[: max(0, cap - len(selected))])
+    if len(selected) < cap:
+        fill_ranked = [
+            svc
+            for svc in ranked[: max(1, int(top_k))]
+            if svc not in set(selected)
+        ]
+        selected.extend(fill_ranked[: cap - len(selected)])
+    if len(selected) < cap:
+        fallback = [svc for svc in ranked if svc not in set(selected)]
+        selected.extend(fallback[: cap - len(selected)])
+    return sorted(selected[:cap])
 
 
 def _build_adjacency(
@@ -425,6 +508,16 @@ def _build_adjacency(
             T[idx[u], idx[v]] = max(T[idx[u], idx[v]], float(w))
 
     A = np.maximum(G, float(trace_prior) * T)
+    np.fill_diagonal(A, 0.0)
+    if max_in_edges <= 0:
+        return np.zeros_like(A)
+    for j in range(n):
+        parents = np.where(A[:, j] > 0.0)[0]
+        if len(parents) > max_in_edges:
+            keep = parents[np.argsort(A[parents, j])[-max_in_edges:]]
+            drop = set(parents) - set(keep)
+            for i in drop:
+                A[i, j] = 0.0
     np.fill_diagonal(A, 0.0)
     return A
 
@@ -530,5 +623,6 @@ def predict_banzhaf(
         "ranks": ranks,
         "node_names": cols,
         "service_ranks": service_ranks,
+        "service_node_names": candidates,
         "adj": adj,
     }

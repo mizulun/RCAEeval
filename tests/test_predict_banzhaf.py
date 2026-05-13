@@ -3,12 +3,15 @@ import pandas as pd
 
 import RCAEval.e2e.predict_banzhaf as predict_banzhaf_module
 from RCAEval.e2e.predict_banzhaf import (
+    _build_adjacency,
     _build_service_health_scores,
+    _candidate_services,
     _forecast_service,
     _granger_edge_weight,
     _mc_banzhaf,
     _norm_dict,
     _parse_service_metric,
+    _read_trace_edges,
     _service_groups,
     predict_banzhaf,
 )
@@ -112,6 +115,82 @@ def test_forecast_service_ignores_errors_below_normal_median(monkeypatch):
     assert score == 0.0
 
 
+def test_candidate_services_keeps_low_anomaly_sli_under_small_cap():
+    services = ["root", "victim", "noisy"]
+    anomaly_scores = {"root": 0.9, "victim": 0.01, "noisy": 0.8}
+
+    candidates = _candidate_services(
+        services,
+        anomaly_scores,
+        sli="victim_latency",
+        trace_edges=[],
+        top_k=1,
+        max_candidate=1,
+    )
+
+    assert candidates == ["victim"]
+
+
+def test_build_adjacency_caps_incoming_edges_after_trace_fusion():
+    candidates = ["a", "b", "c", "d"]
+    residuals = {svc: np.zeros(20, dtype=float) for svc in candidates}
+    trace_edges = [("a", "d", 1.0), ("b", "d", 0.8), ("c", "d", 0.6)]
+
+    adj = _build_adjacency(
+        candidates,
+        residuals,
+        trace_edges,
+        max_lag=2,
+        alpha=0.05,
+        max_in_edges=1,
+        trace_prior=1.0,
+    )
+
+    assert np.count_nonzero(adj[:, 3]) == 1
+    assert adj[0, 3] == 1.0
+    assert adj[1, 3] == 0.0
+    assert adj[2, 3] == 0.0
+
+
+def test_read_trace_edges_does_not_cross_join_reused_span_ids(tmp_path):
+    traces = pd.DataFrame(
+        [
+            {
+                "traceID": "trace-a",
+                "spanID": "1",
+                "parentSpanID": "",
+                "serviceName": "frontend",
+            },
+            {
+                "traceID": "trace-a",
+                "spanID": "2",
+                "parentSpanID": "1",
+                "serviceName": "checkout",
+            },
+            {
+                "traceID": "trace-b",
+                "spanID": "1",
+                "parentSpanID": "",
+                "serviceName": "payments",
+            },
+            {
+                "traceID": "trace-b",
+                "spanID": "2",
+                "parentSpanID": "1",
+                "serviceName": "shipping",
+            },
+        ]
+    )
+    traces.to_csv(tmp_path / "traces.csv", index=False)
+
+    edges = _read_trace_edges(str(tmp_path))
+
+    assert ("checkout", "frontend", 1.0) in edges
+    assert ("shipping", "payments", 1.0) in edges
+    assert ("checkout", "payments", 1.0) not in edges
+    assert ("shipping", "frontend", 1.0) not in edges
+
+
 def _make_predict_banzhaf_frame(n=100, split=50):
     rng = np.random.default_rng(11)
     return pd.DataFrame(
@@ -147,6 +226,7 @@ def test_predict_banzhaf_returns_rcaeval_format_trace_less():
     assert "ranks" in result
     assert "node_names" in result
     assert "service_ranks" in result
+    assert "service_node_names" in result
     assert "adj" in result
     assert set(result["ranks"]) == {
         "root_cpu",
@@ -160,6 +240,8 @@ def test_predict_banzhaf_returns_rcaeval_format_trace_less():
         "victim_latency",
         "quiet_cpu",
     ]
+    assert result["service_node_names"] == ["quiet", "root", "victim"]
+    assert result["adj"].shape == (3, 3)
     assert result["ranks"][0].startswith("root_")
 
 
