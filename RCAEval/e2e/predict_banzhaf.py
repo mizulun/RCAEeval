@@ -10,8 +10,6 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.seasonal import STL
 from statsmodels.tsa.stattools import grangercausalitytests
 
-from RCAEval.io.time_series import preprocess
-
 
 _EPS = 1e-9
 
@@ -98,23 +96,26 @@ def _build_service_health_scores(
     return scores
 
 
-def _stl_decompose_health(health: np.ndarray, split_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+def _stl_decompose_health(
+    health: np.ndarray,
+    split_idx: int,
+) -> Tuple[np.ndarray, np.ndarray, bool]:
     y = _to_1d_float(health)
     if y.size < 6:
-        return np.zeros_like(y), np.zeros_like(y)
+        return np.zeros_like(y), np.zeros_like(y), False
 
     normal_len = max(2, min(int(split_idx), len(y)))
     period = int(min(24, max(2, normal_len // 4)))
     if len(y) < period * 2:
-        return np.zeros_like(y), np.zeros_like(y)
+        return np.zeros_like(y), np.zeros_like(y), False
 
     try:
         res = STL(y, period=period, robust=True).fit()
         base = np.nan_to_num(res.trend + res.seasonal, nan=0.0)
         residual = np.nan_to_num(res.resid, nan=0.0)
-        return base, residual
+        return base, residual, True
     except Exception:
-        return np.zeros_like(y), np.zeros_like(y)
+        return np.zeros_like(y), np.zeros_like(y), False
 
 
 def _lag_features(series: np.ndarray, max_lag: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -157,7 +158,9 @@ def _forecast_service(
     random_state: int,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     y = _to_1d_float(health)
-    base, residual = _stl_decompose_health(y, split_idx)
+    base, residual, stl_ok = _stl_decompose_health(y, split_idx)
+    if not stl_ok:
+        return np.zeros_like(y), np.zeros_like(y), 0.0
     residual_pred = _elasticnet_residual_prediction(residual, split_idx, max_lag, random_state)
     combined = base + residual_pred
 
@@ -170,7 +173,12 @@ def _forecast_service(
     q75 = float(np.percentile(normal_err, 75)) if normal_err.size else 1.0
     q25 = float(np.percentile(normal_err, 25)) if normal_err.size else 0.0
     denom = max(q75 - q25, float(np.std(normal_err)) if normal_err.size else 0.0, _EPS)
-    rz = np.nan_to_num(np.abs((anomal_err - med) / denom), nan=0.0, posinf=0.0, neginf=0.0)
+    rz = np.nan_to_num(
+        np.maximum(0.0, (anomal_err - med) / denom),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     p95 = float(np.percentile(rz, 95)) if rz.size else 0.0
     persistence = float(np.mean(rz > 3.0)) if rz.size else 0.0
     peak = float(np.max(rz)) if rz.size else 0.0
