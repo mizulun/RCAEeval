@@ -348,23 +348,25 @@ def test_exact_banzhaf_no_topology_proportional_to_anomaly():
 
 
 def test_exact_banzhaf_topology_promotes_root_cause():
-    """Topology reward must increase the gap between root cause and victim.
+    """Topology (causal coverage) must rank root cause above victim unconditionally.
 
-    Setup: n=2, A(idx=0) upstream of B(idx=1), A has higher anomaly score.
-    Analytical expected values (reward-based v(S)):
-      fitness = [0.9, 0.5], topo[0,1]=0.5, alpha=0.3
-      v({A})   = 0.9
-      v({B})   = 0.5
-      v({A,B}) = 1.4 + 0.3*(0.5*0.5) = 1.475  (A→B edge bonus when both in S)
-      Banzhaf(A) = (0.9 + 1.475-0.5) / 2 = 0.9375
-      Banzhaf(B) = (0.5 + 1.475-0.9) / 2 = 0.5375
+    Setup: n=2, A(idx=0) upstream of B(idx=1), fitness=[0.9, 0.5], topo[0,1]=0.5.
+    Analytical expected values (causal-coverage v(S)):
+      downstream_masks[A] = {B}
+      v({})    = 0
+      v({A})   = fitness[A] + fitness[B] = 1.4   (A explains B)
+      v({B})   = fitness[B]              = 0.5   (B explains nothing)
+      v({A,B}) = fitness[A] + fitness[B] = 1.4
+      Banzhaf(A) = mean([1.4 - 0,  1.4 - 0.5]) = mean([1.4, 0.9]) = 1.15
+      Banzhaf(B) = mean([0.5 - 0,  1.4 - 1.4]) = mean([0.5, 0.0]) = 0.25
+    Root cause ALWAYS dominates regardless of relative anomaly magnitudes.
     """
     fs = np.array([0.9, 0.5], dtype=float)
     topo = np.zeros((2, 2), dtype=np.float32)
     topo[0, 1] = 0.5  # A(0) upstream of B(1)
     bz = _exact_banzhaf_topology(fs, topo, alpha_topo=0.3)
-    assert abs(bz[0] - 0.9375) < 1e-6, f"Expected Banzhaf(A)=0.9375, got {bz[0]}"
-    assert abs(bz[1] - 0.5375) < 1e-6, f"Expected Banzhaf(B)=0.5375, got {bz[1]}"
+    assert abs(bz[0] - 1.15) < 1e-6, f"Expected Banzhaf(A)=1.15, got {bz[0]}"
+    assert abs(bz[1] - 0.25) < 1e-6, f"Expected Banzhaf(B)=0.25, got {bz[1]}"
 
 
 def test_exact_banzhaf_topology_no_negative_values():
