@@ -29,6 +29,9 @@ def dump_json(filename: str, data):
     """
     Dump data into a json file
     """
+    parent = os.path.dirname(filename)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(filename, "w", encoding=ENCODING) as obj:
         json.dump(data, obj, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -371,5 +374,4 @@ def read_data(data_path, strip=True):
     )
 
     return data
-
 

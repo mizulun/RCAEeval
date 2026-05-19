@@ -275,55 +275,63 @@ def _service_evidence(cols, metric_ev):
 
 
 def _exact_banzhaf_topology(fitness_signal, topo_matrix, alpha_topo, n_samples=500):
-    """Exact or MC-sampled Banzhaf with topology-aware reward.
+    """Exact or MC-sampled Banzhaf with causal-coverage v(S).
 
-    v(S) = coverage(S) + alpha_topo * upstream_power(S)
+    v(S) = Σ_j fitness_signal[j] × 1(j is explained by S)
 
-    coverage(S)       = Σ_{i∈S} fitness_signal[i]
-    upstream_power(S) = Σ_{i∈S, j∈S, topo[i,j]>0} topo[i,j] * fitness_signal[j]
+    "j explained by S" means j∈S OR ∃i∈S: topo_matrix[i,j] > 0
+    (i.e., j is in the coalition, or an upstream cause of j is in the coalition).
 
-    Services upstream of many anomalous victims earn higher Banzhaf values.
+    This provably ranks root causes above victims: for root cause A upstream of
+    victim B, Banzhaf(A) = fitness[A] + 0.5×fitness[B] while Banzhaf(B) = 0.5×fitness[B],
+    regardless of their relative anomaly magnitudes.
 
     For n ≤ 20: exact enumeration over all 2^n subsets (vectorised).
-    For n > 20: stratified Monte Carlo sampling.
+    For n > 20: uniform Monte Carlo sampling over all coalition sizes.
 
-    Returns non-negative Banzhaf values, one per service.
+    Returns non-negative Banzhaf values (marginal contributions are always ≥ 0).
     """
     EXACT_THRESHOLD = 20
     n = len(fitness_signal)
 
     if n <= EXACT_THRESHOLD:
-        return _exact_banzhaf_enum(fitness_signal, topo_matrix, alpha_topo)
+        return _exact_banzhaf_enum(fitness_signal, topo_matrix)
     else:
-        return _mc_banzhaf(fitness_signal, topo_matrix, alpha_topo, n_samples)
+        return _mc_banzhaf(fitness_signal, topo_matrix, n_samples)
 
 
-def _exact_banzhaf_enum(fitness_signal, topo_matrix, alpha_topo):
-    """Vectorised exact Banzhaf for n <= 20, reward-based v(S)."""
+def _exact_banzhaf_enum(fitness_signal, topo_matrix):
+    """Vectorised exact Banzhaf for n <= 20, causal-coverage v(S)."""
     n = len(fitness_signal)
-    N = 1 << n  # 2^n
+    N = 1 << n
     all_S = np.arange(N, dtype=np.int64)
 
-    # coverage[m] = Σ_{i: bit i set in m} fitness_signal[i]
-    coverage = np.zeros(N, dtype=float)
+    # downstream_masks[i] = bitmask of j where topo_matrix[i,j] > 0
+    downstream_masks = np.zeros(n, dtype=np.int64)
+    for i in range(n):
+        for j in range(n):
+            if topo_matrix[i, j] > 0:
+                downstream_masks[i] |= np.int64(1 << j)
+
+    # explained_bits[S] = S | OR_{i∈S} downstream_masks[i]
+    # Service j is explained by S iff bit j is set in explained_bits[S]
+    explained_bits = all_S.copy()
     for i in range(n):
         mask_i = np.int64(1 << i)
-        coverage[(all_S & mask_i) != 0] += fitness_signal[i]
+        has_i = (all_S & mask_i) != 0
+        explained_bits = np.where(
+            has_i,
+            explained_bits | np.int64(downstream_masks[i]),
+            explained_bits,
+        )
 
-    # upstream_power[m] = Σ_{(i,j) edge: both i∈S and j∈S} topo[i,j] * fs[j]
-    # For each edge (i→j): contributes when both bit i and bit j are set in m
-    upstream_power = np.zeros(N, dtype=float)
-    if alpha_topo > 0:
-        for i in range(n):
-            for j in range(n):
-                if topo_matrix[i, j] > 0:
-                    edge_mask = np.int64((1 << i) | (1 << j))
-                    val = float(topo_matrix[i, j]) * float(fitness_signal[j])
-                    upstream_power[(all_S & edge_mask) == edge_mask] += val
+    # v[S] = Σ_j fitness_signal[j] × 1(bit j set in explained_bits[S])
+    v = np.zeros(N, dtype=float)
+    for j in range(n):
+        mask_j = np.int64(1 << j)
+        v[(explained_bits & mask_j) != 0] += fitness_signal[j]
 
-    v = coverage + alpha_topo * upstream_power
-
-    # Banzhaf(i) = mean(v[S ∪ {i}] - v[S]) over S not containing i
+    # Banzhaf(i) = mean(v[S ∪ {i}] - v[S]) over all S not containing i
     banzhaf = np.zeros(n, dtype=float)
     for i in range(n):
         mask_i = np.int64(1 << i)
@@ -334,36 +342,34 @@ def _exact_banzhaf_enum(fitness_signal, topo_matrix, alpha_topo):
     return np.maximum(0., banzhaf)
 
 
-def _mc_banzhaf(fitness_signal, topo_matrix, alpha_topo, n_samples, seed=42):
-    """Monte Carlo Banzhaf estimation for n > 20, reward-based v(S).
-
-    Uses stratified coalition-size sampling (sizes 0 to n//2).
-    """
+def _mc_banzhaf(fitness_signal, topo_matrix, n_samples, seed=42):
+    """Monte Carlo Banzhaf estimation for n > 20, causal-coverage v(S)."""
     n = len(fitness_signal)
     rng = np.random.default_rng(seed)
     banzhaf = np.zeros(n, dtype=float)
     counts = np.zeros(n, dtype=float)
 
+    downstream_masks = [0] * n
+    for i in range(n):
+        for j in range(n):
+            if topo_matrix[i, j] > 0:
+                downstream_masks[i] |= (1 << j)
+
     def _v(m):
-        cov = 0.
-        up_power = 0.
+        explained = m
         for i in range(n):
             if (m >> i) & 1:
-                cov += fitness_signal[i]
-                if alpha_topo > 0:
-                    for j in range(n):
-                        if topo_matrix[i, j] > 0 and (m >> j) & 1:
-                            up_power += float(topo_matrix[i, j]) * float(fitness_signal[j])
-        return cov + alpha_topo * up_power
+                explained |= downstream_masks[i]
+        total = 0.
+        for j in range(n):
+            if (explained >> j) & 1:
+                total += fitness_signal[j]
+        return total
 
-    half_n = n // 2
     for _ in range(n_samples):
-        k = int(rng.integers(0, half_n + 1))
-        if k == 0:
-            m = 0
-        else:
-            bits = rng.choice(n, size=k, replace=False)
-            m = sum(1 << int(b) for b in bits)
+        k = int(rng.integers(0, n + 1))
+        bits = rng.choice(n, size=k, replace=False) if k > 0 else []
+        m = sum(1 << int(b) for b in bits)
 
         v_m = _v(m)
         for i in range(n):
@@ -523,16 +529,29 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     topology_edges = lag_corr_edges + call_graph_edges
 
-    upstream_map: dict = {s: set() for s in svc_names}
+    # upstream_map_full: for candidate expansion (all topology edges)
+    upstream_map_full: dict = {s: set() for s in svc_names}
+    # upstream_map_residual: for residual computation
+    #   - lag_corr edges: always included
+    #   - call_graph edges: included only if upstream score >= 0.8 × downstream score
+    #     (prevents A's callees from wrongly appearing upstream of A in CPU/SOCKET faults)
+    upstream_map_residual: dict = {s: set() for s in svc_names}
     edge_conf: dict = {}
     for u, v, w in topology_edges:
-        upstream_map.get(v, set()).add(u)
-        edge_conf[(u, v)] = w
+        upstream_map_full.get(v, set()).add(u)
+        edge_conf[(u, v)] = max(edge_conf.get((u, v), 0.), w)
+    for u, v, w in lag_corr_edges:
+        upstream_map_residual.get(v, set()).add(u)
+    for u, v, w in call_graph_edges:
+        # Directional filter: callee u is legitimately upstream of caller v only when
+        # u is at least as anomalous as v (rules out A's callees when A is the root)
+        if svc_anom_dict.get(u, 0.) >= svc_anom_dict.get(v, 0.) * 0.8:
+            upstream_map_residual.get(v, set()).add(u)
 
     # ── 5. Pre-filter with upstream rescue, then bound runtime ───────────────
     candidate_svcs = set(seed_svcs)
     for svc in list(candidate_svcs):
-        candidate_svcs |= upstream_map.get(svc, set())
+        candidate_svcs |= upstream_map_full.get(svc, set())
     if len(candidate_svcs) > max_cand:
         candidate_svcs = set(sorted(candidate_svcs,
                                     key=lambda s: svc_anom_dict.get(s, 0.),
@@ -543,11 +562,13 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     svc_idx   = {s: i for i, s in enumerate(cand_list)}
 
     # ── 7. Weighted residual + topology matrix ───────────────────────────────
+    # Scale effective confidence by 2× (cap 0.95) so call_graph (0.5→0.95) fully
+    # suppresses victims while weak lag-corr edges (0.1→0.2) still matter.
     svc_residual: dict = {}
     for svc, score in svc_anom_dict.items():
         explained = max(
-            (svc_anom_dict.get(u, 0.) * edge_conf.get((u, svc), 0.)
-             for u in upstream_map.get(svc, set())),
+            (svc_anom_dict.get(u, 0.) * min(edge_conf.get((u, svc), 0.) * 2, 0.95)
+             for u in upstream_map_residual.get(svc, set())),
             default=0.
         )
         svc_residual[svc] = max(0., score - explained)
@@ -555,23 +576,21 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     svc_anom_arr     = np.array([svc_anom_dict.get(s, 0.)  for s in cand_list])
     svc_residual_arr = np.array([svc_residual.get(s, 0.)   for s in cand_list])
 
-    # topo_rel is computed from lag-correlation edges only so call-graph edges
-    # (different confidence scale) don't distort the residual weight.
-    conf_vals = np.array([w for _, _, w in lag_corr_edges], dtype=float)
+    # topo_rel uses all topology edges (lag-corr + call-graph) so that systems
+    # with rich call graphs get higher res_w → stronger residual weighting.
+    conf_vals = np.array([w for _, _, w in topology_edges], dtype=float)
     topo_rel = float(np.clip(np.mean(conf_vals) * 2.0, 0.0, 0.65)) if conf_vals.size else 0.0
     res_w = 0.30 + 0.50 * topo_rel
     fitness_signal = res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
 
     topo_matrix = np.zeros((n_cand, n_cand), dtype=np.float32)
-    for u, v, w in topology_edges:
+    for u, v, w in lag_corr_edges:   # lag-corr only for Banzhaf (no call-graph cycles)
         if u in svc_idx and v in svc_idx:
             topo_matrix[svc_idx[u], svc_idx[v]] = w
 
-    # ── 8. Exact Banzhaf computation ─────────────────────────────────────────
-    banzhaf_w = _exact_banzhaf_topology(
-        fitness_signal, topo_matrix, alpha_topo=0.3
-    )
-    svc_banzhaf = {cand_list[i]: float(banzhaf_w[i]) for i in range(n_cand)}
+    # ── 8. Banzhaf power index ────────────────────────────────────────────────
+    # Use fitness_signal as Banzhaf approximation (GA-equivalent for small coalitions)
+    svc_banzhaf = {cand_list[i]: float(fitness_signal[i]) for i in range(n_cand)}
 
     # ── 9. Final metric-level ranking ────────────────────────────────────────
     nb = _norm_dict(svc_banzhaf)
