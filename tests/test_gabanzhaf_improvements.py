@@ -7,6 +7,7 @@ Three behaviors under test:
 """
 import os
 import tempfile
+import importlib
 import numpy as np
 import pandas as pd
 import pytest
@@ -192,6 +193,123 @@ def test_extract_call_graph_row_limit():
         os.unlink(path)
 
 
+from RCAEval.e2e.gabanzhaf import _extract_trace_features, _TraceFeatures
+
+
+def test_extract_trace_features_returns_scores_and_call_graph():
+    rows = [
+        ("svc-a", "span-a", "root", 1000, 0, 10),
+        ("svc-b", "span-b", "span-a", 1001, 0, 5),
+        ("svc-b", "span-c", "span-a", 60000, 1, 200),
+        ("svc-c", "span-d", "span-b", 60001, 0, 1),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "traces.csv")
+        _make_traces_csv(rows, path)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert isinstance(features, _TraceFeatures)
+    assert "svc-b" in features.trace_scores
+    assert features.trace_scores["svc-b"] > 0.0
+    assert features.call_graph == {"svc-a": {"svc-b"}, "svc-b": {"svc-c"}}
+
+
+def test_extract_trace_features_missing_file_returns_neutral_features():
+    features = _extract_trace_features("/nonexistent/path", inject_time=50)
+    assert features == _TraceFeatures(trace_scores=None, call_graph={})
+
+
+def test_extract_trace_features_keeps_call_graph_when_score_columns_missing():
+    rows = [
+        ("svc-a", "span-a", "root"),
+        ("svc-b", "span-b", "span-a"),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "traces.csv")
+        pd.DataFrame(rows, columns=["serviceName", "spanID", "parentSpanID"]).to_csv(
+            path, index=False
+        )
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.trace_scores is None
+    assert features.call_graph == {"svc-a": {"svc-b"}}
+
+
+def test_extract_trace_features_keeps_scores_when_span_columns_missing():
+    rows = [
+        ("svc-a", 1000, 0, 10),
+        ("svc-a", 60000, 1, 200),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "traces.csv")
+        pd.DataFrame(
+            rows,
+            columns=["serviceName", "startTimeMillis", "statusCode", "duration"],
+        ).to_csv(path, index=False)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.call_graph == {}
+    assert features.trace_scores is not None
+    assert "svc-a" in features.trace_scores
+
+
+def test_extract_trace_features_uses_preaggregated_trace_scores_without_raw_traces():
+    with tempfile.TemporaryDirectory() as d:
+        pd.DataFrame(
+            {
+                "time": [10, 20, 60, 70],
+                "svc-a_GET": [0, 0, 5, 6],
+                "svc-b_GET": [0, 0, 0, 0],
+            }
+        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
+        pd.DataFrame(
+            {
+                "time": [10, 20, 60, 70],
+                "svc-a_GET": [10, 10, 10, 10],
+                "svc-b_GET": [10, 10, 80, 90],
+            }
+        ).to_csv(os.path.join(d, "tracets_lat.csv"), index=False)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.call_graph == {}
+    assert features.trace_scores is not None
+    assert features.trace_scores["svc-a"] > features.trace_scores["svc-b"]
+
+
+def test_extract_trace_features_prefers_preaggregated_scores_over_raw_trace_scan(monkeypatch):
+    read_calls = []
+    real_read_csv = pd.read_csv
+
+    def tracking_read_csv(path, *args, **kwargs):
+        read_calls.append((os.path.basename(str(path)), kwargs.get("chunksize")))
+        return real_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", tracking_read_csv)
+
+    rows = [
+        ("svc-a", "span-a", "root"),
+        ("svc-b", "span-b", "span-a"),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        pd.DataFrame(rows, columns=["serviceName", "spanID", "parentSpanID"]).to_csv(
+            os.path.join(d, "traces.csv"), index=False
+        )
+        pd.DataFrame(
+            {"time": [10, 60], "svc-a_GET": [0, 9], "svc-b_GET": [0, 0]}
+        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    trace_reads = [call for call in read_calls if call[0] == "traces.csv"]
+    assert trace_reads == [("traces.csv", None)]
+    assert features.call_graph == {"svc-a": {"svc-b"}}
+    assert features.trace_scores["svc-a"] > 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Call graph topology demotes callers in _gabanzhaf_core
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,7 +364,7 @@ def test_callgraph_demotes_caller_service():
 
     result = _gabanzhaf_core(
         df, inject_time=inject_time, dataset=None, anomalies=None,
-        kwargs={"call_graph": call_graph, "n_generations": 5, "pop_size": 10}
+        kwargs={"call_graph": call_graph}
     )
 
     ranks = result["ranks"]
@@ -262,6 +380,37 @@ def test_callgraph_demotes_caller_service():
     assert svc_order[0] == svc_root, (
         f"Root cause should rank first. Got order: {svc_order}"
     )
+
+
+def test_callgraph_edges_reach_banzhaf_topology_when_lag_corr_is_empty(monkeypatch):
+    svc_root = "svc-root"
+    svc_caller = "svc-caller"
+    inject_row = 50
+    df = _make_simple_dataframe(svc_root, svc_caller, inject_row=inject_row)
+    captured = {}
+
+    monkeypatch.setattr(gabanzhaf_mod, "_build_topology", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        gabanzhaf_mod,
+        "_call_graph_topology_edges",
+        lambda *args, **kwargs: [(svc_root, svc_caller, 0.5)],
+    )
+
+    def capture_banzhaf(fitness_signal, topo_matrix, config):
+        captured["topo_matrix"] = np.asarray(topo_matrix).copy()
+        return np.asarray(fitness_signal, dtype=float)
+
+    monkeypatch.setattr(gabanzhaf_mod, "_banzhaf_power", capture_banzhaf)
+
+    _gabanzhaf_core(
+        df,
+        inject_time=inject_row,
+        dataset=None,
+        anomalies=None,
+        kwargs={"call_graph": {svc_caller: {svc_root}}},
+    )
+
+    assert np.count_nonzero(captured["topo_matrix"]) == 1
 
 
 def test_callgraph_does_not_penalise_caller_root_cause():
@@ -299,7 +448,7 @@ def test_callgraph_does_not_penalise_caller_root_cause():
 
     result = _gabanzhaf_core(
         df, inject_time=inject_row, dataset=None, anomalies=None,
-        kwargs={"call_graph": call_graph, "n_generations": 5, "pop_size": 10}
+        kwargs={"call_graph": call_graph}
     )
     ranks = result["ranks"]
     svc_order = []
@@ -323,31 +472,176 @@ def test_callgraph_no_effect_when_empty():
     df = _make_simple_dataframe(svc_root, svc_caller)
     result = _gabanzhaf_core(
         df, inject_time=50, dataset=None, anomalies=None,
-        kwargs={"call_graph": {}, "n_generations": 5, "pop_size": 10}
+        kwargs={"call_graph": {}}
     )
     assert "ranks" in result
     assert len(result["ranks"]) > 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. _exact_banzhaf_topology
-# ─────────────────────────────────────────────────────────────────────────────
-from RCAEval.e2e.gabanzhaf import _exact_banzhaf_topology
+def test_gabanzhaf_core_can_return_stage_timing():
+    df = _make_simple_dataframe("svc-root", "svc-caller")
+
+    result = _gabanzhaf_core(
+        df,
+        inject_time=50,
+        dataset=None,
+        anomalies=None,
+        kwargs={"call_graph": {}, "return_stage_timing": True},
+    )
+
+    assert "stage_timing" in result
+    for key in ["preprocess", "metric_evidence", "topology", "banzhaf", "ranking"]:
+        assert key in result["stage_timing"]
+        assert isinstance(result["stage_timing"][key], float)
+        assert result["stage_timing"][key] >= 0.0
 
 
-def test_exact_banzhaf_no_topology_proportional_to_anomaly():
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Banzhaf topology approximation
+# ─────────────────────────────────────────────────────────────────────────────
+gabanzhaf_mod = importlib.import_module("RCAEval.e2e.gabanzhaf")
+from RCAEval.e2e.gabanzhaf import (
+    _GabanzhafConfig,
+    _service_root_score,
+)
+
+
+def test_gabanzhaf_config_centralizes_runtime_parameters():
+    """Runtime knobs should be centralized instead of read ad hoc in the core."""
+    cfg = _GabanzhafConfig.from_kwargs({
+        "top_k_svcs": "9",
+        "max_candidate_svcs": "14",
+        "banzhaf_samples": "321",
+        "seed": "99",
+        "dk_select_useful": True,
+    })
+
+    assert cfg.top_k_svcs == 9
+    assert cfg.max_candidate_svcs == 14
+    assert cfg.banzhaf_samples == 321
+    assert cfg.seed == 99
+    assert cfg.dk_select_useful is True
+
+
+def test_gabanzhaf_config_default_candidate_cap_tracks_top_k():
+    cfg = _GabanzhafConfig.from_kwargs({"top_k_svcs": "11"})
+    assert cfg.max_candidate_svcs == 16
+
+
+def test_gabanzhaf_config_defaults_to_deterministic_banzhaf():
+    cfg = _GabanzhafConfig.from_kwargs({})
+    assert cfg.banzhaf_mode == "deterministic"
+
+
+def test_banzhaf_power_uses_mc_only_when_explicit(monkeypatch):
+    calls = []
+
+    def fake_mc(fitness_signal, topo_matrix, n_samples, seed=42):
+        calls.append((np.asarray(fitness_signal).tolist(), int(n_samples), int(seed)))
+        return np.array([3.0, 2.0])
+
+    monkeypatch.setattr(gabanzhaf_mod, "_mc_banzhaf", fake_mc)
+
+    cfg = _GabanzhafConfig.from_kwargs({
+        "banzhaf_mode": "mc",
+        "banzhaf_samples": 123,
+        "seed": 7,
+    })
+    values = gabanzhaf_mod._banzhaf_power(
+        np.array([0.9, 0.5], dtype=float),
+        np.zeros((2, 2), dtype=np.float32),
+        cfg,
+    )
+
+    assert calls == [([0.9, 0.5], 123, 7)]
+    assert np.allclose(values, np.array([3.0, 2.0]))
+
+
+def test_deterministic_banzhaf_matches_two_node_analytic_case():
+    fs = np.array([0.9, 0.5], dtype=float)
+    topo = np.zeros((2, 2), dtype=np.float32)
+    topo[0, 1] = 0.5
+
+    bz = gabanzhaf_mod._deterministic_banzhaf_coverage(fs, topo)
+
+    assert np.allclose(bz, np.array([1.15, 0.25]))
+
+
+def test_banzhaf_power_default_is_deterministic_not_mc(monkeypatch):
+    def fail_mc(*args, **kwargs):
+        raise AssertionError("MC backend should be explicit")
+
+    monkeypatch.setattr(gabanzhaf_mod, "_mc_banzhaf", fail_mc)
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    fs = np.array([0.9, 0.5], dtype=float)
+    topo = np.zeros((2, 2), dtype=np.float32)
+    topo[0, 1] = 0.5
+
+    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
+
+    assert bz[0] > bz[1]
+
+
+def test_banzhaf_power_rejects_invalid_mode():
+    cfg = _GabanzhafConfig.from_kwargs({"banzhaf_mode": "invalid"})
+
+    with pytest.raises(ValueError, match="Unsupported banzhaf_mode"):
+        gabanzhaf_mod._banzhaf_power(
+            np.array([0.9, 0.5], dtype=float),
+            np.zeros((2, 2), dtype=np.float32),
+            cfg,
+        )
+
+
+def test_banzhaf_power_default_uses_same_path_for_small_and_large(monkeypatch):
+    """The Banzhaf computation must not switch algorithms by candidate count."""
+    def fail_mc(*args, **kwargs):
+        raise AssertionError("MC backend should be explicit")
+
+    monkeypatch.setattr(gabanzhaf_mod, "_mc_banzhaf", fail_mc)
+    cfg = _GabanzhafConfig.from_kwargs({})
+
+    small = gabanzhaf_mod._banzhaf_power(
+        np.array([0.9, 0.4, 0.1], dtype=float),
+        np.zeros((3, 3), dtype=np.float32),
+        cfg,
+    )
+    large = gabanzhaf_mod._banzhaf_power(
+        np.array([0.9] + [0.3] * 21, dtype=float),
+        np.zeros((22, 22), dtype=np.float32),
+        cfg,
+    )
+
+    assert small.shape == (3,)
+    assert large.shape == (22,)
+
+
+def test_service_root_score_formula_does_not_branch_on_trace_availability():
+    """Missing trace data must be a zero signal, not a different formula."""
+    without_trace = _service_root_score(0.8, 0.6, 0.4, trace_score=0.0)
+    with_zero_trace = _service_root_score(0.8, 0.6, 0.4, trace_score=0.0)
+    with_trace = _service_root_score(0.8, 0.6, 0.4, trace_score=0.5)
+
+    assert without_trace == with_zero_trace
+    assert with_trace > without_trace
+
+
+def test_deterministic_banzhaf_no_topology_preserves_anomaly_order():
     """Without topology, Banzhaf should be proportional to fitness_signal.
 
-    For additive v(S) (alpha_topo=0), Banzhaf(i) = fitness_signal[i] exactly.
+    For additive v(S), the deterministic Banzhaf ranking must follow
+    fitness_signal.
     """
+    cfg = _GabanzhafConfig.from_kwargs({})
     fs = np.array([0.9, 0.4, 0.1], dtype=float)
     topo = np.zeros((3, 3), dtype=np.float32)
-    bz = _exact_banzhaf_topology(fs, topo, alpha_topo=0.0)
+    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
     # ranking must match fitness_signal ranking
     assert bz[0] > bz[1] > bz[2], f"Expected descending Banzhaf, got {bz}"
 
 
-def test_exact_banzhaf_topology_promotes_root_cause():
+def test_deterministic_banzhaf_topology_promotes_root_cause():
     """Topology (causal coverage) must rank root cause above victim unconditionally.
 
     Setup: n=2, A(idx=0) upstream of B(idx=1), fitness=[0.9, 0.5], topo[0,1]=0.5.
@@ -361,45 +655,48 @@ def test_exact_banzhaf_topology_promotes_root_cause():
       Banzhaf(B) = mean([0.5 - 0,  1.4 - 1.4]) = mean([0.5, 0.0]) = 0.25
     Root cause ALWAYS dominates regardless of relative anomaly magnitudes.
     """
+    cfg = _GabanzhafConfig.from_kwargs({})
     fs = np.array([0.9, 0.5], dtype=float)
     topo = np.zeros((2, 2), dtype=np.float32)
     topo[0, 1] = 0.5  # A(0) upstream of B(1)
-    bz = _exact_banzhaf_topology(fs, topo, alpha_topo=0.3)
-    assert abs(bz[0] - 1.15) < 1e-6, f"Expected Banzhaf(A)=1.15, got {bz[0]}"
-    assert abs(bz[1] - 0.25) < 1e-6, f"Expected Banzhaf(B)=0.25, got {bz[1]}"
+    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
+    assert bz[0] > bz[1], f"Root cause should outrank victim. bz={bz}"
 
 
-def test_exact_banzhaf_topology_no_negative_values():
+def test_deterministic_banzhaf_topology_no_negative_values():
     """Banzhaf values must all be non-negative (clipped at 0)."""
+    cfg = _GabanzhafConfig.from_kwargs({})
     rng = np.random.default_rng(0)
     n = 5
     fs = rng.random(n)
     topo = np.zeros((n, n), dtype=np.float32)
     topo[0, 1] = 0.8
     topo[1, 2] = 0.6
-    bz = _exact_banzhaf_topology(fs, topo, alpha_topo=0.5)
+    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
     assert np.all(bz >= 0), f"Negative Banzhaf values: {bz}"
 
 
-def test_exact_banzhaf_mc_fallback_consistent_with_exact():
-    """MC fallback (n>20) must rank the clear root cause first.
+def test_deterministic_banzhaf_large_graph_ranks_clear_root_first():
+    """Large graphs must use the same deterministic path and rank clear root first.
 
-    n=22 triggers MC path. service 0 has much higher anomaly (0.9 vs 0.3)
+    n=22 previously triggered a different path. service 0 has much higher anomaly (0.9 vs 0.3)
     and is upstream of all others — it must have the highest Banzhaf value.
     """
+    cfg = _GabanzhafConfig.from_kwargs({})
     fs_big = np.array([0.9] + [0.3] * 21)
     topo_big = np.zeros((22, 22), dtype=np.float32)
     for j in range(1, 22):
         topo_big[0, j] = 0.3
-    bz_mc = _exact_banzhaf_topology(fs_big, topo_big, alpha_topo=0.3, n_samples=2000)
-    assert np.argmax(bz_mc) == 0, (
-        f"Root cause (idx 0) should have max Banzhaf in MC path. bz={bz_mc}"
+    bz = gabanzhaf_mod._banzhaf_power(fs_big, topo_big, cfg)
+    assert np.argmax(bz) == 0, (
+        f"Root cause (idx 0) should have max Banzhaf. bz={bz}"
     )
 
 
-def test_exact_banzhaf_single_service():
+def test_deterministic_banzhaf_single_service():
     """Single service: Banzhaf = fitness_signal (trivial coalition)."""
+    cfg = _GabanzhafConfig.from_kwargs({})
     fs = np.array([0.7])
     topo = np.zeros((1, 1), dtype=np.float32)
-    bz = _exact_banzhaf_topology(fs, topo, alpha_topo=0.3)
+    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
     assert abs(bz[0] - 0.7) < 1e-6, f"Single service Banzhaf should be 0.7, got {bz[0]}"
