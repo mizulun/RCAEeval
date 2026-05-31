@@ -102,6 +102,40 @@ def test_metric_evidence_selective_winsorization():
     )
 
 
+def test_metric_semantic_group_uses_generic_suffixes():
+    from RCAEval.e2e.gabanzhaf import _metric_semantic_group
+
+    assert _metric_semantic_group("svc-a_cpu") == "resource"
+    assert _metric_semantic_group("svc-a_memory_usage") == "resource"
+    assert _metric_semantic_group("svc-a_latency") == "latency"
+    assert _metric_semantic_group("svc-a_duration") == "latency"
+    assert _metric_semantic_group("svc-a_http_errors") == "error"
+    assert _metric_semantic_group("svc-a_custom_metric") == "other"
+
+
+def test_semantic_service_evidence_combines_metrics_trace_and_topology():
+    from RCAEval.e2e.gabanzhaf import _semantic_service_evidence
+
+    cols = ["svc-a_cpu", "svc-a_latency", "svc-b_cpu", "svc-b_latency"]
+    metric_ev = {
+        "svc-a_cpu": {"score": 0.9},
+        "svc-a_latency": {"score": 0.2},
+        "svc-b_cpu": {"score": 0.1},
+        "svc-b_latency": {"score": 0.8},
+    }
+    svc_anom = {"svc-a": 0.9, "svc-b": 0.8}
+    trace_scores = {"svc-b": 1.0}
+    topology_edges = [("svc-a", "svc-b", 0.7)]
+
+    sem = _semantic_service_evidence(cols, metric_ev, trace_scores, topology_edges, svc_anom)
+
+    assert sem["svc-a"]["resource"] > sem["svc-b"]["resource"]
+    assert sem["svc-b"]["latency"] > sem["svc-a"]["latency"]
+    assert sem["svc-b"]["trace"] == 1.0
+    assert sem["svc-a"]["propagation"] > 0.0
+    assert sem["svc-b"]["propagation"] > 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. _extract_call_graph
 # ─────────────────────────────────────────────────────────────────────────────
