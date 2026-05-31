@@ -23,7 +23,7 @@ class _GabanzhafConfig:
     top_k_svcs: int = 15
     max_candidate_svcs: int = 20
     banzhaf_samples: int = 1000
-    banzhaf_mode: str = "deterministic"
+    banzhaf_mode: str = "deterministic" # "deterministic" or "mc"
     seed: int = 42
     dk_select_useful: bool = False
     topology_pool_multiplier: int = 2
@@ -38,6 +38,10 @@ class _GabanzhafConfig:
     topology_reliability_cap: float = 0.65
     residual_weight_base: float = 0.30
     residual_weight_topology_gain: float = 0.50
+    topology_onset_tolerance: float = 0.05
+    topology_onset_boost: float = 0.50
+    fitness_temporal_weight: float = 0.12
+    fitness_impact_weight: float = 0.10
 
     @classmethod
     def from_kwargs(cls, kwargs):
@@ -51,6 +55,18 @@ class _GabanzhafConfig:
             banzhaf_mode=str(kwargs.get("banzhaf_mode", cls.banzhaf_mode)),
             seed=int(kwargs.get("seed", cls.seed)),
             dk_select_useful=bool(kwargs.get("dk_select_useful", cls.dk_select_useful)),
+            topology_onset_tolerance=float(
+                kwargs.get("topology_onset_tolerance", cls.topology_onset_tolerance)
+            ),
+            topology_onset_boost=float(
+                kwargs.get("topology_onset_boost", cls.topology_onset_boost)
+            ),
+            fitness_temporal_weight=float(
+                kwargs.get("fitness_temporal_weight", cls.fitness_temporal_weight)
+            ),
+            fitness_impact_weight=float(
+                kwargs.get("fitness_impact_weight", cls.fitness_impact_weight)
+            ),
         )
 
 
@@ -259,103 +275,6 @@ def _extract_trace_features(case_dir, inject_time):
         return _TraceFeatures(trace_scores=None, call_graph={})
 
 
-def _trace_onset_scores(case_dir, inject_time):
-    """Lightweight trace-based per-service anomaly signal.
-
-    Reads only 4 columns (serviceName, startTimeMillis, statusCode, duration)
-    in chunks with an early-stop cap so total I/O stays < 0.5 s.
-
-    Returns {svc_name: score ∈ [0, 1]} or None if traces unavailable.
-
-    Signals:
-      - Error rate  (covers LOSS): fraction of spans with statusCode ≠ 0
-      - Duration ratio (covers DELAY): anomaly-period avg-duration /
-                                        normal-period avg-duration − 1,
-                                        capped at 10× and normalised to [0,1]
-    Per-service score = max(error_rate, duration_signal).
-    """
-    if not case_dir:
-        return None
-    tp = os.path.join(case_dir, "traces.csv")
-    if not os.path.exists(tp):
-        return None
-
-    try:
-        inject_ms   = inject_time * 1000
-        needed      = ["serviceName", "startTimeMillis", "statusCode", "duration"]
-        MAX_ANOMAL  = 30_000        # row cap to bound runtime
-
-        chunks_normal: list = []
-        chunks_anomal: list = []
-        anomal_rows = 0
-
-        for chunk in pd.read_csv(tp, usecols=needed, chunksize=10_000,
-                                  on_bad_lines="skip"):
-            ts       = pd.to_numeric(chunk["startTimeMillis"], errors="coerce")
-            is_norm  = ts < inject_ms
-            is_anom  = ts >= inject_ms
-
-            if is_norm.any():
-                chunks_normal.append(chunk[is_norm])
-            if is_anom.any():
-                ac = chunk[is_anom]
-                chunks_anomal.append(ac)
-                anomal_rows += len(ac)
-
-            if anomal_rows >= MAX_ANOMAL:
-                break
-
-        if not chunks_anomal:
-            return None
-
-        anomal_df = pd.concat(chunks_anomal, ignore_index=True)
-        anomal_df["is_err"] = (
-            pd.to_numeric(anomal_df["statusCode"], errors="coerce").fillna(0.) != 0.
-        )
-        anomal_df["dur"] = pd.to_numeric(anomal_df["duration"], errors="coerce").fillna(0.)
-
-        a_stats = anomal_df.groupby("serviceName", sort=False).agg(
-            cnt    =("serviceName", "size"),
-            err_cnt=("is_err",      "sum"),
-            dur_sum=("dur",         "sum"),
-        )
-
-        # Normal-period duration baseline
-        n_dur_avg: dict = {}
-        if chunks_normal:
-            normal_df = pd.concat(chunks_normal, ignore_index=True)
-            normal_df["dur"] = pd.to_numeric(normal_df["duration"], errors="coerce").fillna(0.)
-            n_stats = normal_df.groupby("serviceName", sort=False).agg(
-                cnt    =("serviceName", "size"),
-                dur_sum=("dur",         "sum"),
-            )
-            for svc, row in n_stats.iterrows():
-                n_dur_avg[str(svc)] = float(row["dur_sum"]) / max(int(row["cnt"]), 1)
-
-        scores: dict = {}
-        for svc, row in a_stats.iterrows():
-            svc      = str(svc)
-            a_cnt    = max(int(row["cnt"]), 1)
-            err_rate = float(row["err_cnt"]) / a_cnt
-
-            a_avg_dur = float(row["dur_sum"]) / a_cnt
-            n_avg_dur = n_dur_avg.get(svc, 1.)
-            dur_ratio = (a_avg_dur / max(n_avg_dur, 1.)) - 1.
-            dur_signal = max(0., min(dur_ratio, 10.)) / 10.
-
-            scores[svc] = max(err_rate, dur_signal)
-
-        if not scores:
-            return None
-
-        lo, hi = min(scores.values()), max(scores.values())
-        span = hi - lo if hi > lo else 1.
-        return {svc: (v - lo) / span for svc, v in scores.items()}
-
-    except Exception:
-        return None
-
-
 def _extract_call_graph(traces_path):
     """Extract service call graph from the first 50 K trace spans.
 
@@ -441,7 +360,28 @@ def _metric_evidence(normal_mat, anomal_mat, cols):
     mag = _norm01_arr(np.nanpercentile(rz, 95, axis=0))
     peak = _norm01_arr(np.nanmax(rz, axis=0))
     persistence = _norm01_arr(np.mean(rz > 3.0, axis=0))
-    raw = 0.55 * mag + 0.30 * persistence + 0.15 * peak
+
+    n_steps = anomal_mat.shape[0]
+    if n_steps > 0:
+        onset_thr = np.maximum(3.0, 0.5 * np.nanpercentile(rz, 95, axis=0))
+        exceed = rz >= onset_thr.reshape(1, -1)
+        first_idx = np.argmax(exceed, axis=0)
+        seen = exceed.any(axis=0)
+        denom = max(n_steps - 1, 1)
+        earliness = np.where(seen, 1.0 - (first_idx / denom), 0.0)
+
+        time_idx = np.arange(n_steps, dtype=float).reshape(-1, 1)
+        rz_mass = np.sum(rz, axis=0)
+        centroid = np.divide(
+            np.sum(rz * time_idx, axis=0),
+            rz_mass + 1e-9,
+        )
+        frontload = np.where(rz_mass > 0.0, 1.0 - (centroid / denom), 0.0)
+        onset = _norm01_arr(0.65 * earliness + 0.35 * frontload)
+    else:
+        onset = np.zeros(len(cols), dtype=float)
+
+    raw = 0.52 * mag + 0.28 * persistence + 0.15 * peak + 0.05 * onset
     score = _norm01_arr(raw)
 
     return {
@@ -450,6 +390,7 @@ def _metric_evidence(normal_mat, anomal_mat, cols):
             "mag": float(mag[i]),
             "persistence": float(persistence[i]),
             "peak": float(peak[i]),
+            "onset": float(onset[i]),
         }
         for i, col in enumerate(cols)
     }
@@ -481,11 +422,13 @@ def _service_evidence(cols, metric_ev):
     svc_agg: dict = {}
     for svc, svc_cols in svc_to_cols.items():
         arr = np.asarray([metric_ev[c]["score"] for c in svc_cols], dtype=float)
+        onset_arr = np.asarray([metric_ev[c].get("onset", 0.0) for c in svc_cols], dtype=float)
         top = np.sort(arr)[-min(3, len(arr)):]
         svc_agg[svc] = float(
-            0.50 * np.percentile(arr, 95)
-            + 0.30 * np.mean(top)
-            + 0.20 * np.max(arr)
+            0.48 * np.percentile(arr, 95)
+            + 0.27 * np.mean(top)
+            + 0.15 * np.max(arr)
+            + 0.10 * np.percentile(onset_arr, 90)
         )
 
     # ── 2. Metric-type dominance ─────────────────────────────────────────────
@@ -519,10 +462,26 @@ def _service_evidence(cols, metric_ev):
 
     # ── 3. Blend ─────────────────────────────────────────────────────────────
     svc_scores = {
-        svc: 0.70 * svc_agg[svc] + 0.30 * dom_norm.get(svc, 0.)
+        svc: 0.72 * svc_agg[svc] + 0.28 * dom_norm.get(svc, 0.)
         for svc in svc_agg
     }
     return _norm_dict(svc_scores)
+
+
+def _service_temporal_prior(cols, metric_ev):
+    svc_to_cols: dict = {}
+    for col in cols:
+        svc_to_cols.setdefault(_parse_svc(col), []).append(col)
+
+    priors = {}
+    for svc, svc_cols in svc_to_cols.items():
+        onset_arr = np.asarray([metric_ev[c].get("onset", 0.0) for c in svc_cols], dtype=float)
+        persistence_arr = np.asarray(
+            [metric_ev[c].get("persistence", 0.0) for c in svc_cols], dtype=float
+        )
+        combined = 0.7 * onset_arr + 0.3 * onset_arr * persistence_arr
+        priors[svc] = float(np.max(combined)) if combined.size else 0.0
+    return _norm_dict(priors)
 
 
 def _deterministic_banzhaf_coverage(fitness_signal, topo_matrix):
@@ -603,17 +562,33 @@ def _mc_banzhaf(fitness_signal, topo_matrix, n_samples, seed=42):
     return np.maximum(0., banzhaf / safe_counts)
 
 
-def _service_root_score(banzhaf_score, residual_score, anomaly_score, trace_score=0.0):
+def _service_root_score(
+    banzhaf_score,
+    residual_score,
+    anomaly_score,
+    trace_score=0.0,
+    temporal_score=0.0,
+    corroboration_score=0.0,
+):
     """Fixed service-level blend; missing trace is represented by trace_score=0."""
     return (
-        0.40 * banzhaf_score
-        + 0.27 * residual_score
-        + 0.23 * anomaly_score
+        0.35 * banzhaf_score
+        + 0.23 * residual_score
+        + 0.17 * anomaly_score
         + 0.10 * trace_score
+        + 0.15 * corroboration_score
     )
 
 
-def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
+def _build_topology(
+    svc_names,
+    svc_series,
+    corr_thr=0.08,
+    max_in=3,
+    svc_temporal=None,
+    onset_tol=0.05,
+    onset_boost=0.50,
+):
     """Build weighted directed topology from asymmetric lag-1 correlations.
 
     Vectorised: stacks all available service series into a matrix and
@@ -645,6 +620,15 @@ def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
     np.fill_diagonal(C, 0.)
 
     confidence = np.maximum(0., C - C.T)
+    if svc_temporal:
+        onset = np.array([float(svc_temporal.get(s, 0.0)) for s in svcs], dtype=float)
+        onset_gap = onset[:, None] - onset[None, :]
+        onset_gate = np.where(
+            onset_gap < -onset_tol,
+            0.0,
+            1.0 + onset_boost * np.clip(onset_gap, 0.0, 1.0),
+        )
+        confidence *= onset_gate
     np.fill_diagonal(confidence, 0.)
 
     edges = []
@@ -768,24 +752,29 @@ def _candidate_services(seed_svcs, upstream_map_full, svc_anom_dict, config):
 def _residual_scores(svc_anom_dict, upstream_map_residual, edge_conf, config):
     residual = {}
     for svc, score in svc_anom_dict.items():
-        explained = max(
-            (
-                svc_anom_dict.get(u, 0.)
-                * min(
-                    edge_conf.get((u, svc), 0.) * config.residual_confidence_scale,
-                    config.residual_confidence_cap,
-                )
-                for u in upstream_map_residual.get(svc, set())
-            ),
-            default=0.,
-        )
-        residual[svc] = max(0., score - explained)
+        explain_fail = 1.0
+        for u in upstream_map_residual.get(svc, set()):
+            eff = svc_anom_dict.get(u, 0.0) * min(
+                edge_conf.get((u, svc), 0.0) * config.residual_confidence_scale,
+                config.residual_confidence_cap,
+            )
+            explain_fail *= max(0.0, 1.0 - eff)
+        explained = 1.0 - explain_fail
+        residual[svc] = max(0.0, score * (1.0 - explained))
     return residual
 
 
-def _fitness_signal(cand_list, svc_anom_dict, svc_residual, topology_edges, config):
+def _fitness_signal(
+    cand_list,
+    svc_anom_dict,
+    svc_residual,
+    svc_temporal,
+    topology_edges,
+    config,
+):
     svc_anom_arr = np.array([svc_anom_dict.get(s, 0.) for s in cand_list])
     svc_residual_arr = np.array([svc_residual.get(s, 0.) for s in cand_list])
+    svc_temporal_arr = np.array([svc_temporal.get(s, 0.) for s in cand_list])
     conf_vals = np.array([w for _, _, w in topology_edges], dtype=float)
     topo_rel = (
         float(
@@ -799,7 +788,22 @@ def _fitness_signal(cand_list, svc_anom_dict, svc_residual, topology_edges, conf
         else 0.0
     )
     res_w = config.residual_weight_base + config.residual_weight_topology_gain * topo_rel
-    return res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
+    intrinsic = (
+        res_w * svc_residual_arr
+        + (1.0 - res_w) * (
+            (1.0 - config.fitness_temporal_weight) * svc_anom_arr
+            + config.fitness_temporal_weight * svc_temporal_arr
+        )
+    )
+
+    impact = np.zeros(len(cand_list), dtype=float)
+    svc_idx = {s: i for i, s in enumerate(cand_list)}
+    for u, v, w in topology_edges:
+        if u in svc_idx and v in svc_idx:
+            impact[svc_idx[u]] += float(w) * svc_anom_dict.get(v, 0.0)
+    impact = _norm01_arr(impact) if impact.size else impact
+
+    return intrinsic + config.fitness_impact_weight * topo_rel * impact
 
 
 def _topology_matrix(cand_list, lag_corr_edges):
@@ -811,7 +815,15 @@ def _topology_matrix(cand_list, lag_corr_edges):
     return matrix
 
 
-def _rank_metrics(all_cols, svc_banzhaf, svc_residual, svc_anom_dict, metric_score, trace_scores):
+def _rank_metrics(
+    all_cols,
+    svc_banzhaf,
+    svc_residual,
+    svc_anom_dict,
+    svc_temporal,
+    metric_score,
+    trace_scores,
+):
     nb = _norm_dict(svc_banzhaf)
     nr = _norm_dict(svc_residual)
     na = _norm_dict(svc_anom_dict)
@@ -821,11 +833,13 @@ def _rank_metrics(all_cols, svc_banzhaf, svc_residual, svc_anom_dict, metric_sco
 
     def _col_score(col):
         svc = _parse_svc(col)
+        corroboration = float(np.sqrt(max(na.get(svc, 0.0), 0.0) * max(nt.get(svc, 0.0), 0.0)))
         service_root = _service_root_score(
             nb.get(svc, 0.),
             nr.get(svc, 0.),
             na.get(svc, 0.),
             nt.get(svc, 0.),
+            corroboration_score=corroboration,
         )
         metric_local = nm.get(col, 0.)
         return 0.70 * service_root + 0.30 * metric_local + 0.20 * service_root * metric_local
@@ -874,6 +888,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     metric_ev = _metric_evidence(normal_mat, anomal_mat, cols)
     metric_score = {c: metric_ev[c]["score"] for c in cols}
     svc_anom_dict = _service_evidence(cols, metric_ev)
+    svc_temporal = _service_temporal_prior(cols, metric_ev)
     svc_names = sorted(svc_anom_dict.keys())
     _mark_stage("metric_evidence")
 
@@ -885,7 +900,13 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     pool_svcs = _initial_service_pool(svc_ranked, seed_svcs, config)
     svc_series_full = _service_series_for_pool(cols, no_time, pool_svcs)
-    lag_corr_edges = _build_topology(sorted(pool_svcs), svc_series_full)
+    lag_corr_edges = _build_topology(
+        sorted(pool_svcs),
+        svc_series_full,
+        svc_temporal=svc_temporal,
+        onset_tol=config.topology_onset_tolerance,
+        onset_boost=config.topology_onset_boost,
+    )
 
     # ── 4b. Augment topology with trace-derived call graph ────────────────────
     # Call graph: {caller: {callee}}.  When callee is anomalous it *explains*
@@ -920,7 +941,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     # topo_rel uses all topology edges (lag-corr + call-graph) so that systems
     # with rich call graphs get higher res_w → stronger residual weighting.
     fitness_signal = _fitness_signal(
-        cand_list, svc_anom_dict, svc_residual, topology_edges, config
+        cand_list, svc_anom_dict, svc_residual, svc_temporal, topology_edges, config
     )
     topo_matrix = _topology_matrix(cand_list, topology_edges)
     _mark_stage("topology")
@@ -936,7 +957,13 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     # ── 9. Final metric-level ranking ────────────────────────────────────────
     ranks = _rank_metrics(
-        cols, svc_banzhaf, svc_residual, svc_anom_dict, metric_score, trace_scores
+        cols,
+        svc_banzhaf,
+        svc_residual,
+        svc_anom_dict,
+        svc_temporal,
+        metric_score,
+        trace_scores,
     )
     _mark_stage("ranking")
 
@@ -972,4 +999,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
     runtime_kwargs["trace_scores"] = trace_features.trace_scores
     runtime_kwargs["call_graph"] = trace_features.call_graph
     runtime_kwargs["sli"] = sli
-    return _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
+    algorithm_start = perf_counter()
+    result = _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
+    result["algorithm_time_sec"] = float(perf_counter() - algorithm_start)
+    return result

@@ -12,7 +12,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from RCAEval.e2e.gabanzhaf import _metric_evidence, _extract_call_graph, _gabanzhaf_core
+from RCAEval.e2e.gabanzhaf import (
+    _metric_evidence,
+    _extract_call_graph,
+    _residual_scores,
+    _gabanzhaf_core,
+    gabanzhaf,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,6 +105,21 @@ def test_metric_evidence_selective_winsorization():
         f"Near-zero col should not dominate. "
         f"near_zero_score={ev['near_zero_svc_lat']['score']:.3f}, "
         f"normal_score={ev['normal_svc_lat']['score']:.3f}"
+    )
+
+
+def test_metric_evidence_prefers_earlier_onset_when_magnitude_matches():
+    """Earlier anomalies should rank above later ones at equal magnitude."""
+    n_rows = 60
+    normal = np.zeros((n_rows, 2))
+    anomal = np.zeros((n_rows, 2))
+    anomal[:10, 0] = 10.0
+    anomal[30:40, 1] = 10.0
+
+    ev = _metric_evidence(normal, anomal, ["svc-root_latency", "svc-victim_latency"])
+
+    assert ev["svc-root_latency"]["score"] > ev["svc-victim_latency"]["score"], (
+        f"Earlier onset should rank higher. ev={ev}"
     )
 
 
@@ -494,6 +515,59 @@ def test_gabanzhaf_core_can_return_stage_timing():
         assert key in result["stage_timing"]
         assert isinstance(result["stage_timing"][key], float)
         assert result["stage_timing"][key] >= 0.0
+
+
+def test_gabanzhaf_reports_algorithm_time_around_core_only(monkeypatch):
+    df = _make_simple_dataframe("svc-root", "svc-caller")
+    calls = []
+
+    def fake_extract_trace_features(case_dir, inject_time):
+        calls.append("trace_io")
+        return gabanzhaf_mod._TraceFeatures(
+            trace_scores={"svc-root": 1.0},
+            call_graph={"svc-root": {"svc-caller"}},
+        )
+
+    def fake_core(data, inject_time, dataset, anomalies, kwargs):
+        calls.append("core")
+        assert kwargs["trace_scores"] == {"svc-root": 1.0}
+        assert kwargs["call_graph"] == {"svc-root": {"svc-caller"}}
+        return {"ranks": ["svc-root_cpu"], "node_names": ["svc-root_cpu"]}
+
+    ticks = iter([100.0, 102.5])
+    monkeypatch.setattr(gabanzhaf_mod, "_extract_trace_features", fake_extract_trace_features)
+    monkeypatch.setattr(gabanzhaf_mod, "_gabanzhaf_core", fake_core)
+    monkeypatch.setattr(gabanzhaf_mod, "perf_counter", lambda: next(ticks))
+
+    result = gabanzhaf(df, inject_time=50, dataset=None)
+
+    assert calls == ["trace_io", "core"]
+    assert result["algorithm_time_sec"] == 2.5
+
+
+def test_residual_scores_use_noisy_or_for_multi_parent_explanations():
+    """Joint explainers should suppress a victim more than max-parent subtraction."""
+    svc_anom = {
+        "root-a": 0.8,
+        "root-b": 0.7,
+        "victim": 0.9,
+    }
+    upstream = {"victim": {"root-a", "root-b"}}
+    edge_conf = {
+        ("root-a", "victim"): 0.55,
+        ("root-b", "victim"): 0.45,
+    }
+    cfg = _GabanzhafConfig.from_kwargs({})
+
+    residual = _residual_scores(svc_anom, upstream, edge_conf, cfg)
+
+    max_parent_residual = 0.9 - max(
+        0.8 * min(0.55 * cfg.residual_confidence_scale, cfg.residual_confidence_cap),
+        0.7 * min(0.45 * cfg.residual_confidence_scale, cfg.residual_confidence_cap),
+    )
+    assert residual["victim"] < max_parent_residual, (
+        f"Noisy-OR residual should suppress victim more strongly. residual={residual}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

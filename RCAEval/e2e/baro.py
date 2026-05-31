@@ -1,5 +1,7 @@
 import os
 import warnings
+from time import perf_counter
+
 warnings.filterwarnings("ignore")
 
 import numpy as np
@@ -19,6 +21,8 @@ from RCAEval.io.time_series import (
 def baro(
     data, inject_time=None, dataset=None, num_loop=None, sli=None, anomalies=None, **kwargs
 ):
+    algorithm_start = perf_counter()
+
     if anomalies is None:
         normal_df = data[data["time"] < inject_time]
         anomal_df = data[data["time"] >= inject_time]
@@ -57,6 +61,7 @@ def baro(
     return {
         "node_names": normal_df.columns.to_list(),
         "ranks": ranks,
+        "algorithm_time_sec": float(perf_counter() - algorithm_start),
     }
     
     

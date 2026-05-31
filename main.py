@@ -168,6 +168,7 @@ output_path = "output"
 report_path = join(output_path, f"report.xlsx")
 result_path = args.result_dir if args.result_dir else join(output_path, "results")
 os.makedirs(result_path, exist_ok=True)
+algorithm_times = []
 
 
 def process(data_path):
@@ -266,6 +267,9 @@ def process(data_path):
             args=run_args,
         )
         root_causes = out.get("ranks")
+        algorithm_time_sec = out.get("algorithm_time_sec")
+        if algorithm_time_sec is not None:
+            algorithm_times.append(float(algorithm_time_sec))
         # print("==============")
         # print(f"{data_path=}")
         # print(root_causes[:5])
@@ -439,3 +443,8 @@ for name, s_evaluator, f_evaluator in [
 
 print("---")
 print("Avg speed:", avg_speed)
+if algorithm_times:
+    total_algorithm_time = round(sum(algorithm_times), 4)
+    avg_algorithm_speed = round(total_algorithm_time / len(algorithm_times), 4)
+    print("Total algorithm time:", total_algorithm_time)
+    print("Avg algorithm speed:", avg_algorithm_speed)
