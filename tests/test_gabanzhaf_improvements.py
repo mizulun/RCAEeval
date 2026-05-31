@@ -215,9 +215,34 @@ def test_extract_trace_features_returns_scores_and_call_graph():
     assert features.call_graph == {"svc-a": {"svc-b"}, "svc-b": {"svc-c"}}
 
 
+def test_extract_trace_features_exposes_error_and_latency_components():
+    rows = [
+        ("svc-a", "span-a0", "root", 1000, 0, 10),
+        ("svc-b", "span-b0", "span-a0", 1001, 0, 10),
+        ("svc-a", "span-a1", "root-2", 60000, 1, 10),
+        ("svc-b", "span-b1", "span-a1", 60001, 0, 300),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "traces.csv")
+        _make_traces_csv(rows, path)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.trace_scores is not None
+    assert features.trace_error_scores is not None
+    assert features.trace_latency_scores is not None
+    assert features.trace_error_scores["svc-a"] > features.trace_error_scores.get("svc-b", 0.0)
+    assert features.trace_latency_scores["svc-b"] > features.trace_latency_scores.get("svc-a", 0.0)
+
+
 def test_extract_trace_features_missing_file_returns_neutral_features():
     features = _extract_trace_features("/nonexistent/path", inject_time=50)
-    assert features == _TraceFeatures(trace_scores=None, call_graph={})
+    assert features == _TraceFeatures(
+        trace_scores=None,
+        trace_error_scores=None,
+        trace_latency_scores=None,
+        call_graph={},
+    )
 
 
 def test_extract_trace_features_keeps_call_graph_when_score_columns_missing():
