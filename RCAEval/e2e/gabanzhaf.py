@@ -629,7 +629,7 @@ def _semantic_service_evidence(cols, metric_ev, trace_scores, topology_edges, sv
         raw[svc]["propagation"] = prop.get(svc, 0.0)
 
     for key in ("resource", "latency", "error", "trace"):
-        normed = _norm_dict({svc: values[key] for svc, values in raw.items()})
+        normed = _norm_trace_component_dict({svc: values[key] for svc, values in raw.items()})
         for svc in raw:
             raw[svc][key] = normed.get(svc, 0.0)
 
