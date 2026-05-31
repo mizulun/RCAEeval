@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 import pandas as pd
 import warnings
@@ -447,19 +448,29 @@ def _parse_svc(col):
 def _metric_semantic_group(col):
     svc = _parse_svc(col)
     suffix = col[len(svc) + 1:] if col.startswith(svc + "_") else col
-    suffixes = [suffix]
+    suffixes = [suffix.lower()]
     if "_" in col:
-        suffixes.append(col.split("_", 1)[1])
+        suffixes.append(col.split("_", 1)[1].lower())
+    suffix_text = " ".join(suffixes)
+    tokens = set(
+        token
+        for candidate in suffixes
+        for token in re.split(r"[^0-9a-zA-Z]+", candidate)
+        if token
+    )
 
-    resource_keys = ("cpu", "mem", "memory", "disk", "io", "socket", "net", "network")
-    latency_keys = ("lat", "latency", "duration", "rt", "response")
-    error_keys = ("err", "error", "fail", "failure", "status")
+    resource_short = ("cpu", "mem", "disk", "io", "net")
+    resource_long = ("memory", "socket", "network")
+    latency_short = ("lat", "rt")
+    latency_long = ("latency", "duration", "response")
+    error_short = ("err", "fail")
+    error_long = ("error", "failure", "status")
 
-    if any(k in suffix.lower() for suffix in suffixes for k in latency_keys):
+    if any(k in tokens for k in latency_short) or any(k in suffix_text for k in latency_long):
         return "latency"
-    if any(k in suffix.lower() for suffix in suffixes for k in resource_keys):
+    if any(k in tokens for k in resource_short) or any(k in suffix_text for k in resource_long):
         return "resource"
-    if any(k in suffix.lower() for suffix in suffixes for k in error_keys):
+    if any(k in tokens for k in error_short) or any(k in suffix_text for k in error_long):
         return "error"
     return "other"
 
