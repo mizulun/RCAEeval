@@ -322,6 +322,29 @@ def test_extract_trace_features_uses_preaggregated_trace_scores_without_raw_trac
     assert features.trace_scores["svc-a"] > features.trace_scores["svc-b"]
 
 
+def test_extract_trace_features_preserves_preaggregated_singleton_component_evidence():
+    with tempfile.TemporaryDirectory() as d:
+        pd.DataFrame(
+            {
+                "time": [10, 20, 60, 70],
+                "svc-a_GET": [0, 0, 3, 5],
+            }
+        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
+        pd.DataFrame(
+            {
+                "time": [10, 20, 60, 70],
+                "svc-a_GET": [10, 10, 80, 90],
+            }
+        ).to_csv(os.path.join(d, "tracets_lat.csv"), index=False)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.trace_error_scores is not None
+    assert features.trace_latency_scores is not None
+    assert features.trace_error_scores["svc-a"] > 0.0
+    assert features.trace_latency_scores["svc-a"] > 0.0
+
+
 def test_extract_trace_features_prefers_preaggregated_scores_over_raw_trace_scan(monkeypatch):
     read_calls = []
     real_read_csv = pd.read_csv
