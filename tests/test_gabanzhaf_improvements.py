@@ -956,3 +956,27 @@ def test_incident_phenotype_pure_propagation_can_dominate():
     )
 
     assert pi["propagation"] > pi["resource"]
+
+
+def test_phenotype_conditioned_fitness_boosts_matching_evidence():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _phenotype_conditioned_fitness
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    cand = ["svc-a", "svc-b"]
+    svc_anom = {"svc-a": 0.8, "svc-b": 0.8}
+    svc_residual = {"svc-a": 0.4, "svc-b": 0.4}
+    trace_scores = {"svc-a": 0.0, "svc-b": 1.0}
+    semantic = {
+        "svc-a": {"resource": 1.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+        "svc-b": {"resource": 0.0, "latency": 1.0, "error": 0.0, "trace": 1.0, "propagation": 0.0},
+    }
+    pi = {"resource": 0.1, "latency": 0.7, "error": 0.1, "propagation": 0.1}
+
+    fitness = _phenotype_conditioned_fitness(
+        cand, svc_anom, svc_residual, trace_scores, semantic, pi, cfg
+    )
+
+    assert fitness.shape == (2,)
+    assert fitness[1] > fitness[0]
+    assert np.all(np.isfinite(fitness))
+    assert np.all(fitness >= 0.0)

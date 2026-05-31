@@ -989,6 +989,37 @@ def _fitness_signal(cand_list, svc_anom_dict, svc_residual, topology_edges, conf
     return res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
 
 
+def _phenotype_conditioned_fitness(
+    cand_list,
+    svc_anom_dict,
+    svc_residual,
+    trace_scores,
+    semantic_evidence,
+    phenotype,
+    config,
+):
+    values = []
+    trace_source = trace_scores or {}
+    for svc in cand_list:
+        sem = semantic_evidence.get(
+            svc,
+            {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+        )
+        anomaly = svc_anom_dict.get(svc, 0.0)
+        residual = svc_residual.get(svc, 0.0)
+        trace = trace_source.get(svc, sem.get("trace", 0.0))
+        base = 0.50 * anomaly + 0.35 * residual + 0.15 * trace
+        multiplier = (
+            1.0
+            + config.phenotype_gain_resource * phenotype.get("resource", 0.0) * sem.get("resource", 0.0)
+            + config.phenotype_gain_latency * phenotype.get("latency", 0.0) * sem.get("latency", 0.0)
+            + config.phenotype_gain_error * phenotype.get("error", 0.0) * max(sem.get("error", 0.0), sem.get("trace", 0.0))
+            + config.phenotype_gain_propagation * phenotype.get("propagation", 0.0) * sem.get("propagation", 0.0)
+        )
+        values.append(max(0.0, base * multiplier))
+    return np.asarray(values, dtype=float)
+
+
 def _topology_matrix(cand_list, lag_corr_edges):
     svc_idx = {s: i for i, s in enumerate(cand_list)}
     matrix = np.zeros((len(cand_list), len(cand_list)), dtype=np.float32)
@@ -1104,10 +1135,25 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         svc_anom_dict, upstream_map_residual, edge_conf, config
     )
 
-    # topo_rel uses all topology edges (lag-corr + call-graph) so that systems
-    # with rich call graphs get higher res_w → stronger residual weighting.
-    fitness_signal = _fitness_signal(
-        cand_list, svc_anom_dict, svc_residual, topology_edges, config
+    semantic_evidence = _semantic_service_evidence(
+        cols, metric_ev, trace_scores, topology_edges, svc_anom_dict
+    )
+    phenotype = _incident_phenotype(
+        svc_anom_dict,
+        kwargs.get("trace_error_scores", None),
+        kwargs.get("trace_latency_scores", None),
+        semantic_evidence,
+        topology_edges,
+        config,
+    )
+    fitness_signal = _phenotype_conditioned_fitness(
+        cand_list,
+        svc_anom_dict,
+        svc_residual,
+        trace_scores,
+        semantic_evidence,
+        phenotype,
+        config,
     )
     topo_matrix = _topology_matrix(cand_list, topology_edges)
     _mark_stage("topology")
@@ -1157,6 +1203,8 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
 
     runtime_kwargs = dict(kwargs)
     runtime_kwargs["trace_scores"] = trace_features.trace_scores
+    runtime_kwargs["trace_error_scores"] = trace_features.trace_error_scores
+    runtime_kwargs["trace_latency_scores"] = trace_features.trace_latency_scores
     runtime_kwargs["call_graph"] = trace_features.call_graph
     runtime_kwargs["sli"] = sli
     return _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
