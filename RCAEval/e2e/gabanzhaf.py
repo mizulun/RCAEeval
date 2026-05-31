@@ -41,6 +41,11 @@ class _GabanzhafConfig:
     topology_reliability_cap: float = 0.65
     residual_weight_base: float = 0.30
     residual_weight_topology_gain: float = 0.50
+    phenotype_temperature: float = 0.7
+    phenotype_gain_resource: float = 0.35
+    phenotype_gain_latency: float = 0.45
+    phenotype_gain_error: float = 0.45
+    phenotype_gain_propagation: float = 0.35
 
     @classmethod
     def from_kwargs(cls, kwargs):
@@ -54,6 +59,11 @@ class _GabanzhafConfig:
             banzhaf_mode=str(kwargs.get("banzhaf_mode", cls.banzhaf_mode)),
             seed=int(kwargs.get("seed", cls.seed)),
             dk_select_useful=bool(kwargs.get("dk_select_useful", cls.dk_select_useful)),
+            phenotype_temperature=float(kwargs.get("phenotype_temperature", cls.phenotype_temperature)),
+            phenotype_gain_resource=float(kwargs.get("phenotype_gain_resource", cls.phenotype_gain_resource)),
+            phenotype_gain_latency=float(kwargs.get("phenotype_gain_latency", cls.phenotype_gain_latency)),
+            phenotype_gain_error=float(kwargs.get("phenotype_gain_error", cls.phenotype_gain_error)),
+            phenotype_gain_propagation=float(kwargs.get("phenotype_gain_propagation", cls.phenotype_gain_propagation)),
         )
 
 
@@ -645,6 +655,68 @@ def _semantic_service_evidence(cols, metric_ev, trace_scores, topology_edges, sv
             raw[svc][key] = normed.get(svc, 0.0)
 
     return raw
+
+
+def _mean_top(values, k=3):
+    arr = np.asarray([v for v in values if np.isfinite(v)], dtype=float)
+    if arr.size == 0:
+        return 0.0
+    top = np.sort(arr)[-min(k, arr.size):]
+    return float(np.mean(top))
+
+
+def _softmax_dict(raw, temperature):
+    keys = list(raw.keys())
+    vals = np.asarray([raw[k] for k in keys], dtype=float)
+    vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+    tau = max(float(temperature), 1e-6)
+    vals = vals / tau
+    vals = vals - np.max(vals)
+    exp = np.exp(vals)
+    denom = float(exp.sum()) if exp.size else 1.0
+    return {k: float(exp[i] / max(denom, 1e-12)) for i, k in enumerate(keys)}
+
+
+def _incident_phenotype(
+    svc_anom_dict,
+    trace_error_scores,
+    trace_latency_scores,
+    semantic_evidence,
+    topology_edges,
+    config,
+):
+    resource = config.phenotype_gain_resource * _mean_top(
+        v.get("resource", 0.0) for v in semantic_evidence.values()
+    )
+    latency = config.phenotype_gain_latency * _mean_top(
+        v.get("latency", 0.0) for v in semantic_evidence.values()
+    )
+    latency += _mean_top((trace_latency_scores or {}).values())
+    error = (1.0 + config.phenotype_gain_error) * _mean_top(
+        (trace_error_scores or {}).values()
+    )
+
+    edge_weight_sum = 0.0
+    aligned_sum = 0.0
+    for u, v, w in topology_edges:
+        weight = max(float(w), 0.0)
+        edge_weight_sum += weight
+        aligned_sum += weight * svc_anom_dict.get(u, 0.0) * svc_anom_dict.get(v, 0.0)
+    propagation = (
+        config.phenotype_gain_propagation
+        * aligned_sum
+        / max(edge_weight_sum, 1e-9)
+    )
+
+    return _softmax_dict(
+        {
+            "resource": resource,
+            "latency": latency,
+            "error": error,
+            "propagation": propagation,
+        },
+        config.phenotype_temperature,
+    )
 
 
 def _deterministic_banzhaf_coverage(fitness_signal, topo_matrix):
