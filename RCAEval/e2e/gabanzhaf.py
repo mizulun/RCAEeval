@@ -13,6 +13,8 @@ from RCAEval.io.time_series import preprocess
 @dataclass(frozen=True)
 class _TraceFeatures:
     trace_scores: dict | None
+    trace_error_scores: dict | None
+    trace_latency_scores: dict | None
     call_graph: dict
 
 
@@ -81,25 +83,29 @@ def _trace_scores_from_chunks(chunks_normal, chunks_anomal):
         for svc, row in n_stats.iterrows():
             n_dur_avg[str(svc)] = float(row["dur_sum"]) / max(int(row["cnt"]), 1)
 
-    scores: dict = {}
+    combined: dict = {}
+    error_scores: dict = {}
+    latency_scores: dict = {}
     for svc, row in a_stats.iterrows():
         svc = str(svc)
         a_cnt = max(int(row["cnt"]), 1)
         err_rate = float(row["err_cnt"]) / a_cnt
-
         a_avg_dur = float(row["dur_sum"]) / a_cnt
-        n_avg_dur = n_dur_avg.get(svc, 1.)
-        dur_ratio = (a_avg_dur / max(n_avg_dur, 1.)) - 1.
-        dur_signal = max(0., min(dur_ratio, 10.)) / 10.
+        n_avg_dur = n_dur_avg.get(svc, 1.0)
+        dur_ratio = (a_avg_dur / max(n_avg_dur, 1.0)) - 1.0
+        dur_signal = max(0.0, min(dur_ratio, 10.0)) / 10.0
+        combined[svc] = max(err_rate, dur_signal)
+        error_scores[svc] = err_rate
+        latency_scores[svc] = dur_signal
 
-        scores[svc] = max(err_rate, dur_signal)
-
-    if not scores:
+    if not combined:
         return None
 
-    lo, hi = min(scores.values()), max(scores.values())
-    span = hi - lo if hi > lo else 1.
-    return {svc: (v - lo) / span for svc, v in scores.items()}
+    return (
+        _norm_dict(combined),
+        _norm_dict(error_scores),
+        _norm_dict(latency_scores),
+    )
 
 
 def _trace_service_from_timeseries_col(col):
@@ -109,9 +115,11 @@ def _trace_service_from_timeseries_col(col):
 
 
 def _preaggregated_trace_scores(case_dir, inject_time):
-    scores: dict = {}
+    combined: dict = {}
+    error_scores: dict = {}
+    latency_scores: dict = {}
 
-    def _add_score(svc, value):
+    def _add_score(scores, svc, value):
         if svc and np.isfinite(value):
             scores[svc] = max(scores.get(svc, 0.0), float(value))
 
@@ -128,7 +136,9 @@ def _preaggregated_trace_scores(case_dir, inject_time):
                 if svc is None:
                     continue
                 values = pd.to_numeric(anomal[col], errors="coerce").fillna(0.0)
-                _add_score(svc, float(values.mean()))
+                score = float(values.mean())
+                _add_score(error_scores, svc, score)
+                _add_score(combined, svc, score)
         except Exception:
             pass
 
@@ -153,30 +163,48 @@ def _preaggregated_trace_scores(case_dir, inject_time):
                 n_avg = float(n_values.mean()) if len(n_values) else 0.0
                 dur_ratio = (a_avg / max(n_avg, 1.0)) - 1.0
                 dur_signal = max(0.0, min(dur_ratio, 10.0)) / 10.0
-                _add_score(svc, dur_signal)
+                _add_score(latency_scores, svc, dur_signal)
+                _add_score(combined, svc, dur_signal)
         except Exception:
             pass
 
-    if not scores:
+    if not combined:
         return None
-    return _norm_dict(scores)
+    return (
+        _norm_dict(combined),
+        _norm_dict(error_scores) if error_scores else None,
+        _norm_dict(latency_scores) if latency_scores else None,
+    )
 
 
 def _extract_trace_features(case_dir, inject_time):
     """Extract trace onset scores and service call graph with one traces.csv scan."""
     if not case_dir:
-        return _TraceFeatures(trace_scores=None, call_graph={})
+        return _TraceFeatures(
+            trace_scores=None,
+            trace_error_scores=None,
+            trace_latency_scores=None,
+            call_graph={},
+        )
 
     traces_path = os.path.join(case_dir, "traces.csv")
     fast_trace_scores = _preaggregated_trace_scores(case_dir, inject_time)
     if fast_trace_scores is not None:
+        trace_scores, trace_error_scores, trace_latency_scores = fast_trace_scores
         return _TraceFeatures(
-            trace_scores=fast_trace_scores,
+            trace_scores=trace_scores,
+            trace_error_scores=trace_error_scores,
+            trace_latency_scores=trace_latency_scores,
             call_graph=_extract_call_graph(traces_path),
         )
 
     if not os.path.exists(traces_path):
-        return _TraceFeatures(trace_scores=None, call_graph={})
+        return _TraceFeatures(
+            trace_scores=None,
+            trace_error_scores=None,
+            trace_latency_scores=None,
+            call_graph={},
+        )
 
     try:
         inject_ms = inject_time * 1000
@@ -249,14 +277,28 @@ def _extract_trace_features(case_dir, inject_time):
             for caller, callee in zip(edges["parentSvc"], edges["serviceName"]):
                 call_graph.setdefault(caller, set()).add(callee)
 
-        trace_scores = (
+        trace_tuple = (
             _trace_scores_from_chunks(chunks_normal, chunks_anomal)
             if saw_score_cols
             else None
         )
-        return _TraceFeatures(trace_scores=trace_scores, call_graph=call_graph)
+        if trace_tuple is None:
+            trace_scores = trace_error_scores = trace_latency_scores = None
+        else:
+            trace_scores, trace_error_scores, trace_latency_scores = trace_tuple
+        return _TraceFeatures(
+            trace_scores=trace_scores,
+            trace_error_scores=trace_error_scores,
+            trace_latency_scores=trace_latency_scores,
+            call_graph=call_graph,
+        )
     except Exception:
-        return _TraceFeatures(trace_scores=None, call_graph={})
+        return _TraceFeatures(
+            trace_scores=None,
+            trace_error_scores=None,
+            trace_latency_scores=None,
+            call_graph={},
+        )
 
 
 def _trace_onset_scores(case_dir, inject_time):
