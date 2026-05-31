@@ -842,3 +842,58 @@ def test_deterministic_banzhaf_single_service():
     topo = np.zeros((1, 1), dtype=np.float32)
     bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
     assert abs(bz[0] - 0.7) < 1e-6, f"Single service Banzhaf should be 0.7, got {bz[0]}"
+
+
+def test_incident_phenotype_is_normalized_with_missing_trace():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    semantic = {
+        "svc-a": {"resource": 1.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+        "svc-b": {"resource": 0.5, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+    }
+    pi = _incident_phenotype(
+        {"svc-a": 1.0, "svc-b": 0.5},
+        None,
+        None,
+        semantic,
+        [],
+        cfg,
+    )
+
+    assert set(pi) == {"resource", "latency", "error", "propagation"}
+    assert all(np.isfinite(v) for v in pi.values())
+    assert abs(sum(pi.values()) - 1.0) < 1e-6
+    assert pi["resource"] > pi["latency"]
+
+
+def test_incident_phenotype_detects_latency_error_and_propagation_dominance():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    semantic = {
+        "svc-a": {"resource": 0.0, "latency": 1.0, "error": 0.0, "trace": 0.0, "propagation": 1.0},
+        "svc-b": {"resource": 0.0, "latency": 0.9, "error": 0.0, "trace": 0.0, "propagation": 1.0},
+    }
+    svc_anom = {"svc-a": 1.0, "svc-b": 0.9}
+    pi_latency = _incident_phenotype(
+        svc_anom,
+        {"svc-a": 0.0, "svc-b": 0.0},
+        {"svc-a": 1.0, "svc-b": 0.9},
+        semantic,
+        [("svc-a", "svc-b", 0.9)],
+        cfg,
+    )
+
+    assert pi_latency["latency"] > pi_latency["resource"]
+    assert pi_latency["propagation"] > pi_latency["resource"]
+
+    pi_error = _incident_phenotype(
+        svc_anom,
+        {"svc-a": 1.0, "svc-b": 0.8},
+        {"svc-a": 0.0, "svc-b": 0.0},
+        semantic,
+        [],
+        cfg,
+    )
+    assert pi_error["error"] > pi_error["latency"]
