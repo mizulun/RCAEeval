@@ -111,6 +111,9 @@ def test_metric_semantic_group_uses_generic_suffixes():
     assert _metric_semantic_group("svc-a_duration") == "latency"
     assert _metric_semantic_group("svc-a_http_errors") == "error"
     assert _metric_semantic_group("svc-a_custom_metric") == "other"
+    assert _metric_semantic_group("svc-a_error_ratio") == "error"
+    assert _metric_semantic_group("svc-a_success_ratio") == "other"
+    assert _metric_semantic_group("svc-a_io_wait") == "resource"
 
 
 def test_semantic_service_evidence_combines_metrics_trace_and_topology():
