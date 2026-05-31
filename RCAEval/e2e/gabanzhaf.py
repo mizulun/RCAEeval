@@ -669,7 +669,9 @@ def _softmax_dict(raw, temperature):
     keys = list(raw.keys())
     vals = np.asarray([raw[k] for k in keys], dtype=float)
     vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
-    tau = max(float(temperature), 1e-6)
+    tau = float(temperature)
+    if not np.isfinite(tau) or tau <= 0.0:
+        tau = 1.0
     vals = vals / tau
     vals = vals - np.max(vals)
     exp = np.exp(vals)
@@ -685,16 +687,11 @@ def _incident_phenotype(
     topology_edges,
     config,
 ):
-    resource = config.phenotype_gain_resource * _mean_top(
-        v.get("resource", 0.0) for v in semantic_evidence.values()
-    )
-    latency = config.phenotype_gain_latency * _mean_top(
-        v.get("latency", 0.0) for v in semantic_evidence.values()
-    )
+    semantic_evidence = semantic_evidence or {}
+    resource = _mean_top(v.get("resource", 0.0) for v in semantic_evidence.values())
+    latency = _mean_top(v.get("latency", 0.0) for v in semantic_evidence.values())
     latency += _mean_top((trace_latency_scores or {}).values())
-    error = (1.0 + config.phenotype_gain_error) * _mean_top(
-        (trace_error_scores or {}).values()
-    )
+    error = _mean_top((trace_error_scores or {}).values())
 
     edge_weight_sum = 0.0
     aligned_sum = 0.0
@@ -702,11 +699,7 @@ def _incident_phenotype(
         weight = max(float(w), 0.0)
         edge_weight_sum += weight
         aligned_sum += weight * svc_anom_dict.get(u, 0.0) * svc_anom_dict.get(v, 0.0)
-    propagation = (
-        config.phenotype_gain_propagation
-        * aligned_sum
-        / max(edge_weight_sum, 1e-9)
-    )
+    propagation = aligned_sum / max(edge_weight_sum, 1e-9)
 
     return _softmax_dict(
         {

@@ -888,12 +888,70 @@ def test_incident_phenotype_detects_latency_error_and_propagation_dominance():
     assert pi_latency["latency"] > pi_latency["resource"]
     assert pi_latency["propagation"] > pi_latency["resource"]
 
+    error_semantic = {
+        "svc-a": {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+        "svc-b": {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+    }
     pi_error = _incident_phenotype(
         svc_anom,
         {"svc-a": 1.0, "svc-b": 0.8},
         {"svc-a": 0.0, "svc-b": 0.0},
-        semantic,
+        error_semantic,
         [],
         cfg,
     )
     assert pi_error["error"] > pi_error["latency"]
+
+
+def test_incident_phenotype_missing_semantic_evidence_is_neutral():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    pi = _incident_phenotype(
+        {"svc-a": 1.0},
+        None,
+        None,
+        None,
+        [],
+        cfg,
+    )
+
+    assert set(pi) == {"resource", "latency", "error", "propagation"}
+    assert all(np.isfinite(v) for v in pi.values())
+    assert abs(sum(pi.values()) - 1.0) < 1e-6
+
+
+def test_incident_phenotype_non_finite_temperature_is_finite():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
+
+    cfg = _GabanzhafConfig.from_kwargs({"phenotype_temperature": float("nan")})
+    pi = _incident_phenotype(
+        {"svc-a": 1.0},
+        {"svc-a": 0.0},
+        {"svc-a": 0.0},
+        {"svc-a": {"resource": 1.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0}},
+        [],
+        cfg,
+    )
+
+    assert all(np.isfinite(v) for v in pi.values())
+    assert abs(sum(pi.values()) - 1.0) < 1e-6
+
+
+def test_incident_phenotype_pure_propagation_can_dominate():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    pi = _incident_phenotype(
+        {"svc-a": 1.0, "svc-b": 1.0},
+        None,
+        None,
+        {
+            "svc-a": {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+            "svc-b": {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
+        },
+        [("svc-a", "svc-b", 1.0)],
+        cfg,
+    )
+
+    assert pi["propagation"] > pi["resource"]
