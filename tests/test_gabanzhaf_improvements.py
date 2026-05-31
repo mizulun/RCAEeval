@@ -235,6 +235,23 @@ def test_extract_trace_features_exposes_error_and_latency_components():
     assert features.trace_latency_scores["svc-b"] > features.trace_latency_scores.get("svc-a", 0.0)
 
 
+def test_extract_trace_features_preserves_singleton_component_evidence():
+    rows = [
+        ("svc-a", "span-a0", "root", 1000, 0, 10),
+        ("svc-a", "span-a1", "root-2", 60000, 1, 300),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "traces.csv")
+        _make_traces_csv(rows, path)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.trace_error_scores is not None
+    assert features.trace_latency_scores is not None
+    assert features.trace_error_scores["svc-a"] > 0.0
+    assert features.trace_latency_scores["svc-a"] > 0.0
+
+
 def test_extract_trace_features_missing_file_returns_neutral_features():
     features = _extract_trace_features("/nonexistent/path", inject_time=50)
     assert features == _TraceFeatures(

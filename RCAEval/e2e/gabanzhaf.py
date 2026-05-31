@@ -103,8 +103,8 @@ def _trace_scores_from_chunks(chunks_normal, chunks_anomal):
 
     return (
         _norm_dict(combined),
-        _norm_dict(error_scores),
-        _norm_dict(latency_scores),
+        _norm_trace_component_dict(error_scores),
+        _norm_trace_component_dict(latency_scores),
     )
 
 
@@ -172,8 +172,8 @@ def _preaggregated_trace_scores(case_dir, inject_time):
         return None
     return (
         _norm_dict(combined),
-        _norm_dict(error_scores) if error_scores else None,
-        _norm_dict(latency_scores) if latency_scores else None,
+        _norm_trace_component_dict(error_scores) if error_scores else None,
+        _norm_trace_component_dict(latency_scores) if latency_scores else None,
     )
 
 
@@ -455,6 +455,15 @@ def _norm_dict(d):
     lo, hi = min(d.values(), default=0.), max(d.values(), default=1.)
     span = hi - lo if hi > lo else 1.
     return {k: (v - lo) / span for k, v in d.items()}
+
+
+def _norm_trace_component_dict(d):
+    lo = min(d.values(), default=0.0)
+    hi = max(d.values(), default=1.0)
+    if hi > 0.0 and lo == hi:
+        return {k: max(0.0, min(float(v) / hi, 1.0)) for k, v in d.items()}
+    span = hi - lo if hi > lo else 1.0
+    return {k: max(0.0, min((float(v) - lo) / span, 1.0)) for k, v in d.items()}
 
 
 def _metric_evidence(normal_mat, anomal_mat, cols):
