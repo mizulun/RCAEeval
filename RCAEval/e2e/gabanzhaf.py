@@ -444,6 +444,26 @@ def _parse_svc(col):
     return parts[0] if len(parts) == 2 else col
 
 
+def _metric_semantic_group(col):
+    svc = _parse_svc(col)
+    suffix = col[len(svc) + 1:] if col.startswith(svc + "_") else col
+    suffixes = [suffix]
+    if "_" in col:
+        suffixes.append(col.split("_", 1)[1])
+
+    resource_keys = ("cpu", "mem", "memory", "disk", "io", "socket", "net", "network")
+    latency_keys = ("lat", "latency", "duration", "rt", "response")
+    error_keys = ("err", "error", "fail", "failure", "status")
+
+    if any(k in suffix.lower() for suffix in suffixes for k in latency_keys):
+        return "latency"
+    if any(k in suffix.lower() for suffix in suffixes for k in resource_keys):
+        return "resource"
+    if any(k in suffix.lower() for suffix in suffixes for k in error_keys):
+        return "error"
+    return "other"
+
+
 def _norm01_arr(a):
     a = np.asarray(a, dtype=float)
     lo = np.nanmin(a) if a.size else 0.
@@ -574,6 +594,46 @@ def _service_evidence(cols, metric_ev):
         for svc in svc_agg
     }
     return _norm_dict(svc_scores)
+
+
+def _semantic_service_evidence(cols, metric_ev, trace_scores, topology_edges, svc_anom_dict):
+    svc_values = {
+        svc: {"resource": [], "latency": [], "error": [], "other": []}
+        for svc in svc_anom_dict
+    }
+    for col in cols:
+        svc = _parse_svc(col)
+        if svc not in svc_values:
+            svc_values[svc] = {"resource": [], "latency": [], "error": [], "other": []}
+        group = _metric_semantic_group(col)
+        svc_values[svc][group].append(float(metric_ev[col]["score"]))
+
+    raw = {}
+    for svc, groups in svc_values.items():
+        raw[svc] = {
+            "resource": max(groups["resource"], default=0.0),
+            "latency": max(groups["latency"], default=0.0),
+            "error": max(groups["error"], default=0.0),
+            "trace": float((trace_scores or {}).get(svc, 0.0)),
+            "propagation": 0.0,
+        }
+
+    prop = {svc: 0.0 for svc in raw}
+    for u, v, w in topology_edges:
+        if u in prop and v in prop:
+            aligned = float(w) * svc_anom_dict.get(u, 0.0) * svc_anom_dict.get(v, 0.0)
+            prop[u] += aligned
+            prop[v] += aligned
+    prop = _norm_trace_component_dict(prop)
+    for svc in raw:
+        raw[svc]["propagation"] = prop.get(svc, 0.0)
+
+    for key in ("resource", "latency", "error", "trace"):
+        normed = _norm_dict({svc: values[key] for svc, values in raw.items()})
+        for svc in raw:
+            raw[svc][key] = normed.get(svc, 0.0)
+
+    return raw
 
 
 def _deterministic_banzhaf_coverage(fitness_signal, topo_matrix):
