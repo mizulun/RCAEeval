@@ -921,10 +921,11 @@ def test_incident_phenotype_missing_semantic_evidence_is_neutral():
     assert abs(sum(pi.values()) - 1.0) < 1e-6
 
 
-def test_incident_phenotype_non_finite_temperature_is_finite():
+@pytest.mark.parametrize("temperature", [float("nan"), 0.0, -1.0])
+def test_incident_phenotype_invalid_temperature_is_finite(temperature):
     from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
 
-    cfg = _GabanzhafConfig.from_kwargs({"phenotype_temperature": float("nan")})
+    cfg = _GabanzhafConfig.from_kwargs({"phenotype_temperature": temperature})
     pi = _incident_phenotype(
         {"svc-a": 1.0},
         {"svc-a": 0.0},
