@@ -136,6 +136,46 @@ def test_semantic_service_evidence_combines_metrics_trace_and_topology():
     assert sem["svc-b"]["propagation"] > 0.0
 
 
+def test_semantic_service_evidence_preserves_singleton_positive_components():
+    from RCAEval.e2e.gabanzhaf import _semantic_service_evidence
+
+    cols = ["svc-a_cpu"]
+    metric_ev = {"svc-a_cpu": {"score": 0.8}}
+    sem = _semantic_service_evidence(
+        cols,
+        metric_ev,
+        trace_scores={"svc-a": 0.7},
+        topology_edges=[],
+        svc_anom_dict={"svc-a": 0.8},
+    )
+
+    assert 0.0 < sem["svc-a"]["resource"] <= 1.0
+    assert 0.0 < sem["svc-a"]["trace"] <= 1.0
+    assert sem["svc-a"]["propagation"] == 0.0
+
+
+def test_semantic_service_evidence_preserves_broadcast_equal_positive_components():
+    from RCAEval.e2e.gabanzhaf import _semantic_service_evidence
+
+    cols = ["svc-a_cpu", "svc-b_cpu"]
+    metric_ev = {
+        "svc-a_cpu": {"score": 0.8},
+        "svc-b_cpu": {"score": 0.8},
+    }
+    sem = _semantic_service_evidence(
+        cols,
+        metric_ev,
+        trace_scores={},
+        topology_edges=[],
+        svc_anom_dict={"svc-a": 0.8, "svc-b": 0.8},
+    )
+
+    assert 0.0 < sem["svc-a"]["resource"] <= 1.0
+    assert 0.0 < sem["svc-b"]["resource"] <= 1.0
+    assert sem["svc-a"]["propagation"] == 0.0
+    assert sem["svc-b"]["propagation"] == 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. _extract_call_graph
 # ─────────────────────────────────────────────────────────────────────────────
