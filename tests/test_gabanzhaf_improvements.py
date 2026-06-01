@@ -797,11 +797,54 @@ def test_noisy_or_coverage_is_monotone_and_bounded():
     empty = _noisy_or_coverage(prob, [])
     one = _noisy_or_coverage(prob, [0])
     both = _noisy_or_coverage(prob, [0, 1])
+    expected_both = 1.0 - (1.0 - prob[0]) * (1.0 - prob[1])
 
     assert np.all(empty == 0.0)
     assert np.all(one >= empty)
     assert np.all(both >= one)
     assert np.all(both <= 1.0)
+    assert np.allclose(both, expected_both)
+
+
+def test_noisy_or_coverage_deduplicates_coalition_players():
+    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
+
+    prob = np.array(
+        [
+            [0.2, 0.5],
+            [0.7, 0.4],
+        ],
+        dtype=float,
+    )
+
+    deduped = _noisy_or_coverage(prob, [0, 1])
+    duplicated = _noisy_or_coverage(prob, [0, 1, 0])
+
+    assert np.allclose(duplicated, deduped)
+
+
+def test_noisy_or_coverage_rejects_invalid_coalition_indices():
+    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
+
+    prob = np.array(
+        [
+            [0.2, 0.5],
+            [0.7, 0.4],
+        ],
+        dtype=float,
+    )
+
+    with pytest.raises(ValueError, match="coalition"):
+        _noisy_or_coverage(prob, [-1])
+
+    with pytest.raises(ValueError, match="coalition"):
+        _noisy_or_coverage(prob, [0, 1.5])
+
+    with pytest.raises(ValueError, match="coalition"):
+        _noisy_or_coverage(prob, [2])
+
+    with pytest.raises(ValueError, match="coalition"):
+        _noisy_or_coverage(prob, [[0]])
 
 
 def test_noisy_or_payoff_has_diminishing_marginal_returns():
