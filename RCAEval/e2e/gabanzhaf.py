@@ -1081,7 +1081,7 @@ def _rank_metrics(
     nb = _norm_dict(svc_banzhaf)
     nr = _norm_dict(svc_residual)
     na = _norm_dict(svc_anom_dict)
-    nm = {k: min(_finite_nonnegative(v), 1.0) for k, v in metric_score.items()}
+    nm = _norm_dict(metric_score)
     trace_source = trace_scores or {}
     nt = _norm_dict({s: trace_source.get(s, 0.) for s in svc_anom_dict})
 
