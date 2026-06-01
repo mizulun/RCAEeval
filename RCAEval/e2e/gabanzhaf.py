@@ -1014,6 +1014,10 @@ def _phenotype_conditioned_fitness(
     trace_source = trace_scores or {}
     semantic_evidence = semantic_evidence or {}
     phenotype = phenotype or {}
+    gain_resource = _finite_nonnegative(config.phenotype_gain_resource)
+    gain_latency = _finite_nonnegative(config.phenotype_gain_latency)
+    gain_error = _finite_nonnegative(config.phenotype_gain_error)
+    gain_propagation = _finite_nonnegative(config.phenotype_gain_propagation)
     for svc in cand_list:
         sem = semantic_evidence.get(
             svc,
@@ -1035,10 +1039,10 @@ def _phenotype_conditioned_fitness(
         base = 0.50 * anomaly + 0.35 * residual + 0.15 * trace
         multiplier = (
             1.0
-            + config.phenotype_gain_resource * phenotype_resource * resource
-            + config.phenotype_gain_latency * phenotype_latency * latency
-            + config.phenotype_gain_error * phenotype_error * max(error, trace)
-            + config.phenotype_gain_propagation * phenotype_propagation * propagation
+            + gain_resource * phenotype_resource * resource
+            + gain_latency * phenotype_latency * latency
+            + gain_error * phenotype_error * max(error, trace)
+            + gain_propagation * phenotype_propagation * propagation
         )
         values.append(max(0.0, base * multiplier))
     return np.asarray(values, dtype=float)

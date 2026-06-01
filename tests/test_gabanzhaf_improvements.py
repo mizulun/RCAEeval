@@ -1031,3 +1031,30 @@ def test_phenotype_conditioned_fitness_empty_candidates_returns_empty_vector():
 
     assert fitness.shape == (0,)
     assert fitness.dtype == float
+
+
+def test_phenotype_conditioned_fitness_sanitizes_nonfinite_gain_knobs():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _phenotype_conditioned_fitness
+
+    cfg = _GabanzhafConfig.from_kwargs({"phenotype_gain_latency": float("inf")})
+    fitness = _phenotype_conditioned_fitness(
+        ["svc-a"],
+        {"svc-a": 0.8},
+        {"svc-a": 0.4},
+        {"svc-a": 0.5},
+        {
+            "svc-a": {
+                "resource": 0.0,
+                "latency": 1.0,
+                "error": 0.0,
+                "trace": 0.5,
+                "propagation": 0.0,
+            }
+        },
+        {"resource": 0.0, "latency": 1.0, "error": 0.0, "propagation": 0.0},
+        cfg,
+    )
+
+    assert fitness.shape == (1,)
+    assert np.all(np.isfinite(fitness))
+    assert np.all(fitness >= 0.0)
