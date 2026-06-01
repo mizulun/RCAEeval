@@ -930,6 +930,36 @@ def test_rank_metrics_uses_service_banzhaf_times_local_metric_evidence():
     assert ranks.index("svc-a_mem") < ranks.index("svc-b_cpu")
 
 
+def test_rank_metrics_uses_local_metric_evidence_when_banzhaf_ties_positive():
+    from RCAEval.e2e.gabanzhaf import _rank_metrics
+
+    cols = ["svc-a_low", "svc-b_high", "svc-a_mid"]
+    ranks = _rank_metrics(
+        cols,
+        svc_banzhaf={"svc-a": 0.5, "svc-b": 0.5},
+        metric_score={"svc-a_low": 0.1, "svc-b_high": 0.9, "svc-a_mid": 0.4},
+        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
+    )
+
+    assert ranks.index("svc-b_high") < ranks.index("svc-a_mid")
+    assert ranks.index("svc-a_mid") < ranks.index("svc-a_low")
+
+
+def test_rank_metrics_uses_local_metric_evidence_when_banzhaf_empty():
+    from RCAEval.e2e.gabanzhaf import _rank_metrics
+
+    cols = ["svc-a_low", "svc-b_high", "svc-c_mid"]
+    ranks = _rank_metrics(
+        cols,
+        svc_banzhaf={},
+        metric_score={"svc-a_low": 0.1, "svc-b_high": 0.9, "svc-c_mid": 0.4},
+        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
+    )
+
+    assert ranks.index("svc-b_high") < ranks.index("svc-c_mid")
+    assert ranks.index("svc-c_mid") < ranks.index("svc-a_low")
+
+
 def test_gabanzhaf_core_returns_game_candidates_when_requested():
     data = pd.DataFrame({
         "time": np.arange(12),
