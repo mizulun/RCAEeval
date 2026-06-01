@@ -50,6 +50,16 @@ class _GabanzhafConfig:
     causal_probability_lambda: float = 1.5
     metric_rank_epsilon: float = 0.15
 
+    @staticmethod
+    def _positive_int_or_default(value, default):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return int(default)
+        if not np.isfinite(parsed) or parsed <= 0.0:
+            return int(default)
+        return int(parsed)
+
     @classmethod
     def from_kwargs(cls, kwargs):
         top_k_svcs = int(kwargs.get("top_k_svcs", cls.top_k_svcs))
@@ -67,7 +77,10 @@ class _GabanzhafConfig:
             phenotype_gain_latency=float(kwargs.get("phenotype_gain_latency", cls.phenotype_gain_latency)),
             phenotype_gain_error=float(kwargs.get("phenotype_gain_error", cls.phenotype_gain_error)),
             phenotype_gain_propagation=float(kwargs.get("phenotype_gain_propagation", cls.phenotype_gain_propagation)),
-            exact_candidate_k=int(kwargs.get("exact_candidate_k", cls.exact_candidate_k)),
+            exact_candidate_k=cls._positive_int_or_default(
+                kwargs.get("exact_candidate_k", cls.exact_candidate_k),
+                cls.exact_candidate_k,
+            ),
             causal_probability_lambda=float(
                 kwargs.get("causal_probability_lambda", cls.causal_probability_lambda)
             ),
@@ -1064,6 +1077,7 @@ def _select_exact_candidates(
     config,
 ):
     k = max(1, int(config.exact_candidate_k))
+    candidates = list(dict.fromkeys(candidates))
     trace_source = trace_scores or {}
     graph_participation = {svc: 0.0 for svc in candidates}
     for u, v, w in topology_edges:
@@ -1085,6 +1099,14 @@ def _select_exact_candidates(
     return sorted(candidates, key=lambda svc: (score(svc), svc), reverse=True)[:k]
 
 
+def _raise_if_duplicate_names(names, label):
+    seen = set()
+    for name in names:
+        if name in seen:
+            raise ValueError(f"Duplicate {label} name: {name}")
+        seen.add(name)
+
+
 def _causal_explanation_matrix(
     cand_list,
     service_list,
@@ -1092,6 +1114,8 @@ def _causal_explanation_matrix(
     topology_edges,
     config,
 ):
+    _raise_if_duplicate_names(cand_list, "candidate")
+    _raise_if_duplicate_names(service_list, "service")
     cand_idx = {svc: i for i, svc in enumerate(cand_list)}
     svc_idx = {svc: j for j, svc in enumerate(service_list)}
     matrix = np.zeros((len(cand_list), len(service_list)), dtype=float)
