@@ -942,7 +942,7 @@ def test_select_exact_candidates_deduplicates_before_limiting_slots():
 def test_exact_candidate_k_invalid_values_fall_back_to_default():
     from RCAEval.e2e.gabanzhaf import _GabanzhafConfig
 
-    invalid_values = ["nan", np.nan, np.inf, "-2", 0]
+    invalid_values = ["nan", np.nan, np.inf, "-2", 0, "0.5", 0.5]
 
     for value in invalid_values:
         cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": value})
