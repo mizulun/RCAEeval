@@ -970,6 +970,112 @@ def test_gabanzhaf_core_returns_game_candidates_when_requested():
     assert len(result["game_candidates"]) > 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-filter: early candidate selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_cheap_service_filter_ranks_real_anomaly_above_constant_baseline():
+    """Constant-baseline service (IQR≈0, tiny absolute change) must rank below
+    a service with a real proportional anomaly."""
+    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
+
+    rng = np.random.default_rng(0)
+
+    # redis_diskio: constant at 1000, tiny bump to 1010 in anomal period
+    n_normal, n_anomal = 100, 100
+    redis_normal = np.full((n_normal, 1), 1000.0)
+    redis_anomal = np.full((n_anomal, 1), 1010.0)
+
+    # app_cpu: variable baseline ~50, large shift to ~80 in anomal period
+    app_normal = rng.normal(50, 10, (n_normal, 1))
+    app_anomal = rng.normal(80, 10, (n_anomal, 1))
+
+    cols = ["redis_diskio", "app_cpu"]
+    normal_mat = np.hstack([redis_normal, app_normal])
+    anomal_mat = np.hstack([redis_anomal, app_anomal])
+
+    top_svcs = _cheap_service_filter(cols, normal_mat, anomal_mat, top_k=2)
+
+    assert top_svcs[0] == "app", f"Expected 'app' first, got {top_svcs}"
+
+
+def test_cheap_service_filter_suppresses_near_zero_constant_service():
+    """Near-zero constant metric (like idle diskio at ~0) must not inflate when
+    there is even a tiny absolute change, if other services have real anomalies."""
+    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
+
+    rng = np.random.default_rng(1)
+
+    # cache_bytes: near-zero constant, tiny noise, tiny change
+    cache_normal = rng.normal(0, 1e-4, (80, 1))
+    cache_anomal = np.full((80, 1), 1e-3)
+
+    # root_cpu: real baseline, meaningful anomaly
+    root_normal = rng.normal(40, 8, (80, 1))
+    root_anomal = rng.normal(75, 8, (80, 1))
+
+    cols = ["cache_bytes", "root_cpu"]
+    normal_mat = np.hstack([cache_normal, root_normal])
+    anomal_mat = np.hstack([cache_anomal, root_anomal])
+
+    top_svcs = _cheap_service_filter(cols, normal_mat, anomal_mat, top_k=2)
+
+    assert top_svcs[0] == "root", f"Expected 'root' first, got {top_svcs}"
+
+
+def test_cheap_service_filter_returns_at_most_top_k():
+    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
+
+    rng = np.random.default_rng(2)
+    n = 60
+    # 5 services with 1 metric each
+    normal_mat = rng.normal(10, 2, (n, 5))
+    anomal_mat = rng.normal(15, 2, (n, 5))
+    cols = [f"svc{i}_cpu" for i in range(5)]
+
+    assert len(_cheap_service_filter(cols, normal_mat, anomal_mat, top_k=3)) == 3
+    assert len(_cheap_service_filter(cols, normal_mat, anomal_mat, top_k=10)) == 5
+
+
+def test_gabanzhaf_core_with_prefilter_does_not_promote_constant_baseline_service():
+    """End-to-end: a constant-baseline shared-hub service must not rank #1
+    when a root-cause service has a clear metric anomaly."""
+    from RCAEval.e2e.gabanzhaf import _gabanzhaf_core
+
+    rng = np.random.default_rng(3)
+    n_rows = 40
+
+    # root: cpu spikes sharply in anomal period
+    root_normal = rng.normal(30, 5, n_rows // 2)
+    root_anomal = rng.normal(85, 5, n_rows // 2)
+
+    # hub: constant high diskio throughout (like redis in re2-ob)
+    hub_disk_normal = np.full(n_rows // 2, 5000.0)
+    hub_disk_anomal = np.full(n_rows // 2, 5050.0)  # tiny bump
+
+    time_col = np.arange(n_rows, dtype=float)
+    inject_time = float(n_rows // 2)
+
+    data = pd.DataFrame({
+        "time": time_col,
+        "root_cpu":   np.concatenate([root_normal, root_anomal]),
+        "hub_diskio": np.concatenate([hub_disk_normal, hub_disk_anomal]),
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=inject_time,
+        dataset="unit",
+        anomalies=None,
+        kwargs={"use_prefilter": True},
+    )
+
+    ranks = result["ranks"]
+    assert ranks[0] == "root_cpu", (
+        f"Expected 'root_cpu' at rank 1, got {ranks[:3]}"
+    )
+
+
 def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
     source_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
