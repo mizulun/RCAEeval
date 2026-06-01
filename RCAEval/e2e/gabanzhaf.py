@@ -852,17 +852,8 @@ def _probabilistic_banzhaf(prob_matrix, anomaly_weights):
     return np.maximum(scores, 0.0)
 
 
-def _banzhaf_power(fitness_signal, topo_matrix, config):
-    if config.banzhaf_mode == "mc":
-        return _mc_banzhaf(
-            fitness_signal,
-            topo_matrix,
-            n_samples=config.banzhaf_samples,
-            seed=config.seed,
-        )
-    if config.banzhaf_mode == "deterministic":
-        return _deterministic_banzhaf_coverage(fitness_signal, topo_matrix)
-    raise ValueError(f"Unsupported banzhaf_mode: {config.banzhaf_mode}")
+def _banzhaf_power(prob_matrix, anomaly_weights, config):
+    return _probabilistic_banzhaf(prob_matrix, anomaly_weights)
 
 
 def _mc_banzhaf(fitness_signal, topo_matrix, n_samples, seed=42):
@@ -1367,43 +1358,41 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     # ── 5. Pre-filter with upstream rescue, then bound runtime ───────────────
     cand_list = _candidate_services(seed_svcs, upstream_map_full, svc_anom_dict, config)
 
-    # ── 7. Weighted residual + topology matrix ───────────────────────────────
+    # ── 7. Weighted residual + probabilistic causal game ─────────────────────
     # Scale effective confidence by 2× (cap 0.95) so call_graph (0.5→0.95) fully
     # suppresses victims while weak lag-corr edges (0.1→0.2) still matter.
     svc_residual = _residual_scores(
         svc_anom_dict, upstream_map_residual, edge_conf, config
     )
 
-    semantic_evidence = _semantic_service_evidence(
-        cols, metric_ev, trace_scores, topology_edges, svc_anom_dict
-    )
-    phenotype = _incident_phenotype(
-        svc_anom_dict,
-        kwargs.get("trace_error_scores", None),
-        kwargs.get("trace_latency_scores", None),
-        semantic_evidence,
-        topology_edges,
-        config,
-    )
-    fitness_signal = _phenotype_conditioned_fitness(
+    game_candidates = _select_exact_candidates(
         cand_list,
         svc_anom_dict,
         svc_residual,
         trace_scores,
-        semantic_evidence,
-        phenotype,
+        topology_edges,
         config,
     )
-    topo_matrix = _topology_matrix(cand_list, topology_edges)
+    game_services = sorted(svc_anom_dict.keys())
+    prob_matrix = _causal_explanation_matrix(
+        game_candidates,
+        game_services,
+        svc_anom_dict,
+        topology_edges,
+        config,
+    )
+    anomaly_weights = np.asarray(
+        [svc_anom_dict.get(svc, 0.0) for svc in game_services],
+        dtype=float,
+    )
     _mark_stage("topology")
 
     # ── 8. Banzhaf power index ────────────────────────────────────────────────
-    banzhaf_values = _banzhaf_power(
-        fitness_signal,
-        topo_matrix,
-        config,
-    )
-    svc_banzhaf = {cand_list[i]: float(banzhaf_values[i]) for i in range(len(cand_list))}
+    banzhaf_values = _banzhaf_power(prob_matrix, anomaly_weights, config)
+    svc_banzhaf = {
+        game_candidates[i]: float(banzhaf_values[i])
+        for i in range(len(game_candidates))
+    }
     _mark_stage("banzhaf")
 
     # ── 9. Final metric-level ranking ────────────────────────────────────────
@@ -1414,14 +1403,12 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         svc_anom_dict,
         metric_score,
         trace_scores,
-        phenotype,
-        semantic_evidence,
     )
     _mark_stage("ranking")
 
     result = {"ranks": ranks, "node_names": cols}
     if bool(kwargs.get("return_diagnostics", False)):
-        result["phenotype"] = phenotype
+        result["game_candidates"] = game_candidates
     if return_stage_timing:
         result["stage_timing"] = stage_timing
     return result
@@ -1435,8 +1422,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
     """Approximate GA-Banzhaf with metric evidence and weighted topology.
 
-    The default deterministic Banzhaf backend is used for small and large
-    systems. MC is available only by explicitly setting banzhaf_mode="mc".
+    The service game uses a single probabilistic noisy-OR Banzhaf flow.
     Trace signals are folded into the fixed service score formula as zero-valued
     evidence when unavailable, instead of switching ranking formulas.
 

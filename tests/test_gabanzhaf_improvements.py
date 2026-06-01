@@ -603,6 +603,8 @@ def test_callgraph_edges_reach_banzhaf_topology_when_lag_corr_is_empty(monkeypat
     svc_caller = "svc-caller"
     inject_row = 50
     df = _make_simple_dataframe(svc_root, svc_caller, inject_row=inject_row)
+    df["svc-neutral_latency-50"] = 10.0
+    df["svc-neutral_cpu"] = 20.0
     captured = {}
 
     monkeypatch.setattr(gabanzhaf_mod, "_build_topology", lambda *args, **kwargs: [])
@@ -612,9 +614,9 @@ def test_callgraph_edges_reach_banzhaf_topology_when_lag_corr_is_empty(monkeypat
         lambda *args, **kwargs: [(svc_root, svc_caller, 0.5)],
     )
 
-    def capture_banzhaf(fitness_signal, topo_matrix, config):
-        captured["topo_matrix"] = np.asarray(topo_matrix).copy()
-        return np.asarray(fitness_signal, dtype=float)
+    def capture_banzhaf(prob_matrix, anomaly_weights, config):
+        captured["prob_matrix"] = np.asarray(prob_matrix).copy()
+        return np.ones(prob_matrix.shape[0], dtype=float)
 
     monkeypatch.setattr(gabanzhaf_mod, "_banzhaf_power", capture_banzhaf)
 
@@ -626,7 +628,7 @@ def test_callgraph_edges_reach_banzhaf_topology_when_lag_corr_is_empty(monkeypat
         kwargs={"call_graph": {svc_caller: {svc_root}}},
     )
 
-    assert np.count_nonzero(captured["topo_matrix"]) == 1
+    assert np.count_nonzero(captured["prob_matrix"]) > captured["prob_matrix"].shape[0]
 
 
 def test_callgraph_does_not_penalise_caller_root_cause():
@@ -749,28 +751,23 @@ def test_gabanzhaf_config_defaults_to_deterministic_banzhaf():
     assert cfg.banzhaf_mode == "deterministic"
 
 
-def test_banzhaf_power_uses_mc_only_when_explicit(monkeypatch):
-    calls = []
+def test_banzhaf_power_uses_probabilistic_game_single_flow():
+    from RCAEval.e2e.gabanzhaf import _banzhaf_power
 
-    def fake_mc(fitness_signal, topo_matrix, n_samples, seed=42):
-        calls.append((np.asarray(fitness_signal).tolist(), int(n_samples), int(seed)))
-        return np.array([3.0, 2.0])
-
-    monkeypatch.setattr(gabanzhaf_mod, "_mc_banzhaf", fake_mc)
-
-    cfg = _GabanzhafConfig.from_kwargs({
-        "banzhaf_mode": "mc",
-        "banzhaf_samples": 123,
-        "seed": 7,
-    })
-    values = gabanzhaf_mod._banzhaf_power(
-        np.array([0.9, 0.5], dtype=float),
-        np.zeros((2, 2), dtype=np.float32),
-        cfg,
+    prob = np.array(
+        [
+            [1.0, 0.7],
+            [0.0, 1.0],
+        ],
+        dtype=float,
     )
+    weights = np.array([0.9, 0.5], dtype=float)
 
-    assert calls == [([0.9, 0.5], 123, 7)]
-    assert np.allclose(values, np.array([3.0, 2.0]))
+    values = _banzhaf_power(prob, weights, _GabanzhafConfig.from_kwargs({}))
+
+    assert values.shape == (2,)
+    assert values[0] > values[1]
+    assert np.all(values >= 0.0)
 
 
 def test_deterministic_banzhaf_matches_two_node_analytic_case():
@@ -1001,56 +998,6 @@ def test_causal_explanation_matrix_rejects_duplicate_services():
         )
 
 
-def test_banzhaf_power_default_is_deterministic_not_mc(monkeypatch):
-    def fail_mc(*args, **kwargs):
-        raise AssertionError("MC backend should be explicit")
-
-    monkeypatch.setattr(gabanzhaf_mod, "_mc_banzhaf", fail_mc)
-
-    cfg = _GabanzhafConfig.from_kwargs({})
-    fs = np.array([0.9, 0.5], dtype=float)
-    topo = np.zeros((2, 2), dtype=np.float32)
-    topo[0, 1] = 0.5
-
-    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
-
-    assert bz[0] > bz[1]
-
-
-def test_banzhaf_power_rejects_invalid_mode():
-    cfg = _GabanzhafConfig.from_kwargs({"banzhaf_mode": "invalid"})
-
-    with pytest.raises(ValueError, match="Unsupported banzhaf_mode"):
-        gabanzhaf_mod._banzhaf_power(
-            np.array([0.9, 0.5], dtype=float),
-            np.zeros((2, 2), dtype=np.float32),
-            cfg,
-        )
-
-
-def test_banzhaf_power_default_uses_same_path_for_small_and_large(monkeypatch):
-    """The Banzhaf computation must not switch algorithms by candidate count."""
-    def fail_mc(*args, **kwargs):
-        raise AssertionError("MC backend should be explicit")
-
-    monkeypatch.setattr(gabanzhaf_mod, "_mc_banzhaf", fail_mc)
-    cfg = _GabanzhafConfig.from_kwargs({})
-
-    small = gabanzhaf_mod._banzhaf_power(
-        np.array([0.9, 0.4, 0.1], dtype=float),
-        np.zeros((3, 3), dtype=np.float32),
-        cfg,
-    )
-    large = gabanzhaf_mod._banzhaf_power(
-        np.array([0.9] + [0.3] * 21, dtype=float),
-        np.zeros((22, 22), dtype=np.float32),
-        cfg,
-    )
-
-    assert small.shape == (3,)
-    assert large.shape == (22,)
-
-
 def test_service_root_score_formula_does_not_branch_on_trace_availability():
     """Missing trace data must be a zero signal, not a different formula."""
     without_trace = _service_root_score(0.8, 0.6, 0.4, trace_score=0.0)
@@ -1059,81 +1006,6 @@ def test_service_root_score_formula_does_not_branch_on_trace_availability():
 
     assert without_trace == with_zero_trace
     assert with_trace > without_trace
-
-
-def test_deterministic_banzhaf_no_topology_preserves_anomaly_order():
-    """Without topology, Banzhaf should be proportional to fitness_signal.
-
-    For additive v(S), the deterministic Banzhaf ranking must follow
-    fitness_signal.
-    """
-    cfg = _GabanzhafConfig.from_kwargs({})
-    fs = np.array([0.9, 0.4, 0.1], dtype=float)
-    topo = np.zeros((3, 3), dtype=np.float32)
-    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
-    # ranking must match fitness_signal ranking
-    assert bz[0] > bz[1] > bz[2], f"Expected descending Banzhaf, got {bz}"
-
-
-def test_deterministic_banzhaf_topology_promotes_root_cause():
-    """Topology (causal coverage) must rank root cause above victim unconditionally.
-
-    Setup: n=2, A(idx=0) upstream of B(idx=1), fitness=[0.9, 0.5], topo[0,1]=0.5.
-    Analytical expected values (causal-coverage v(S)):
-      downstream_masks[A] = {B}
-      v({})    = 0
-      v({A})   = fitness[A] + fitness[B] = 1.4   (A explains B)
-      v({B})   = fitness[B]              = 0.5   (B explains nothing)
-      v({A,B}) = fitness[A] + fitness[B] = 1.4
-      Banzhaf(A) = mean([1.4 - 0,  1.4 - 0.5]) = mean([1.4, 0.9]) = 1.15
-      Banzhaf(B) = mean([0.5 - 0,  1.4 - 1.4]) = mean([0.5, 0.0]) = 0.25
-    Root cause ALWAYS dominates regardless of relative anomaly magnitudes.
-    """
-    cfg = _GabanzhafConfig.from_kwargs({})
-    fs = np.array([0.9, 0.5], dtype=float)
-    topo = np.zeros((2, 2), dtype=np.float32)
-    topo[0, 1] = 0.5  # A(0) upstream of B(1)
-    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
-    assert bz[0] > bz[1], f"Root cause should outrank victim. bz={bz}"
-
-
-def test_deterministic_banzhaf_topology_no_negative_values():
-    """Banzhaf values must all be non-negative (clipped at 0)."""
-    cfg = _GabanzhafConfig.from_kwargs({})
-    rng = np.random.default_rng(0)
-    n = 5
-    fs = rng.random(n)
-    topo = np.zeros((n, n), dtype=np.float32)
-    topo[0, 1] = 0.8
-    topo[1, 2] = 0.6
-    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
-    assert np.all(bz >= 0), f"Negative Banzhaf values: {bz}"
-
-
-def test_deterministic_banzhaf_large_graph_ranks_clear_root_first():
-    """Large graphs must use the same deterministic path and rank clear root first.
-
-    n=22 previously triggered a different path. service 0 has much higher anomaly (0.9 vs 0.3)
-    and is upstream of all others — it must have the highest Banzhaf value.
-    """
-    cfg = _GabanzhafConfig.from_kwargs({})
-    fs_big = np.array([0.9] + [0.3] * 21)
-    topo_big = np.zeros((22, 22), dtype=np.float32)
-    for j in range(1, 22):
-        topo_big[0, j] = 0.3
-    bz = gabanzhaf_mod._banzhaf_power(fs_big, topo_big, cfg)
-    assert np.argmax(bz) == 0, (
-        f"Root cause (idx 0) should have max Banzhaf. bz={bz}"
-    )
-
-
-def test_deterministic_banzhaf_single_service():
-    """Single service: Banzhaf = fitness_signal (trivial coalition)."""
-    cfg = _GabanzhafConfig.from_kwargs({})
-    fs = np.array([0.7])
-    topo = np.zeros((1, 1), dtype=np.float32)
-    bz = gabanzhaf_mod._banzhaf_power(fs, topo, cfg)
-    assert abs(bz[0] - 0.7) < 1e-6, f"Single service Banzhaf should be 0.7, got {bz[0]}"
 
 
 def test_incident_phenotype_is_normalized_with_missing_trace():
@@ -1482,7 +1354,7 @@ def test_rank_metrics_without_phenotype_uses_legacy_formula():
     ) == expected
 
 
-def test_gabanzhaf_core_returns_phenotype_when_requested():
+def test_gabanzhaf_core_returns_game_candidates_when_requested():
     data = pd.DataFrame({
         "time": np.arange(12),
         "svc-a_cpu": [1, 1, 1, 1, 1, 1, 8, 8, 8, 8, 8, 8],
@@ -1501,5 +1373,6 @@ def test_gabanzhaf_core_returns_phenotype_when_requested():
 
     assert "ranks" in result
     assert "stage_timing" in result
-    assert "phenotype" in result
-    assert abs(sum(result["phenotype"].values()) - 1.0) < 1e-6
+    assert "game_candidates" in result
+    assert "phenotype" not in result
+    assert result["game_candidates"]
