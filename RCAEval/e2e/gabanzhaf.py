@@ -1034,7 +1034,14 @@ def _topology_matrix(cand_list, lag_corr_edges):
 
 
 def _rank_metrics(all_cols, svc_banzhaf, metric_score, config):
-    nb = _norm_dict(svc_banzhaf)
+    finite_banzhaf = {
+        svc: _finite_nonnegative(score)
+        for svc, score in (svc_banzhaf or {}).items()
+    }
+    if not finite_banzhaf or len(set(finite_banzhaf.values())) == 1:
+        nb = {svc: 1.0 for svc in {_parse_svc(col) for col in all_cols}}
+    else:
+        nb = _norm_dict(finite_banzhaf)
     nm = _norm_dict(metric_score)
     epsilon = _finite_nonnegative(config.metric_rank_epsilon)
 
