@@ -122,7 +122,36 @@ def _trace_scores_from_chunks(chunks_normal, chunks_anomal):
 def _trace_service_from_timeseries_col(col):
     if col == "time":
         return None
-    return str(col).split("_", 1)[0]
+    return str(col).rsplit("_", 1)[0]
+
+
+def _call_graph_from_span_frame(graph_df):
+    if graph_df.empty:
+        return {}
+
+    if "traceID" in graph_df.columns:
+        span_to_svc = {
+            (str(trace_id), span_id): service
+            for trace_id, span_id, service in zip(
+                graph_df["traceID"], graph_df["spanID"], graph_df["serviceName"]
+            )
+        }
+        parent_svc = [
+            span_to_svc.get((str(trace_id), parent_id))
+            for trace_id, parent_id in zip(graph_df["traceID"], graph_df["parentSpanID"])
+        ]
+    else:
+        span_to_svc = graph_df.set_index("spanID")["serviceName"].to_dict()
+        parent_svc = graph_df["parentSpanID"].map(span_to_svc)
+
+    edges = graph_df.assign(parentSvc=parent_svc)
+    edges = edges[
+        edges["parentSvc"].notna() & (edges["parentSvc"] != edges["serviceName"])
+    ]
+    result: dict = {}
+    for caller, callee in zip(edges["parentSvc"], edges["serviceName"]):
+        result.setdefault(caller, set()).add(callee)
+    return result
 
 
 def _preaggregated_trace_scores(case_dir, inject_time):
@@ -221,7 +250,8 @@ def _extract_trace_features(case_dir, inject_time):
         inject_ms = inject_time * 1000
         score_cols = {"serviceName", "startTimeMillis", "statusCode", "duration"}
         span_cols = {"serviceName", "spanID", "parentSpanID"}
-        needed = score_cols | span_cols
+        optional_span_cols = {"traceID"}
+        needed = score_cols | span_cols | optional_span_cols
         max_anomal = 30_000
         max_graph_rows = 50_000
 
@@ -247,9 +277,10 @@ def _extract_trace_features(case_dir, inject_time):
 
             if has_span_cols and graph_rows < max_graph_rows:
                 remaining = max_graph_rows - graph_rows
-                graph_chunk = chunk.loc[:, ["serviceName", "spanID", "parentSpanID"]].head(
-                    remaining
-                )
+                graph_cols = ["serviceName", "spanID", "parentSpanID"]
+                if "traceID" in chunk.columns:
+                    graph_cols.append("traceID")
+                graph_chunk = chunk.loc[:, graph_cols].head(remaining)
                 if not graph_chunk.empty:
                     graph_chunks.append(graph_chunk)
                     graph_rows += len(graph_chunk)
@@ -279,14 +310,7 @@ def _extract_trace_features(case_dir, inject_time):
         call_graph: dict = {}
         if graph_chunks:
             graph_df = pd.concat(graph_chunks, ignore_index=True)
-            span_to_svc = graph_df.set_index("spanID")["serviceName"].to_dict()
-            graph_df["parentSvc"] = graph_df["parentSpanID"].map(span_to_svc)
-            edges = graph_df[
-                graph_df["parentSvc"].notna()
-                & (graph_df["parentSvc"] != graph_df["serviceName"])
-            ]
-            for caller, callee in zip(edges["parentSvc"], edges["serviceName"]):
-                call_graph.setdefault(caller, set()).add(callee)
+            call_graph = _call_graph_from_span_frame(graph_df)
 
         trace_tuple = (
             _trace_scores_from_chunks(chunks_normal, chunks_anomal)
@@ -427,19 +451,14 @@ def _extract_call_graph(traces_path):
     try:
         df = pd.read_csv(
             traces_path,
-            usecols=["serviceName", "spanID", "parentSpanID"],
+            usecols=lambda col: col
+            in {"serviceName", "spanID", "parentSpanID", "traceID"},
             nrows=50_000,
             on_bad_lines="skip",
         )
-        span_to_svc = df.set_index("spanID")["serviceName"].to_dict()
-        df["parentSvc"] = df["parentSpanID"].map(span_to_svc)
-        edges = df[
-            df["parentSvc"].notna() & (df["parentSvc"] != df["serviceName"])
-        ]
-        result: dict = {}
-        for caller, callee in zip(edges["parentSvc"], edges["serviceName"]):
-            result.setdefault(caller, set()).add(callee)
-        return result
+        if not {"serviceName", "spanID", "parentSpanID"}.issubset(df.columns):
+            return {}
+        return _call_graph_from_span_frame(df)
     except Exception:
         return {}
 
@@ -704,7 +723,8 @@ def _incident_phenotype(
     resource = _mean_top(v.get("resource", 0.0) for v in semantic_evidence.values())
     latency = _mean_top(v.get("latency", 0.0) for v in semantic_evidence.values())
     latency += _mean_top((trace_latency_scores or {}).values())
-    error = _mean_top((trace_error_scores or {}).values())
+    error = _mean_top(v.get("error", 0.0) for v in semantic_evidence.values())
+    error += _mean_top((trace_error_scores or {}).values())
 
     edge_weight_sum = 0.0
     aligned_sum = 0.0
