@@ -923,6 +923,32 @@ def test_select_exact_candidates_uses_fixed_unsupervised_score():
     assert "svc-b" in selected
 
 
+def test_select_exact_candidates_deduplicates_before_limiting_slots():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _select_exact_candidates
+
+    cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": 3})
+    selected = _select_exact_candidates(
+        ["svc-a", "svc-a", "svc-b", "svc-c"],
+        svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8, "svc-c": 0.7},
+        svc_residual={},
+        trace_scores={},
+        topology_edges=[],
+        config=cfg,
+    )
+
+    assert selected == ["svc-a", "svc-b", "svc-c"]
+
+
+def test_exact_candidate_k_invalid_values_fall_back_to_default():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig
+
+    invalid_values = ["nan", np.nan, np.inf, "-2", 0]
+
+    for value in invalid_values:
+        cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": value})
+        assert cfg.exact_candidate_k == _GabanzhafConfig.exact_candidate_k
+
+
 def test_causal_explanation_matrix_builds_self_and_topology_probabilities():
     from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
 
@@ -943,6 +969,36 @@ def test_causal_explanation_matrix_builds_self_and_topology_probabilities():
     assert 0.0 < matrix[0, 2] <= 1.0
     assert 0.0 < matrix[1, 2] < matrix[0, 2]
     assert matrix[0, 1] == 0.0
+
+
+def test_causal_explanation_matrix_rejects_duplicate_candidates():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+
+    with pytest.raises(ValueError, match="Duplicate candidate"):
+        _causal_explanation_matrix(
+            ["svc-a", "svc-a"],
+            ["svc-a", "svc-b"],
+            svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8},
+            topology_edges=[],
+            config=cfg,
+        )
+
+
+def test_causal_explanation_matrix_rejects_duplicate_services():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+
+    with pytest.raises(ValueError, match="Duplicate service"):
+        _causal_explanation_matrix(
+            ["svc-a", "svc-b"],
+            ["svc-a", "svc-b", "svc-b"],
+            svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8},
+            topology_edges=[],
+            config=cfg,
+        )
 
 
 def test_banzhaf_power_default_is_deterministic_not_mc(monkeypatch):
