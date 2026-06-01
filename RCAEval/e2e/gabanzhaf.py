@@ -766,6 +766,22 @@ def _deterministic_banzhaf_coverage(fitness_signal, topo_matrix):
     return np.maximum(0.0, explains @ marginal_weight)
 
 
+def _noisy_or_coverage(prob_matrix, coalition):
+    prob = np.nan_to_num(
+        np.asarray(prob_matrix, dtype=float),
+        nan=0.0,
+        posinf=1.0,
+        neginf=0.0,
+    )
+    prob = np.clip(prob, 0.0, 1.0)
+    if prob.ndim != 2:
+        raise ValueError("prob_matrix must be a 2-D array")
+    if len(coalition) == 0:
+        return np.zeros(prob.shape[1], dtype=float)
+    rows = prob[np.asarray(list(coalition), dtype=int)]
+    return 1.0 - np.prod(1.0 - rows, axis=0)
+
+
 def _banzhaf_power(fitness_signal, topo_matrix, config):
     if config.banzhaf_mode == "mc":
         return _mc_banzhaf(
