@@ -485,6 +485,17 @@ def _metric_semantic_group(col):
     return "other"
 
 
+def _metric_semantic_match(col, phenotype):
+    group = _metric_semantic_group(col)
+    if group == "resource":
+        return phenotype.get("resource", 0.0)
+    if group == "latency":
+        return phenotype.get("latency", 0.0)
+    if group == "error":
+        return phenotype.get("error", 0.0)
+    return 0.0
+
+
 def _norm01_arr(a):
     a = np.asarray(a, dtype=float)
     lo = np.nanmin(a) if a.size else 0.
@@ -1057,11 +1068,20 @@ def _topology_matrix(cand_list, lag_corr_edges):
     return matrix
 
 
-def _rank_metrics(all_cols, svc_banzhaf, svc_residual, svc_anom_dict, metric_score, trace_scores):
+def _rank_metrics(
+    all_cols,
+    svc_banzhaf,
+    svc_residual,
+    svc_anom_dict,
+    metric_score,
+    trace_scores,
+    phenotype=None,
+    semantic_evidence=None,
+):
     nb = _norm_dict(svc_banzhaf)
     nr = _norm_dict(svc_residual)
     na = _norm_dict(svc_anom_dict)
-    nm = _norm_dict(metric_score)
+    nm = {k: min(_finite_nonnegative(v), 1.0) for k, v in metric_score.items()}
     trace_source = trace_scores or {}
     nt = _norm_dict({s: trace_source.get(s, 0.) for s in svc_anom_dict})
 
@@ -1074,7 +1094,13 @@ def _rank_metrics(all_cols, svc_banzhaf, svc_residual, svc_anom_dict, metric_sco
             nt.get(svc, 0.),
         )
         metric_local = nm.get(col, 0.)
-        return 0.70 * service_root + 0.30 * metric_local + 0.20 * service_root * metric_local
+        semantic = _metric_semantic_match(col, phenotype or {})
+        return (
+            0.66 * service_root
+            + 0.28 * metric_local
+            + 0.18 * service_root * metric_local
+            + 0.08 * semantic * metric_local
+        )
 
     return sorted(all_cols, key=_col_score, reverse=True)
 
@@ -1197,7 +1223,14 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     # ── 9. Final metric-level ranking ────────────────────────────────────────
     ranks = _rank_metrics(
-        cols, svc_banzhaf, svc_residual, svc_anom_dict, metric_score, trace_scores
+        cols,
+        svc_banzhaf,
+        svc_residual,
+        svc_anom_dict,
+        metric_score,
+        trace_scores,
+        phenotype,
+        semantic_evidence,
     )
     _mark_stage("ranking")
 
