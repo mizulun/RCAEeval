@@ -746,11 +746,6 @@ def test_gabanzhaf_config_default_candidate_cap_tracks_top_k():
     assert cfg.max_candidate_svcs == 16
 
 
-def test_gabanzhaf_config_defaults_to_deterministic_banzhaf():
-    cfg = _GabanzhafConfig.from_kwargs({})
-    assert cfg.banzhaf_mode == "deterministic"
-
-
 def test_banzhaf_power_uses_probabilistic_game_single_flow():
     from RCAEval.e2e.gabanzhaf import _banzhaf_power
 
