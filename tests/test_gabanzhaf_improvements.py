@@ -783,6 +783,49 @@ def test_deterministic_banzhaf_matches_two_node_analytic_case():
     assert np.allclose(bz, np.array([1.15, 0.25]))
 
 
+def test_noisy_or_coverage_is_monotone_and_bounded():
+    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
+
+    prob = np.array(
+        [
+            [1.0, 0.6, 0.0],
+            [0.0, 0.5, 0.8],
+        ],
+        dtype=float,
+    )
+
+    empty = _noisy_or_coverage(prob, [])
+    one = _noisy_or_coverage(prob, [0])
+    both = _noisy_or_coverage(prob, [0, 1])
+
+    assert np.all(empty == 0.0)
+    assert np.all(one >= empty)
+    assert np.all(both >= one)
+    assert np.all(both <= 1.0)
+
+
+def test_noisy_or_payoff_has_diminishing_marginal_returns():
+    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
+
+    prob = np.array(
+        [
+            [1.0, 0.8],
+            [0.0, 0.7],
+            [0.0, 0.6],
+        ],
+        dtype=float,
+    )
+    weights = np.array([1.0, 1.0], dtype=float)
+
+    def payoff(coalition):
+        return float(np.dot(weights, _noisy_or_coverage(prob, coalition)))
+
+    marginal_to_empty = payoff([0]) - payoff([])
+    marginal_after_overlap = payoff([0, 1, 2]) - payoff([1, 2])
+
+    assert marginal_to_empty > marginal_after_overlap
+
+
 def test_banzhaf_power_default_is_deterministic_not_mc(monkeypatch):
     def fail_mc(*args, **kwargs):
         raise AssertionError("MC backend should be explicit")
