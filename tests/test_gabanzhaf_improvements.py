@@ -981,3 +981,28 @@ def test_gabanzhaf_core_returns_game_candidates_when_requested():
     assert "stage_timing" in result
     assert "game_candidates" in result
     assert len(result["game_candidates"]) > 0
+
+
+def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
+    source_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "RCAEval",
+        "e2e",
+        "gabanzhaf.py",
+    )
+    with open(source_path, "r", encoding="utf-8") as f:
+        source = f.read()
+
+    forbidden = [
+        "ground_truth",
+        "root_cause",
+        "case_id",
+        "if dataset",
+        "re2-ob",
+        "re2-ss",
+        "re2-tt",
+        "DELAY",
+        "LOSS",
+    ]
+    for token in forbidden:
+        assert token not in source
