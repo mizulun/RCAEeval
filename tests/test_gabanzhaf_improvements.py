@@ -1100,3 +1100,71 @@ def test_rank_metrics_uses_bounded_semantic_match():
 
     assert wide_ranks.index("svc-a_latency") < wide_ranks.index("svc-b_latency")
     assert wide_ranks.index("svc-a_cpu") < wide_ranks.index("svc-a_latency")
+
+
+def test_metric_semantic_match_sanitizes_invalid_phenotype():
+    from RCAEval.e2e.gabanzhaf import _metric_semantic_match
+
+    assert _metric_semantic_match("svc_latency", 1.0) == 0.0
+    assert _metric_semantic_match("svc_latency", {"latency": np.nan}) == 0.0
+    assert _metric_semantic_match("svc_latency", {"latency": np.inf}) == 0.0
+    assert _metric_semantic_match("svc_latency", {"latency": 2.0}) == 1.0
+
+
+def test_rank_metrics_without_phenotype_uses_legacy_formula():
+    from RCAEval.e2e.gabanzhaf import _norm_dict, _rank_metrics, _service_root_score
+
+    cols = ["a_m1", "b_m2", "c_m3", "d_m4"]
+    svc_banzhaf = {
+        "a": 0.10532412090672771,
+        "b": 0.9616713204562753,
+        "c": 0.8807441898084656,
+        "d": 0.901199918051514,
+    }
+    svc_residual = {
+        "a": 0.14079873494655515,
+        "b": 0.15395359343411863,
+        "c": 0.4332949011819809,
+        "d": 0.04063634381353931,
+    }
+    svc_anom = {
+        "a": 0.7236050075764766,
+        "b": 0.14502212885327126,
+        "c": 0.6676196731659766,
+        "d": 0.5057472777201908,
+    }
+    metric_score = {
+        "a_m1": 0.7384574708582091,
+        "b_m2": 0.5783387882382596,
+        "c_m3": 0.9252111774939774,
+        "d_m4": 0.6579524703762987,
+    }
+    trace_scores = {
+        "a": 0.4458525262618027,
+        "b": 0.7381993093673848,
+        "c": 0.2710090614947943,
+        "d": 0.2792327570298251,
+    }
+
+    nb = _norm_dict(svc_banzhaf)
+    nr = _norm_dict(svc_residual)
+    na = _norm_dict(svc_anom)
+    nm = _norm_dict(metric_score)
+    nt = _norm_dict({s: trace_scores.get(s, 0.0) for s in svc_anom})
+
+    def legacy_score(col):
+        svc = col.rsplit("_", 1)[0]
+        service_root = _service_root_score(
+            nb.get(svc, 0.0),
+            nr.get(svc, 0.0),
+            na.get(svc, 0.0),
+            nt.get(svc, 0.0),
+        )
+        metric_local = nm.get(col, 0.0)
+        return 0.70 * service_root + 0.30 * metric_local + 0.20 * service_root * metric_local
+
+    expected = sorted(cols, key=legacy_score, reverse=True)
+
+    assert _rank_metrics(
+        cols, svc_banzhaf, svc_residual, svc_anom, metric_score, trace_scores, phenotype=None
+    ) == expected
