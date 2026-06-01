@@ -58,7 +58,10 @@ class _GabanzhafConfig:
             return int(default)
         if not np.isfinite(parsed) or parsed <= 0.0:
             return int(default)
-        return int(parsed)
+        parsed_int = int(parsed)
+        if parsed_int <= 0:
+            return int(default)
+        return parsed_int
 
     @classmethod
     def from_kwargs(cls, kwargs):
