@@ -904,6 +904,47 @@ def test_probabilistic_banzhaf_matches_bruteforce_noisy_or_game():
     assert np.all(closed >= 0.0)
 
 
+def test_select_exact_candidates_uses_fixed_unsupervised_score():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _select_exact_candidates
+
+    cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": 3})
+    candidates = ["svc-a", "svc-b", "svc-c", "svc-d"]
+    selected = _select_exact_candidates(
+        candidates,
+        svc_anom_dict={"svc-a": 0.9, "svc-b": 0.1, "svc-c": 0.5, "svc-d": 0.4},
+        svc_residual={"svc-a": 0.1, "svc-b": 0.9, "svc-c": 0.4, "svc-d": 0.2},
+        trace_scores={"svc-d": 1.0},
+        topology_edges=[("svc-c", "svc-a", 0.8), ("svc-c", "svc-d", 0.7)],
+        config=cfg,
+    )
+
+    assert len(selected) == 3
+    assert selected[0] in {"svc-a", "svc-c"}
+    assert "svc-b" in selected
+
+
+def test_causal_explanation_matrix_builds_self_and_topology_probabilities():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
+
+    cfg = _GabanzhafConfig.from_kwargs({"causal_probability_lambda": 1.5})
+    cand = ["svc-a", "svc-b"]
+    services = ["svc-a", "svc-b", "svc-c"]
+    matrix = _causal_explanation_matrix(
+        cand,
+        services,
+        svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8, "svc-c": 0.5},
+        topology_edges=[("svc-a", "svc-c", 0.6), ("svc-b", "svc-c", 0.2)],
+        config=cfg,
+    )
+
+    assert matrix.shape == (2, 3)
+    assert matrix[0, 0] == 1.0
+    assert matrix[1, 1] == 1.0
+    assert 0.0 < matrix[0, 2] <= 1.0
+    assert 0.0 < matrix[1, 2] < matrix[0, 2]
+    assert matrix[0, 1] == 0.0
+
+
 def test_banzhaf_power_default_is_deterministic_not_mc(monkeypatch):
     def fail_mc(*args, **kwargs):
         raise AssertionError("MC backend should be explicit")
