@@ -1239,6 +1239,8 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     _mark_stage("ranking")
 
     result = {"ranks": ranks, "node_names": cols}
+    if bool(kwargs.get("return_diagnostics", False)):
+        result["phenotype"] = phenotype
     if return_stage_timing:
         result["stage_timing"] = stage_timing
     return result

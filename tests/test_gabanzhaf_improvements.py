@@ -1168,3 +1168,26 @@ def test_rank_metrics_without_phenotype_uses_legacy_formula():
     assert _rank_metrics(
         cols, svc_banzhaf, svc_residual, svc_anom, metric_score, trace_scores, phenotype=None
     ) == expected
+
+
+def test_gabanzhaf_core_returns_phenotype_when_requested():
+    data = pd.DataFrame({
+        "time": np.arange(12),
+        "svc-a_cpu": [1, 1, 1, 1, 1, 1, 8, 8, 8, 8, 8, 8],
+        "svc-a_latency": [1] * 12,
+        "svc-b_cpu": [1] * 12,
+        "svc-b_latency": [1, 1, 1, 1, 1, 1, 5, 5, 5, 5, 5, 5],
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={"return_stage_timing": True, "return_diagnostics": True},
+    )
+
+    assert "ranks" in result
+    assert "stage_timing" in result
+    assert "phenotype" in result
+    assert abs(sum(result["phenotype"].values()) - 1.0) < 1e-6
