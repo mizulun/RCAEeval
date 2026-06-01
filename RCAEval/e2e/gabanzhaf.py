@@ -375,6 +375,49 @@ def _extract_call_graph(traces_path):
 # ==========================================
 
 
+def _cheap_service_filter(cols, normal_mat, anomal_mat, top_k):
+    """Fast service-level pre-filter resistant to constant-baseline inflation.
+
+    Uses mean-shift normalized by max(col_IQR, col_median * 0.1), so a
+    perfectly-flat high-value metric (e.g. redis_diskio always at 5000)
+    needs a proportionally large shift to score high, instead of being
+    inflated by the IQR=0 → denominator=1 fallback in _metric_evidence.
+
+    Returns list of up to top_k service names, sorted by pre-filter score.
+    """
+    normal_mat = np.asarray(normal_mat, dtype=float)
+    anomal_mat = np.asarray(anomal_mat, dtype=float)
+
+    q75 = np.nanpercentile(normal_mat, 75, axis=0)
+    q25 = np.nanpercentile(normal_mat, 25, axis=0)
+    col_iqr = q75 - q25                                    # (M,)
+
+    normal_mean = np.nanmean(normal_mat, axis=0)           # (M,)
+    anomal_mean = np.nanmean(anomal_mat, axis=0)           # (M,)
+
+    # Two-level denominator prevents constant-baseline inflation:
+    #   1. baseline_floor: 10% of the metric's own level — stops high-value
+    #      flat metrics (e.g. diskio always at 5000) from inflating on tiny bumps.
+    #   2. global_iqr_floor: 25th-percentile of positive IQRs across all
+    #      metrics — stops near-zero flat metrics (e.g. idle bytes at ~0)
+    #      from inflating via the 1e-6 absolute minimum.
+    baseline_floor = np.abs(normal_mean) * 0.10
+    positive_iqrs = col_iqr[col_iqr > 0]
+    global_iqr_floor = float(np.percentile(positive_iqrs, 25)) if positive_iqrs.size > 0 else 1.0
+    denom = np.maximum(col_iqr, baseline_floor)
+    denom = np.maximum(denom, global_iqr_floor)
+
+    col_score = np.abs(anomal_mean - normal_mean) / denom  # (M,)
+
+    svc_scores: dict = {}
+    for i, col in enumerate(cols):
+        svc = _parse_svc(col)
+        svc_scores[svc] = max(svc_scores.get(svc, 0.0), float(col_score[i]))
+
+    ranked = sorted(svc_scores, key=lambda s: svc_scores[s], reverse=True)
+    return ranked[:top_k]
+
+
 def _parse_svc(col):
     """Parse service name from a metric column (last underscore separator)."""
     parts = col.rsplit("_", 1)
@@ -886,9 +929,22 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     _mark_stage("preprocess")
 
     # ── 3. Metric and service evidence ───────────────────────────────────────
-    metric_ev = _metric_evidence(normal_mat, anomal_mat, cols)
-    metric_score = {c: metric_ev[c]["score"] for c in cols}
-    svc_anom_dict = _service_evidence(cols, metric_ev)
+    # Optional pre-filter: run cheap_service_filter first to restrict
+    # metric_evidence to candidate services only, preventing constant-baseline
+    # metrics (e.g. always-flat diskio) from inflating IQR-based anomaly scores.
+    use_prefilter = bool(kwargs.get("use_prefilter", False))
+    if use_prefilter:
+        pre_svcs = set(_cheap_service_filter(cols, normal_mat, anomal_mat, top_k=config.top_k_svcs))
+        active_cols = [c for c in cols if _parse_svc(c) in pre_svcs]
+        active_idxs = [i for i, c in enumerate(cols) if c in set(active_cols)]
+        active_normal = normal_mat[:, active_idxs]
+        active_anomal = anomal_mat[:, active_idxs]
+    else:
+        active_cols, active_normal, active_anomal = cols, normal_mat, anomal_mat
+
+    metric_ev = _metric_evidence(active_normal, active_anomal, active_cols)
+    metric_score = {c: metric_ev[c]["score"] for c in active_cols}
+    svc_anom_dict = _service_evidence(active_cols, metric_ev)
     svc_names = sorted(svc_anom_dict.keys())
     _mark_stage("metric_evidence")
 
@@ -996,6 +1052,9 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
     trace_features = _extract_trace_features(case_dir, _t_inject)
 
     runtime_kwargs = dict(kwargs)
+    # Experiment flag: GABANZHAF_PREFILTER=1 enables early candidate selection.
+    if os.environ.get("GABANZHAF_PREFILTER") == "1":
+        runtime_kwargs.setdefault("use_prefilter", True)
     runtime_kwargs["trace_scores"] = trace_features.trace_scores
     runtime_kwargs["trace_error_scores"] = trace_features.trace_error_scores
     runtime_kwargs["trace_latency_scores"] = trace_features.trace_latency_scores
