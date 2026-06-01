@@ -1063,11 +1063,16 @@ def test_phenotype_conditioned_fitness_sanitizes_nonfinite_gain_knobs():
 def test_rank_metrics_uses_bounded_semantic_match():
     from RCAEval.e2e.gabanzhaf import _rank_metrics
 
-    cols = ["svc-a_cpu", "svc-a_latency", "svc-b_latency"]
+    cols = ["svc-a_mem", "svc-a_cpu", "svc-a_latency", "svc-b_latency"]
     svc_banzhaf = {"svc-a": 1.0, "svc-b": 0.2}
     svc_residual = {"svc-a": 1.0, "svc-b": 0.2}
     svc_anom = {"svc-a": 1.0, "svc-b": 0.2}
-    metric_score = {"svc-a_cpu": 0.9, "svc-a_latency": 0.8, "svc-b_latency": 1.0}
+    metric_score = {
+        "svc-a_mem": 0.0,
+        "svc-a_cpu": 1.0,
+        "svc-a_latency": 0.9,
+        "svc-b_latency": 1.0,
+    }
     trace_scores = {}
     phenotype = {"resource": 0.05, "latency": 0.85, "error": 0.05, "propagation": 0.05}
     semantic = {
@@ -1080,4 +1085,18 @@ def test_rank_metrics_uses_bounded_semantic_match():
     )
 
     assert ranks[0] == "svc-a_latency"
+    assert ranks.index("svc-a_latency") < ranks.index("svc-a_cpu")
     assert ranks.index("svc-a_latency") < ranks.index("svc-b_latency")
+
+    wide_metric_gap = {
+        "svc-a_mem": 0.0,
+        "svc-a_cpu": 10.0,
+        "svc-a_latency": 1.0,
+        "svc-b_latency": 10.0,
+    }
+    wide_ranks = _rank_metrics(
+        cols, svc_banzhaf, svc_residual, svc_anom, wide_metric_gap, trace_scores, phenotype, semantic
+    )
+
+    assert wide_ranks.index("svc-a_latency") < wide_ranks.index("svc-b_latency")
+    assert wide_ranks.index("svc-a_cpu") < wide_ranks.index("svc-a_latency")
