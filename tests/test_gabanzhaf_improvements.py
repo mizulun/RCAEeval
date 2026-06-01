@@ -869,6 +869,41 @@ def test_noisy_or_payoff_has_diminishing_marginal_returns():
     assert marginal_to_empty > marginal_after_overlap
 
 
+def test_probabilistic_banzhaf_matches_bruteforce_noisy_or_game():
+    from itertools import combinations
+    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage, _probabilistic_banzhaf
+
+    prob = np.array(
+        [
+            [1.0, 0.4, 0.2],
+            [0.0, 0.7, 0.5],
+            [0.1, 0.2, 0.9],
+        ],
+        dtype=float,
+    )
+    weights = np.array([0.9, 0.6, 0.4], dtype=float)
+
+    def payoff(coalition):
+        return float(np.dot(weights, _noisy_or_coverage(prob, coalition)))
+
+    brute = np.zeros(prob.shape[0], dtype=float)
+    players = list(range(prob.shape[0]))
+    for i in players:
+        others = [p for p in players if p != i]
+        total = 0.0
+        count = 0
+        for size in range(len(others) + 1):
+            for subset in combinations(others, size):
+                total += payoff(list(subset) + [i]) - payoff(list(subset))
+                count += 1
+        brute[i] = total / count
+
+    closed = _probabilistic_banzhaf(prob, weights)
+
+    assert np.allclose(closed, brute, atol=1e-10)
+    assert np.all(closed >= 0.0)
+
+
 def test_banzhaf_power_default_is_deterministic_not_mc(monkeypatch):
     def fail_mc(*args, **kwargs):
         raise AssertionError("MC backend should be explicit")

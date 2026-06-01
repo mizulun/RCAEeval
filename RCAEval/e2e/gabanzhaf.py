@@ -797,6 +797,37 @@ def _noisy_or_coverage(prob_matrix, coalition):
     return 1.0 - np.prod(1.0 - rows, axis=0)
 
 
+def _probabilistic_banzhaf(prob_matrix, anomaly_weights):
+    prob = np.nan_to_num(
+        np.asarray(prob_matrix, dtype=float),
+        nan=0.0,
+        posinf=1.0,
+        neginf=0.0,
+    )
+    prob = np.clip(prob, 0.0, 1.0)
+    weights = np.nan_to_num(
+        np.asarray(anomaly_weights, dtype=float).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    weights = np.maximum(weights, 0.0)
+    if prob.ndim != 2:
+        raise ValueError("prob_matrix must be a 2-D array")
+    if prob.shape[1] != weights.shape[0]:
+        raise ValueError("anomaly_weights length must match prob_matrix columns")
+    if prob.shape[0] == 0:
+        return np.zeros(0, dtype=float)
+
+    half_complements = 1.0 - 0.5 * prob
+    product_all = np.prod(half_complements, axis=0)
+    scores = np.zeros(prob.shape[0], dtype=float)
+    for i in range(prob.shape[0]):
+        product_without_i = product_all / np.maximum(half_complements[i], 1e-12)
+        scores[i] = float(np.sum(weights * prob[i] * product_without_i))
+    return np.maximum(scores, 0.0)
+
+
 def _banzhaf_power(fitness_signal, topo_matrix, config):
     if config.banzhaf_mode == "mc":
         return _mc_banzhaf(
