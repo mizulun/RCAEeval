@@ -776,9 +776,24 @@ def _noisy_or_coverage(prob_matrix, coalition):
     prob = np.clip(prob, 0.0, 1.0)
     if prob.ndim != 2:
         raise ValueError("prob_matrix must be a 2-D array")
-    if len(coalition) == 0:
+
+    try:
+        coalition_arr = np.asarray(list(coalition))
+    except TypeError as exc:
+        raise ValueError("coalition must be a 1-D integer index array") from exc
+    if coalition_arr.ndim != 1:
+        raise ValueError("coalition must be a 1-D integer index array")
+    if coalition_arr.size == 0:
         return np.zeros(prob.shape[1], dtype=float)
-    rows = prob[np.asarray(list(coalition), dtype=int)]
+
+    if not np.issubdtype(coalition_arr.dtype, np.integer):
+        raise ValueError("coalition must contain integer indices")
+
+    coalition_idx = coalition_arr.astype(int)
+    if np.any((coalition_idx < 0) | (coalition_idx >= prob.shape[0])):
+        raise ValueError("coalition indices must be in [0, n_rows)")
+
+    rows = prob[np.unique(coalition_idx)]
     return 1.0 - np.prod(1.0 - rows, axis=0)
 
 
