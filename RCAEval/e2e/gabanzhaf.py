@@ -989,6 +989,16 @@ def _fitness_signal(cand_list, svc_anom_dict, svc_residual, topology_edges, conf
     return res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
 
 
+def _finite_nonnegative(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(value) or value < 0.0:
+        return 0.0
+    return value
+
+
 def _phenotype_conditioned_fitness(
     cand_list,
     svc_anom_dict,
@@ -999,22 +1009,36 @@ def _phenotype_conditioned_fitness(
     config,
 ):
     values = []
+    svc_anom_dict = svc_anom_dict or {}
+    svc_residual = svc_residual or {}
     trace_source = trace_scores or {}
+    semantic_evidence = semantic_evidence or {}
+    phenotype = phenotype or {}
     for svc in cand_list:
         sem = semantic_evidence.get(
             svc,
             {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
         )
-        anomaly = svc_anom_dict.get(svc, 0.0)
-        residual = svc_residual.get(svc, 0.0)
-        trace = trace_source.get(svc, sem.get("trace", 0.0))
+        if not isinstance(sem, dict):
+            sem = {}
+        anomaly = _finite_nonnegative(svc_anom_dict.get(svc, 0.0))
+        residual = _finite_nonnegative(svc_residual.get(svc, 0.0))
+        trace = _finite_nonnegative(trace_source.get(svc, sem.get("trace", 0.0)))
+        resource = _finite_nonnegative(sem.get("resource", 0.0))
+        latency = _finite_nonnegative(sem.get("latency", 0.0))
+        error = _finite_nonnegative(sem.get("error", 0.0))
+        propagation = _finite_nonnegative(sem.get("propagation", 0.0))
+        phenotype_resource = _finite_nonnegative(phenotype.get("resource", 0.0))
+        phenotype_latency = _finite_nonnegative(phenotype.get("latency", 0.0))
+        phenotype_error = _finite_nonnegative(phenotype.get("error", 0.0))
+        phenotype_propagation = _finite_nonnegative(phenotype.get("propagation", 0.0))
         base = 0.50 * anomaly + 0.35 * residual + 0.15 * trace
         multiplier = (
             1.0
-            + config.phenotype_gain_resource * phenotype.get("resource", 0.0) * sem.get("resource", 0.0)
-            + config.phenotype_gain_latency * phenotype.get("latency", 0.0) * sem.get("latency", 0.0)
-            + config.phenotype_gain_error * phenotype.get("error", 0.0) * max(sem.get("error", 0.0), sem.get("trace", 0.0))
-            + config.phenotype_gain_propagation * phenotype.get("propagation", 0.0) * sem.get("propagation", 0.0)
+            + config.phenotype_gain_resource * phenotype_resource * resource
+            + config.phenotype_gain_latency * phenotype_latency * latency
+            + config.phenotype_gain_error * phenotype_error * max(error, trace)
+            + config.phenotype_gain_propagation * phenotype_propagation * propagation
         )
         values.append(max(0.0, base * multiplier))
     return np.asarray(values, dtype=float)
