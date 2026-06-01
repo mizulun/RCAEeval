@@ -270,6 +270,37 @@ def test_extract_call_graph_row_limit():
         os.unlink(path)
 
 
+def test_extract_call_graph_uses_trace_id_when_span_ids_repeat():
+    rows = [
+        ("trace-1", "svc-a", "root", "none", 1000, 0, 10),
+        ("trace-1", "svc-b", "child", "root", 1001, 0, 5),
+        ("trace-2", "svc-x", "root", "none", 1002, 0, 10),
+        ("trace-2", "svc-y", "child", "root", 1003, 0, 5),
+    ]
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+        path = f.name
+    try:
+        pd.DataFrame(
+            rows,
+            columns=[
+                "traceID",
+                "serviceName",
+                "spanID",
+                "parentSpanID",
+                "startTimeMillis",
+                "statusCode",
+                "duration",
+            ],
+        ).to_csv(path, index=False)
+
+        cg = _extract_call_graph(path)
+
+    finally:
+        os.unlink(path)
+
+    assert cg == {"svc-a": {"svc-b"}, "svc-x": {"svc-y"}}
+
+
 from RCAEval.e2e.gabanzhaf import _extract_trace_features, _TraceFeatures
 
 
@@ -290,6 +321,33 @@ def test_extract_trace_features_returns_scores_and_call_graph():
     assert "svc-b" in features.trace_scores
     assert features.trace_scores["svc-b"] > 0.0
     assert features.call_graph == {"svc-a": {"svc-b"}, "svc-b": {"svc-c"}}
+
+
+def test_extract_trace_features_call_graph_uses_trace_id_when_span_ids_repeat():
+    rows = [
+        ("trace-1", "svc-a", "root", "none", 1000, 0, 10),
+        ("trace-1", "svc-b", "child", "root", 60000, 0, 20),
+        ("trace-2", "svc-x", "root", "none", 1002, 0, 10),
+        ("trace-2", "svc-y", "child", "root", 60001, 0, 20),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "traces.csv")
+        pd.DataFrame(
+            rows,
+            columns=[
+                "traceID",
+                "serviceName",
+                "spanID",
+                "parentSpanID",
+                "startTimeMillis",
+                "statusCode",
+                "duration",
+            ],
+        ).to_csv(path, index=False)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.call_graph == {"svc-a": {"svc-b"}, "svc-x": {"svc-y"}}
 
 
 def test_extract_trace_features_exposes_error_and_latency_components():
@@ -420,6 +478,22 @@ def test_extract_trace_features_preserves_preaggregated_singleton_component_evid
     assert features.trace_latency_scores is not None
     assert features.trace_error_scores["svc-a"] > 0.0
     assert features.trace_latency_scores["svc-a"] > 0.0
+
+
+def test_preaggregated_trace_scores_parse_service_names_from_right_suffix():
+    with tempfile.TemporaryDirectory() as d:
+        pd.DataFrame(
+            {
+                "time": [10, 20, 60, 70],
+                "order_service_GET": [0, 0, 3, 5],
+            }
+        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
+
+        features = _extract_trace_features(d, inject_time=50)
+
+    assert features.trace_error_scores is not None
+    assert "order_service" in features.trace_error_scores
+    assert "order" not in features.trace_error_scores
 
 
 def test_extract_trace_features_prefers_preaggregated_scores_over_raw_trace_scan(monkeypatch):
@@ -901,6 +975,26 @@ def test_incident_phenotype_detects_latency_error_and_propagation_dominance():
         cfg,
     )
     assert pi_error["error"] > pi_error["latency"]
+
+
+def test_incident_phenotype_uses_metric_error_without_trace_errors():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _incident_phenotype
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    pi = _incident_phenotype(
+        {"svc-a": 1.0, "svc-b": 0.8},
+        None,
+        None,
+        {
+            "svc-a": {"resource": 0.0, "latency": 0.0, "error": 1.0, "trace": 0.0, "propagation": 0.0},
+            "svc-b": {"resource": 0.0, "latency": 0.0, "error": 0.8, "trace": 0.0, "propagation": 0.0},
+        },
+        [],
+        cfg,
+    )
+
+    assert pi["error"] > pi["resource"]
+    assert pi["error"] > pi["latency"]
 
 
 def test_incident_phenotype_missing_semantic_evidence_is_neutral():
