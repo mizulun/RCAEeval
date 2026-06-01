@@ -651,15 +651,11 @@ def test_gabanzhaf_config_centralizes_runtime_parameters():
     cfg = _GabanzhafConfig.from_kwargs({
         "top_k_svcs": "9",
         "max_candidate_svcs": "14",
-        "banzhaf_samples": "321",
-        "seed": "99",
         "dk_select_useful": True,
     })
 
     assert cfg.top_k_svcs == 9
     assert cfg.max_candidate_svcs == 14
-    assert cfg.banzhaf_samples == 321
-    assert cfg.seed == 99
     assert cfg.dk_select_useful is True
 
 
@@ -686,15 +682,6 @@ def test_banzhaf_power_uses_probabilistic_game_single_flow():
     assert values[0] > values[1]
     assert np.all(values >= 0.0)
 
-
-def test_deterministic_banzhaf_matches_two_node_analytic_case():
-    fs = np.array([0.9, 0.5], dtype=float)
-    topo = np.zeros((2, 2), dtype=np.float32)
-    topo[0, 1] = 0.5
-
-    bz = gabanzhaf_mod._deterministic_banzhaf_coverage(fs, topo)
-
-    assert np.allclose(bz, np.array([1.15, 0.25]))
 
 
 def test_noisy_or_coverage_is_monotone_and_bounded():

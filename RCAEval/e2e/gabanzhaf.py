@@ -24,9 +24,6 @@ class _GabanzhafConfig:
 
     top_k_svcs: int = 15
     max_candidate_svcs: int = 20
-    banzhaf_samples: int = 1000
-    banzhaf_mode: str = "deterministic"
-    seed: int = 42
     dk_select_useful: bool = False
     topology_pool_multiplier: int = 2
     topology_pool_extra: int = 5
@@ -36,10 +33,6 @@ class _GabanzhafConfig:
     residual_call_graph_ratio: float = 0.8
     residual_confidence_scale: float = 2.0
     residual_confidence_cap: float = 0.95
-    topology_reliability_scale: float = 2.0
-    topology_reliability_cap: float = 0.65
-    residual_weight_base: float = 0.30
-    residual_weight_topology_gain: float = 0.50
     exact_candidate_k: int = 12
     causal_probability_lambda: float = 1.5
     metric_rank_epsilon: float = 0.15
@@ -65,9 +58,6 @@ class _GabanzhafConfig:
             max_candidate_svcs=int(
                 kwargs.get("max_candidate_svcs", top_k_svcs + cls.topology_pool_extra)
             ),
-            banzhaf_samples=int(kwargs.get("banzhaf_samples", cls.banzhaf_samples)),
-            banzhaf_mode=str(kwargs.get("banzhaf_mode", cls.banzhaf_mode)),
-            seed=int(kwargs.get("seed", cls.seed)),
             dk_select_useful=bool(kwargs.get("dk_select_useful", cls.dk_select_useful)),
             exact_candidate_k=cls._positive_int_or_default(
                 kwargs.get("exact_candidate_k", cls.exact_candidate_k),
@@ -349,102 +339,6 @@ def _extract_trace_features(case_dir, inject_time):
         )
 
 
-def _trace_onset_scores(case_dir, inject_time):
-    """Lightweight trace-based per-service anomaly signal.
-
-    Reads only 4 columns (serviceName, startTimeMillis, statusCode, duration)
-    in chunks with an early-stop cap so total I/O stays < 0.5 s.
-
-    Returns {svc_name: score ∈ [0, 1]} or None if traces unavailable.
-
-    Signals:
-      - Error rate: fraction of spans with statusCode ≠ 0
-      - Duration ratio: anomaly-period avg-duration /
-                        normal-period avg-duration − 1,
-                        capped at 10× and normalised to [0,1]
-    Per-service score = max(error_rate, duration_signal).
-    """
-    if not case_dir:
-        return None
-    tp = os.path.join(case_dir, "traces.csv")
-    if not os.path.exists(tp):
-        return None
-
-    try:
-        inject_ms   = inject_time * 1000
-        needed      = ["serviceName", "startTimeMillis", "statusCode", "duration"]
-        MAX_ANOMAL  = 30_000        # row cap to bound runtime
-
-        chunks_normal: list = []
-        chunks_anomal: list = []
-        anomal_rows = 0
-
-        for chunk in pd.read_csv(tp, usecols=needed, chunksize=10_000,
-                                  on_bad_lines="skip"):
-            ts       = pd.to_numeric(chunk["startTimeMillis"], errors="coerce")
-            is_norm  = ts < inject_ms
-            is_anom  = ts >= inject_ms
-
-            if is_norm.any():
-                chunks_normal.append(chunk[is_norm])
-            if is_anom.any():
-                ac = chunk[is_anom]
-                chunks_anomal.append(ac)
-                anomal_rows += len(ac)
-
-            if anomal_rows >= MAX_ANOMAL:
-                break
-
-        if not chunks_anomal:
-            return None
-
-        anomal_df = pd.concat(chunks_anomal, ignore_index=True)
-        anomal_df["is_err"] = (
-            pd.to_numeric(anomal_df["statusCode"], errors="coerce").fillna(0.) != 0.
-        )
-        anomal_df["dur"] = pd.to_numeric(anomal_df["duration"], errors="coerce").fillna(0.)
-
-        a_stats = anomal_df.groupby("serviceName", sort=False).agg(
-            cnt    =("serviceName", "size"),
-            err_cnt=("is_err",      "sum"),
-            dur_sum=("dur",         "sum"),
-        )
-
-        # Normal-period duration baseline
-        n_dur_avg: dict = {}
-        if chunks_normal:
-            normal_df = pd.concat(chunks_normal, ignore_index=True)
-            normal_df["dur"] = pd.to_numeric(normal_df["duration"], errors="coerce").fillna(0.)
-            n_stats = normal_df.groupby("serviceName", sort=False).agg(
-                cnt    =("serviceName", "size"),
-                dur_sum=("dur",         "sum"),
-            )
-            for svc, row in n_stats.iterrows():
-                n_dur_avg[str(svc)] = float(row["dur_sum"]) / max(int(row["cnt"]), 1)
-
-        scores: dict = {}
-        for svc, row in a_stats.iterrows():
-            svc      = str(svc)
-            a_cnt    = max(int(row["cnt"]), 1)
-            err_rate = float(row["err_cnt"]) / a_cnt
-
-            a_avg_dur = float(row["dur_sum"]) / a_cnt
-            n_avg_dur = n_dur_avg.get(svc, 1.)
-            dur_ratio = (a_avg_dur / max(n_avg_dur, 1.)) - 1.
-            dur_signal = max(0., min(dur_ratio, 10.)) / 10.
-
-            scores[svc] = max(err_rate, dur_signal)
-
-        if not scores:
-            return None
-
-        lo, hi = min(scores.values()), max(scores.values())
-        span = hi - lo if hi > lo else 1.
-        return {svc: (v - lo) / span for svc, v in scores.items()}
-
-    except Exception:
-        return None
-
 
 def _extract_call_graph(traces_path):
     """Extract service call graph from the first 50 K trace spans.
@@ -618,26 +512,6 @@ def _service_evidence(cols, metric_ev):
     return _norm_dict(svc_scores)
 
 
-def _deterministic_banzhaf_coverage(fitness_signal, topo_matrix):
-    """Deterministic Banzhaf values for causal coverage games."""
-    fitness = np.asarray(fitness_signal, dtype=float).reshape(-1)
-    n = len(fitness)
-    if n == 0:
-        return np.zeros(0, dtype=float)
-
-    topo = np.nan_to_num(
-        np.asarray(topo_matrix, dtype=float),
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    )
-    explains = topo > 0
-    np.fill_diagonal(explains, True)
-
-    num_explainers = explains.sum(axis=0)
-    marginal_weight = fitness * np.power(0.5, num_explainers - 1)
-    return np.maximum(0.0, explains @ marginal_weight)
-
 
 def _noisy_or_coverage(prob_matrix, coalition):
     prob = np.nan_to_num(
@@ -692,61 +566,16 @@ def _probabilistic_banzhaf(prob_matrix, anomaly_weights):
     if prob.shape[0] == 0:
         return np.zeros(0, dtype=float)
 
-    half_complements = 1.0 - 0.5 * prob
-    product_all = np.prod(half_complements, axis=0)
-    scores = np.zeros(prob.shape[0], dtype=float)
-    for i in range(prob.shape[0]):
-        product_without_i = product_all / np.maximum(half_complements[i], 1e-12)
-        scores[i] = float(np.sum(weights * prob[i] * product_without_i))
+    half_complements = 1.0 - 0.5 * prob                          # (K, N)
+    product_all = np.prod(half_complements, axis=0)               # (N,)
+    product_without = product_all / np.maximum(half_complements, 1e-12)  # (K, N)
+    scores = np.sum(weights * prob * product_without, axis=1)     # (K,)
     return np.maximum(scores, 0.0)
 
 
 def _banzhaf_power(prob_matrix, anomaly_weights, config):
     return _probabilistic_banzhaf(prob_matrix, anomaly_weights)
 
-
-def _mc_banzhaf(fitness_signal, topo_matrix, n_samples, seed=42):
-    """Monte Carlo Banzhaf estimation with causal-coverage v(S)."""
-    n = len(fitness_signal)
-    rng = np.random.default_rng(seed)
-    banzhaf = np.zeros(n, dtype=float)
-    counts = np.zeros(n, dtype=float)
-
-    downstream_masks = [0] * n
-    for i in range(n):
-        for j in range(n):
-            if topo_matrix[i, j] > 0:
-                downstream_masks[i] |= (1 << j)
-
-    def _v(m):
-        explained = m
-        for i in range(n):
-            if (m >> i) & 1:
-                explained |= downstream_masks[i]
-        total = 0.
-        for j in range(n):
-            if (explained >> j) & 1:
-                total += fitness_signal[j]
-        return total
-
-    for _ in range(n_samples):
-        k = int(rng.integers(0, n + 1))
-        bits = rng.choice(n, size=k, replace=False) if k > 0 else []
-        m = sum(1 << int(b) for b in bits)
-
-        v_m = _v(m)
-        for i in range(n):
-            mask_i = 1 << i
-            if m & mask_i:
-                v_without = _v(m ^ mask_i)
-                banzhaf[i] += v_m - v_without
-            else:
-                v_with = _v(m | mask_i)
-                banzhaf[i] += v_with - v_m
-            counts[i] += 1
-
-    safe_counts = np.where(counts > 0, counts, 1.)
-    return np.maximum(0., banzhaf / safe_counts)
 
 
 def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
@@ -932,14 +761,6 @@ def _select_exact_candidates(
     return sorted(candidates, key=lambda svc: (score(svc), svc), reverse=True)[:k]
 
 
-def _raise_if_duplicate_names(names, label):
-    seen = set()
-    for name in names:
-        if name in seen:
-            raise ValueError(f"Duplicate {label} name: {name}")
-        seen.add(name)
-
-
 def _causal_explanation_matrix(
     cand_list,
     service_list,
@@ -947,8 +768,10 @@ def _causal_explanation_matrix(
     topology_edges,
     config,
 ):
-    _raise_if_duplicate_names(cand_list, "candidate")
-    _raise_if_duplicate_names(service_list, "service")
+    if len(cand_list) != len(set(cand_list)):
+        raise ValueError("Duplicate candidate name")
+    if len(service_list) != len(set(service_list)):
+        raise ValueError("Duplicate service name")
     cand_idx = {svc: i for i, svc in enumerate(cand_list)}
     svc_idx = {svc: j for j, svc in enumerate(service_list)}
     matrix = np.zeros((len(cand_list), len(service_list)), dtype=float)
@@ -994,24 +817,6 @@ def _residual_scores(svc_anom_dict, upstream_map_residual, edge_conf, config):
     return residual
 
 
-def _fitness_signal(cand_list, svc_anom_dict, svc_residual, topology_edges, config):
-    svc_anom_arr = np.array([svc_anom_dict.get(s, 0.) for s in cand_list])
-    svc_residual_arr = np.array([svc_residual.get(s, 0.) for s in cand_list])
-    conf_vals = np.array([w for _, _, w in topology_edges], dtype=float)
-    topo_rel = (
-        float(
-            np.clip(
-                np.mean(conf_vals) * config.topology_reliability_scale,
-                0.0,
-                config.topology_reliability_cap,
-            )
-        )
-        if conf_vals.size
-        else 0.0
-    )
-    res_w = config.residual_weight_base + config.residual_weight_topology_gain * topo_rel
-    return res_w * svc_residual_arr + (1.0 - res_w) * svc_anom_arr
-
 
 def _finite_nonnegative(value):
     try:
@@ -1022,14 +827,6 @@ def _finite_nonnegative(value):
         return 0.0
     return value
 
-
-def _topology_matrix(cand_list, lag_corr_edges):
-    svc_idx = {s: i for i, s in enumerate(cand_list)}
-    matrix = np.zeros((len(cand_list), len(cand_list)), dtype=np.float32)
-    for u, v, w in lag_corr_edges:
-        if u in svc_idx and v in svc_idx:
-            matrix[svc_idx[u], svc_idx[v]] = w
-    return matrix
 
 
 def _rank_metrics(all_cols, svc_banzhaf, metric_score, config):
