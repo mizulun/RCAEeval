@@ -980,3 +980,54 @@ def test_phenotype_conditioned_fitness_boosts_matching_evidence():
     assert fitness[1] > fitness[0]
     assert np.all(np.isfinite(fitness))
     assert np.all(fitness >= 0.0)
+
+
+def test_phenotype_conditioned_fitness_handles_missing_optional_evidence():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _phenotype_conditioned_fitness
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    fitness = _phenotype_conditioned_fitness(
+        ["svc-a", "svc-b"],
+        {"svc-a": 0.8, "svc-b": 0.4},
+        {"svc-a": 0.3, "svc-b": 0.2},
+        None,
+        None,
+        None,
+        cfg,
+    )
+
+    assert fitness.shape == (2,)
+    assert np.all(np.isfinite(fitness))
+    assert np.all(fitness >= 0.0)
+
+
+def test_phenotype_conditioned_fitness_sanitizes_nonfinite_values():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _phenotype_conditioned_fitness
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    fitness = _phenotype_conditioned_fitness(
+        ["svc-a", "svc-b"],
+        {"svc-a": np.nan, "svc-b": np.inf},
+        {"svc-a": -1.0, "svc-b": 0.5},
+        {"svc-a": np.inf, "svc-b": "bad"},
+        {
+            "svc-a": {"resource": np.inf, "latency": -1.0, "error": np.nan, "trace": np.inf, "propagation": 0.2},
+            "svc-b": {"resource": 0.1, "latency": np.inf, "error": 0.4, "trace": np.nan, "propagation": -2.0},
+        },
+        {"resource": np.inf, "latency": np.nan, "error": -1.0, "propagation": 0.5},
+        cfg,
+    )
+
+    assert fitness.shape == (2,)
+    assert np.all(np.isfinite(fitness))
+    assert np.all(fitness >= 0.0)
+
+
+def test_phenotype_conditioned_fitness_empty_candidates_returns_empty_vector():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _phenotype_conditioned_fitness
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    fitness = _phenotype_conditioned_fitness([], {}, {}, None, None, None, cfg)
+
+    assert fitness.shape == (0,)
+    assert fitness.dtype == float
