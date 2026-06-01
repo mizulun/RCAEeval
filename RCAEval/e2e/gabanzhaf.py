@@ -358,10 +358,10 @@ def _trace_onset_scores(case_dir, inject_time):
     Returns {svc_name: score ∈ [0, 1]} or None if traces unavailable.
 
     Signals:
-      - Error rate  (covers LOSS): fraction of spans with statusCode ≠ 0
-      - Duration ratio (covers DELAY): anomaly-period avg-duration /
-                                        normal-period avg-duration − 1,
-                                        capped at 10× and normalised to [0,1]
+      - Error rate: fraction of spans with statusCode ≠ 0
+      - Duration ratio: anomaly-period avg-duration /
+                        normal-period avg-duration − 1,
+                        capped at 10× and normalised to [0,1]
     Per-service score = max(error_rate, duration_signal).
     """
     if not case_dir:
@@ -525,10 +525,9 @@ def _metric_evidence(normal_mat, anomal_mat, cols):
     rz = np.abs((anomal_mat - med) / iqr)
     rz = np.nan_to_num(rz, nan=0., posinf=0., neginf=0.)
     # Selective Winsorization: cap metrics where IQR=0 AND std≈0 (truly constant
-    # baseline).  These produce inflated rz through the fallback denominator of
-    # 1.0 even for tiny shifts, masking real root causes.  The std<=1e-6 guard
-    # preserves columns that have IQR=0 but non-trivial spread (step-function
-    # or bursty behaviour) so their rz is still meaningful.
+    # baseline). These produce inflated rz through the unit denominator even for
+    # tiny shifts, masking real causes. The std<=1e-6 guard preserves columns
+    # that have IQR=0 but non-trivial spread so their rz is still meaningful.
     near_zero_baseline = ((q75 - q25) <= 0) & (std <= 1e-6)   # shape (n_cols,)
     rz = np.where(near_zero_baseline, np.clip(rz, 0., 10.), rz)
 
