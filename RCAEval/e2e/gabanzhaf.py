@@ -46,6 +46,9 @@ class _GabanzhafConfig:
     phenotype_gain_latency: float = 0.45
     phenotype_gain_error: float = 0.45
     phenotype_gain_propagation: float = 0.35
+    exact_candidate_k: int = 12
+    causal_probability_lambda: float = 1.5
+    metric_rank_epsilon: float = 0.15
 
     @classmethod
     def from_kwargs(cls, kwargs):
@@ -64,6 +67,11 @@ class _GabanzhafConfig:
             phenotype_gain_latency=float(kwargs.get("phenotype_gain_latency", cls.phenotype_gain_latency)),
             phenotype_gain_error=float(kwargs.get("phenotype_gain_error", cls.phenotype_gain_error)),
             phenotype_gain_propagation=float(kwargs.get("phenotype_gain_propagation", cls.phenotype_gain_propagation)),
+            exact_candidate_k=int(kwargs.get("exact_candidate_k", cls.exact_candidate_k)),
+            causal_probability_lambda=float(
+                kwargs.get("causal_probability_lambda", cls.causal_probability_lambda)
+            ),
+            metric_rank_epsilon=float(kwargs.get("metric_rank_epsilon", cls.metric_rank_epsilon)),
         )
 
 
@@ -1045,6 +1053,70 @@ def _candidate_services(seed_svcs, upstream_map_full, svc_anom_dict, config):
             : config.max_candidate_svcs
         ]
     )
+
+
+def _select_exact_candidates(
+    candidates,
+    svc_anom_dict,
+    svc_residual,
+    trace_scores,
+    topology_edges,
+    config,
+):
+    k = max(1, int(config.exact_candidate_k))
+    trace_source = trace_scores or {}
+    graph_participation = {svc: 0.0 for svc in candidates}
+    for u, v, w in topology_edges:
+        weight = _finite_nonnegative(w)
+        if u in graph_participation:
+            graph_participation[u] += weight
+        if v in graph_participation:
+            graph_participation[v] += weight
+    graph_participation = _norm_trace_component_dict(graph_participation)
+
+    def score(svc):
+        return (
+            0.50 * _finite_nonnegative(svc_anom_dict.get(svc, 0.0))
+            + 0.40 * _finite_nonnegative(svc_residual.get(svc, 0.0))
+            + 0.05 * _finite_nonnegative(trace_source.get(svc, 0.0))
+            + 0.05 * _finite_nonnegative(graph_participation.get(svc, 0.0))
+        )
+
+    return sorted(candidates, key=lambda svc: (score(svc), svc), reverse=True)[:k]
+
+
+def _causal_explanation_matrix(
+    cand_list,
+    service_list,
+    svc_anom_dict,
+    topology_edges,
+    config,
+):
+    cand_idx = {svc: i for i, svc in enumerate(cand_list)}
+    svc_idx = {svc: j for j, svc in enumerate(service_list)}
+    matrix = np.zeros((len(cand_list), len(service_list)), dtype=float)
+    lam = _finite_nonnegative(config.causal_probability_lambda)
+    if lam <= 0.0:
+        lam = 1.0
+
+    for svc, i in cand_idx.items():
+        if svc in svc_idx:
+            matrix[i, svc_idx[svc]] = 1.0
+
+    for u, v, w in topology_edges:
+        if u not in cand_idx or v not in svc_idx:
+            continue
+        alignment = np.sqrt(
+            _finite_nonnegative(svc_anom_dict.get(u, 0.0))
+            * _finite_nonnegative(svc_anom_dict.get(v, 0.0))
+        )
+        raw = _finite_nonnegative(w) * alignment
+        matrix[cand_idx[u], svc_idx[v]] = max(
+            matrix[cand_idx[u], svc_idx[v]],
+            1.0 - np.exp(-lam * raw),
+        )
+
+    return np.clip(matrix, 0.0, 1.0)
 
 
 def _residual_scores(svc_anom_dict, upstream_map_residual, edge_conf, config):
