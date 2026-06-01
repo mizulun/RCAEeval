@@ -486,13 +486,15 @@ def _metric_semantic_group(col):
 
 
 def _metric_semantic_match(col, phenotype):
+    if not isinstance(phenotype, dict):
+        return 0.0
     group = _metric_semantic_group(col)
     if group == "resource":
-        return phenotype.get("resource", 0.0)
+        return min(_finite_nonnegative(phenotype.get("resource", 0.0)), 1.0)
     if group == "latency":
-        return phenotype.get("latency", 0.0)
+        return min(_finite_nonnegative(phenotype.get("latency", 0.0)), 1.0)
     if group == "error":
-        return phenotype.get("error", 0.0)
+        return min(_finite_nonnegative(phenotype.get("error", 0.0)), 1.0)
     return 0.0
 
 
@@ -1094,7 +1096,9 @@ def _rank_metrics(
             nt.get(svc, 0.),
         )
         metric_local = nm.get(col, 0.)
-        semantic = _metric_semantic_match(col, phenotype or {})
+        semantic = _metric_semantic_match(col, phenotype)
+        if semantic <= 0.0:
+            return 0.70 * service_root + 0.30 * metric_local + 0.20 * service_root * metric_local
         return (
             0.66 * service_root
             + 0.28 * metric_local
