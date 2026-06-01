@@ -1,5 +1,4 @@
 import os
-import re
 import numpy as np
 import pandas as pd
 import warnings
@@ -41,11 +40,6 @@ class _GabanzhafConfig:
     topology_reliability_cap: float = 0.65
     residual_weight_base: float = 0.30
     residual_weight_topology_gain: float = 0.50
-    phenotype_temperature: float = 0.7
-    phenotype_gain_resource: float = 0.35
-    phenotype_gain_latency: float = 0.45
-    phenotype_gain_error: float = 0.45
-    phenotype_gain_propagation: float = 0.35
     exact_candidate_k: int = 12
     causal_probability_lambda: float = 1.5
     metric_rank_epsilon: float = 0.15
@@ -75,11 +69,6 @@ class _GabanzhafConfig:
             banzhaf_mode=str(kwargs.get("banzhaf_mode", cls.banzhaf_mode)),
             seed=int(kwargs.get("seed", cls.seed)),
             dk_select_useful=bool(kwargs.get("dk_select_useful", cls.dk_select_useful)),
-            phenotype_temperature=float(kwargs.get("phenotype_temperature", cls.phenotype_temperature)),
-            phenotype_gain_resource=float(kwargs.get("phenotype_gain_resource", cls.phenotype_gain_resource)),
-            phenotype_gain_latency=float(kwargs.get("phenotype_gain_latency", cls.phenotype_gain_latency)),
-            phenotype_gain_error=float(kwargs.get("phenotype_gain_error", cls.phenotype_gain_error)),
-            phenotype_gain_propagation=float(kwargs.get("phenotype_gain_propagation", cls.phenotype_gain_propagation)),
             exact_candidate_k=cls._positive_int_or_default(
                 kwargs.get("exact_candidate_k", cls.exact_candidate_k),
                 cls.exact_candidate_k,
@@ -498,49 +487,6 @@ def _parse_svc(col):
     return parts[0] if len(parts) == 2 else col
 
 
-def _metric_semantic_group(col):
-    svc = _parse_svc(col)
-    suffix = col[len(svc) + 1:] if col.startswith(svc + "_") else col
-    suffixes = [suffix.lower()]
-    if "_" in col:
-        suffixes.append(col.split("_", 1)[1].lower())
-    suffix_text = " ".join(suffixes)
-    tokens = set(
-        token
-        for candidate in suffixes
-        for token in re.split(r"[^0-9a-zA-Z]+", candidate)
-        if token
-    )
-
-    resource_short = ("cpu", "mem", "disk", "io", "net")
-    resource_long = ("memory", "socket", "network")
-    latency_short = ("lat", "rt")
-    latency_long = ("latency", "duration", "response")
-    error_short = ("err", "fail")
-    error_long = ("error", "failure", "status")
-
-    if any(k in tokens for k in latency_short) or any(k in suffix_text for k in latency_long):
-        return "latency"
-    if any(k in tokens for k in resource_short) or any(k in suffix_text for k in resource_long):
-        return "resource"
-    if any(k in tokens for k in error_short) or any(k in suffix_text for k in error_long):
-        return "error"
-    return "other"
-
-
-def _metric_semantic_match(col, phenotype):
-    if not isinstance(phenotype, dict):
-        return 0.0
-    group = _metric_semantic_group(col)
-    if group == "resource":
-        return min(_finite_nonnegative(phenotype.get("resource", 0.0)), 1.0)
-    if group == "latency":
-        return min(_finite_nonnegative(phenotype.get("latency", 0.0)), 1.0)
-    if group == "error":
-        return min(_finite_nonnegative(phenotype.get("error", 0.0)), 1.0)
-    return 0.0
-
-
 def _norm01_arr(a):
     a = np.asarray(a, dtype=float)
     lo = np.nanmin(a) if a.size else 0.
@@ -673,102 +619,6 @@ def _service_evidence(cols, metric_ev):
     return _norm_dict(svc_scores)
 
 
-def _semantic_service_evidence(cols, metric_ev, trace_scores, topology_edges, svc_anom_dict):
-    svc_values = {
-        svc: {"resource": [], "latency": [], "error": [], "other": []}
-        for svc in svc_anom_dict
-    }
-    for col in cols:
-        svc = _parse_svc(col)
-        if svc not in svc_values:
-            svc_values[svc] = {"resource": [], "latency": [], "error": [], "other": []}
-        group = _metric_semantic_group(col)
-        svc_values[svc][group].append(float(metric_ev[col]["score"]))
-
-    raw = {}
-    for svc, groups in svc_values.items():
-        raw[svc] = {
-            "resource": max(groups["resource"], default=0.0),
-            "latency": max(groups["latency"], default=0.0),
-            "error": max(groups["error"], default=0.0),
-            "trace": float((trace_scores or {}).get(svc, 0.0)),
-            "propagation": 0.0,
-        }
-
-    prop = {svc: 0.0 for svc in raw}
-    for u, v, w in topology_edges:
-        if u in prop and v in prop:
-            aligned = float(w) * svc_anom_dict.get(u, 0.0) * svc_anom_dict.get(v, 0.0)
-            prop[u] += aligned
-            prop[v] += aligned
-    prop = _norm_trace_component_dict(prop)
-    for svc in raw:
-        raw[svc]["propagation"] = prop.get(svc, 0.0)
-
-    for key in ("resource", "latency", "error", "trace"):
-        normed = _norm_trace_component_dict({svc: values[key] for svc, values in raw.items()})
-        for svc in raw:
-            raw[svc][key] = normed.get(svc, 0.0)
-
-    return raw
-
-
-def _mean_top(values, k=3):
-    arr = np.asarray([v for v in values if np.isfinite(v)], dtype=float)
-    if arr.size == 0:
-        return 0.0
-    top = np.sort(arr)[-min(k, arr.size):]
-    return float(np.mean(top))
-
-
-def _softmax_dict(raw, temperature):
-    keys = list(raw.keys())
-    vals = np.asarray([raw[k] for k in keys], dtype=float)
-    vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
-    tau = float(temperature)
-    if not np.isfinite(tau) or tau <= 0.0:
-        tau = 1.0
-    vals = vals / tau
-    vals = vals - np.max(vals)
-    exp = np.exp(vals)
-    denom = float(exp.sum()) if exp.size else 1.0
-    return {k: float(exp[i] / max(denom, 1e-12)) for i, k in enumerate(keys)}
-
-
-def _incident_phenotype(
-    svc_anom_dict,
-    trace_error_scores,
-    trace_latency_scores,
-    semantic_evidence,
-    topology_edges,
-    config,
-):
-    semantic_evidence = semantic_evidence or {}
-    resource = _mean_top(v.get("resource", 0.0) for v in semantic_evidence.values())
-    latency = _mean_top(v.get("latency", 0.0) for v in semantic_evidence.values())
-    latency += _mean_top((trace_latency_scores or {}).values())
-    error = _mean_top(v.get("error", 0.0) for v in semantic_evidence.values())
-    error += _mean_top((trace_error_scores or {}).values())
-
-    edge_weight_sum = 0.0
-    aligned_sum = 0.0
-    for u, v, w in topology_edges:
-        weight = max(float(w), 0.0)
-        edge_weight_sum += weight
-        aligned_sum += weight * svc_anom_dict.get(u, 0.0) * svc_anom_dict.get(v, 0.0)
-    propagation = aligned_sum / max(edge_weight_sum, 1e-9)
-
-    return _softmax_dict(
-        {
-            "resource": resource,
-            "latency": latency,
-            "error": error,
-            "propagation": propagation,
-        },
-        config.phenotype_temperature,
-    )
-
-
 def _deterministic_banzhaf_coverage(fitness_signal, topo_matrix):
     """Deterministic Banzhaf values for causal coverage games."""
     fitness = np.asarray(fitness_signal, dtype=float).reshape(-1)
@@ -898,16 +748,6 @@ def _mc_banzhaf(fitness_signal, topo_matrix, n_samples, seed=42):
 
     safe_counts = np.where(counts > 0, counts, 1.)
     return np.maximum(0., banzhaf / safe_counts)
-
-
-def _service_root_score(banzhaf_score, residual_score, anomaly_score, trace_score=0.0):
-    """Fixed service-level blend; missing trace is represented by trace_score=0."""
-    return (
-        0.40 * banzhaf_score
-        + 0.27 * residual_score
-        + 0.23 * anomaly_score
-        + 0.10 * trace_score
-    )
 
 
 def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
@@ -1184,55 +1024,6 @@ def _finite_nonnegative(value):
     return value
 
 
-def _phenotype_conditioned_fitness(
-    cand_list,
-    svc_anom_dict,
-    svc_residual,
-    trace_scores,
-    semantic_evidence,
-    phenotype,
-    config,
-):
-    values = []
-    svc_anom_dict = svc_anom_dict or {}
-    svc_residual = svc_residual or {}
-    trace_source = trace_scores or {}
-    semantic_evidence = semantic_evidence or {}
-    phenotype = phenotype or {}
-    gain_resource = _finite_nonnegative(config.phenotype_gain_resource)
-    gain_latency = _finite_nonnegative(config.phenotype_gain_latency)
-    gain_error = _finite_nonnegative(config.phenotype_gain_error)
-    gain_propagation = _finite_nonnegative(config.phenotype_gain_propagation)
-    for svc in cand_list:
-        sem = semantic_evidence.get(
-            svc,
-            {"resource": 0.0, "latency": 0.0, "error": 0.0, "trace": 0.0, "propagation": 0.0},
-        )
-        if not isinstance(sem, dict):
-            sem = {}
-        anomaly = _finite_nonnegative(svc_anom_dict.get(svc, 0.0))
-        residual = _finite_nonnegative(svc_residual.get(svc, 0.0))
-        trace = _finite_nonnegative(trace_source.get(svc, sem.get("trace", 0.0)))
-        resource = _finite_nonnegative(sem.get("resource", 0.0))
-        latency = _finite_nonnegative(sem.get("latency", 0.0))
-        error = _finite_nonnegative(sem.get("error", 0.0))
-        propagation = _finite_nonnegative(sem.get("propagation", 0.0))
-        phenotype_resource = _finite_nonnegative(phenotype.get("resource", 0.0))
-        phenotype_latency = _finite_nonnegative(phenotype.get("latency", 0.0))
-        phenotype_error = _finite_nonnegative(phenotype.get("error", 0.0))
-        phenotype_propagation = _finite_nonnegative(phenotype.get("propagation", 0.0))
-        base = 0.50 * anomaly + 0.35 * residual + 0.15 * trace
-        multiplier = (
-            1.0
-            + gain_resource * phenotype_resource * resource
-            + gain_latency * phenotype_latency * latency
-            + gain_error * phenotype_error * max(error, trace)
-            + gain_propagation * phenotype_propagation * propagation
-        )
-        values.append(max(0.0, base * multiplier))
-    return np.asarray(values, dtype=float)
-
-
 def _topology_matrix(cand_list, lag_corr_edges):
     svc_idx = {s: i for i, s in enumerate(cand_list)}
     matrix = np.zeros((len(cand_list), len(cand_list)), dtype=np.float32)
@@ -1242,41 +1033,14 @@ def _topology_matrix(cand_list, lag_corr_edges):
     return matrix
 
 
-def _rank_metrics(
-    all_cols,
-    svc_banzhaf,
-    svc_residual,
-    svc_anom_dict,
-    metric_score,
-    trace_scores,
-    phenotype=None,
-    semantic_evidence=None,
-):
+def _rank_metrics(all_cols, svc_banzhaf, metric_score, config):
     nb = _norm_dict(svc_banzhaf)
-    nr = _norm_dict(svc_residual)
-    na = _norm_dict(svc_anom_dict)
     nm = _norm_dict(metric_score)
-    trace_source = trace_scores or {}
-    nt = _norm_dict({s: trace_source.get(s, 0.) for s in svc_anom_dict})
+    epsilon = _finite_nonnegative(config.metric_rank_epsilon)
 
     def _col_score(col):
         svc = _parse_svc(col)
-        service_root = _service_root_score(
-            nb.get(svc, 0.),
-            nr.get(svc, 0.),
-            na.get(svc, 0.),
-            nt.get(svc, 0.),
-        )
-        metric_local = nm.get(col, 0.)
-        semantic = _metric_semantic_match(col, phenotype)
-        if semantic <= 0.0:
-            return 0.70 * service_root + 0.30 * metric_local + 0.20 * service_root * metric_local
-        return (
-            0.66 * service_root
-            + 0.28 * metric_local
-            + 0.18 * service_root * metric_local
-            + 0.08 * semantic * metric_local
-        )
+        return nb.get(svc, 0.0) * (epsilon + nm.get(col, 0.0))
 
     return sorted(all_cols, key=_col_score, reverse=True)
 
@@ -1396,14 +1160,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     _mark_stage("banzhaf")
 
     # ── 9. Final metric-level ranking ────────────────────────────────────────
-    ranks = _rank_metrics(
-        cols,
-        svc_banzhaf,
-        svc_residual,
-        svc_anom_dict,
-        metric_score,
-        trace_scores,
-    )
+    ranks = _rank_metrics(cols, svc_banzhaf, metric_score, config)
     _mark_stage("ranking")
 
     result = {"ranks": ranks, "node_names": cols}
