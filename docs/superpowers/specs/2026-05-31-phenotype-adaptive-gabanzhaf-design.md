@@ -1,272 +1,376 @@
-# Phenotype-Adaptive Gabanzhaf Design
+# Probabilistic Causal Banzhaf Design
 
 ## Goal
 
-Improve `RCAEval/e2e/gabanzhaf.py` so service and metric rankings are more precise across all fault types, with a target of pushing both `AC@1` and `Avg@5` toward `0.9+` on `re2-ob`, `re2-ss`, and `re2-tt`.
+Improve `RCAEval/e2e/gabanzhaf.py` with a simpler and more defensible RCA algorithm that can be written as one coherent academic method.
 
-The improvement must remain fully unsupervised. It must not use ground-truth root causes, fault labels, dataset names, case IDs, service-name exceptions, or evaluation feedback. Runtime should stay close to the current Baro-compatible budget by adding only linear-time incident characterization overhead.
+The design target is to push `AC@1` and `Avg@5` toward `0.9+` across all fault types while preserving these constraints:
 
-## Current Baseline
+- fully unsupervised;
+- no ground truth, fault label, dataset name, case ID, or service-name exception;
+- no fallback branch;
+- one unified flow for every incident;
+- small runtime increase after candidate pruning;
+- fewer ad hoc helper stages than the current phenotype-adaptive draft.
 
-The current `gabanzhaf.py` pipeline already includes:
+The second iteration changes the core cooperative game instead of stacking more post-processing terms.
 
-- robust metric evidence from pre/post injection windows;
-- service evidence aggregation;
-- bounded candidate pools;
-- lag-correlation topology;
-- trace-derived call graph fallback;
-- residual victim suppression;
-- deterministic causal-coverage Banzhaf;
-- metric-level final ranking.
+## Motivation
 
-The current benchmark profile shows good top-3/top-5 behavior, but weaker top-1 precision. DELAY and LOSS remain difficult because propagation makes downstream services look anomalous, while CPU and SOCKET in some small datasets have top-1 failures because local metric evidence is not always enough to identify the injected service.
-
-The current trace score combines duration and error evidence into one value. The new design should preserve that combined score for backward-compatible ranking, but also expose separate trace duration and trace error components for phenotype inference.
-
-## Design Principle
-
-Do not add fault-type rules such as "if DELAY then boost latency" or "if LOSS then boost errors." Instead, infer a continuous incident phenotype vector from observed telemetry:
+The first phenotype-adaptive implementation added useful evidence, but the algorithm became harder to justify:
 
 ```text
-pi = [pi_resource, pi_latency, pi_error, pi_propagation]
+ metric anomaly
++ trace evidence
++ semantic evidence
++ phenotype inference
++ residual victim suppression
++ topology weighting
++ metric ranking correction
 ```
 
-The phenotype vector is not a classifier and has no access to labels. It is a normalized summary of which evidence families dominate the current incident. This vector conditions the causal game payoff and final ranking, so the same algorithm adapts to resource, latency, error, and propagation-heavy incidents.
+This creates a weak paper story because every helper needs a separate theoretical justification.
 
-## Mathematical Model
+The observed benchmark failures also suggest that the main problem is not missing telemetry evidence. The main problem is the current Banzhaf payoff:
+
+```text
+v(S) = sum_j W_j * I[j is explained by S]
+```
+
+This binary coverage payoff over-rewards shared dependencies such as common databases, caches, and message brokers. If a shared dependency can topologically explain many anomalous services, it receives excessive marginal contribution even when it is only a propagated victim or a common downstream component.
+
+The improved design therefore modifies only the cooperative game:
+
+```text
+old: binary causal coverage game
+new: probabilistic causal coverage game
+```
+
+The evidence extraction and candidate pruning remain lightweight. The final ranking becomes a projection of the Banzhaf score back to metrics, without extra fault-type correction.
+
+## Core Contribution
+
+The proposed method is:
+
+```text
+Probabilistic Causal Banzhaf
+```
+
+Its contribution is a single mathematical replacement for the current binary coverage payoff:
+
+1. Model root-cause explanation as a probabilistic causal coverage game.
+2. Use a noisy-OR coverage function to encode diminishing marginal returns when multiple services explain the same anomaly.
+3. Compute exact Banzhaf power on a fixed top-K unsupervised candidate game.
+4. Use one flow for every incident, with no fallback and no label-specific branch.
+
+This is theoretically grounded in:
+
+- Banzhaf power index for expected marginal contribution in cooperative games;
+- noisy-OR probabilistic coverage from probabilistic graphical models;
+- submodular coverage / influence models, where repeated explanation has diminishing returns.
+
+## Unified Pipeline
+
+The algorithm flow is fixed:
+
+```text
+1. Split pre/post windows.
+2. Compute metric anomaly evidence.
+3. Aggregate metric evidence to service anomaly weights.
+4. Build bounded causal topology from lag correlation and trace call relations.
+5. Select a fixed top-K unsupervised candidate set.
+6. Build causal explanation probability matrix P.
+7. Compute exact Banzhaf on the top-K probabilistic coverage game.
+8. Project service Banzhaf scores back to metric ranking.
+```
+
+There is no runtime branch such as:
+
+```text
+if K is large: use deterministic Banzhaf
+if delay: boost latency
+if loss: boost errors
+if dataset is re2: change behavior
+```
+
+The method always uses exact Banzhaf on the same truncated candidate game.
+
+## Notation
 
 Let:
 
-- `G = (V, E)` be the bounded service topology.
-- `i, j in V` be services.
-- `S subset V` be a candidate root-cause coalition.
-- `A_j in [0, 1]` be service anomaly evidence from metric shifts.
-- `R_j in [0, 1]` be residual evidence after upstream explanation.
-- `T_j in [0, 1]` be trace evidence from error rate and duration ratio.
-- `L_j in [0, 1]` be latency-local evidence aggregated from latency-like metrics.
-- `Q_j in [0, 1]` be resource-local evidence aggregated from CPU, memory, disk, and socket-like metrics.
-- `H_j in [0, 1]` be topology propagation pressure, high when service `j` is anomalous and has anomalous downstream or upstream neighbors.
-- `C_j(S) in {0, 1}` indicate whether `j` is explained by coalition `S`: `j in S` or some upstream explainer of `j` is in `S`.
+- `V` be the bounded set of observed services;
+- `M` be the observed metrics;
+- `P_K subset V` be the top-K candidate service set;
+- `i in P_K` be a candidate root service;
+- `j in V` be a service whose anomaly may be explained;
+- `m in M` be a metric;
+- `A_j in [0, 1]` be service-level anomaly weight;
+- `E_m in [0, 1]` be metric-level anomaly evidence;
+- `T_ij in [0, 1]` be topology strength from service `i` to service `j`;
+- `L_ij in [0, 1]` be temporal precedence or lag-correlation strength;
+- `S_ij in [0, 1]` be anomaly-alignment strength between services `i` and `j`;
+- `p_ij in [0, 1]` be the probability that candidate `i` causally explains anomaly at service `j`.
 
-The incident phenotype is:
+All quantities are computed from telemetry only.
 
-```text
-z_resource    = mean_top(Q_j)
-z_latency     = mean_top(L_j) + mean_top(trace_latency_j)
-z_error       = mean_top(trace_error_j)
-z_propagation = normalized_edge_anomaly_alignment(G, A)
+## Candidate Set
 
-pi_k = exp(z_k / tau) / sum_l exp(z_l / tau)
-```
-
-`mean_top` uses the mean of the top few service scores, not the maximum alone, to avoid one noisy metric determining the incident type. `tau` is a fixed smoothing temperature. No component is tied to a ground-truth fault label.
-
-The phenotype-conditioned payoff is:
+The exact game is intentionally computed on a fixed-size unsupervised candidate set:
 
 ```text
-v(S | pi) = sum_j W_j(pi) * C_j(S)
+P_K = TopK_i phi_i
 ```
 
 where:
 
 ```text
-W_j(pi) =
-    A_j
-  * (1 + gamma_r * pi_resource    * Q_j)
-  * (1 + gamma_l * pi_latency     * L_j)
-  * (1 + gamma_e * pi_error       * T_j)
-  * (1 + gamma_p * pi_propagation * H_j)
-  * (lambda_a * A_j + lambda_r * R_j + lambda_t * T_j)
+phi_i =
+    w_a * A_i
+  + w_r * R_i
+  + w_t * Trace_i
+  + w_g * G_i
 ```
 
-This remains an additive coverage game. Therefore deterministic Banzhaf is still available:
+`R_i` is residual local anomaly after upstream explanation, `Trace_i` is trace anomaly if available, and `G_i` is bounded graph participation evidence.
+
+This is not a fallback. The truncated game is the algorithm definition. Every incident uses exactly the same candidate selection rule and exactly the same `K`.
+
+Recommended default:
 
 ```text
-beta_i(pi) = sum_{j: i explains j} W_j(pi) * 2^{-(|Explainers(j)| - 1)}
+K = 12
 ```
 
-The formula keeps the key Banzhaf interpretation: a service scores high when it has large marginal explanatory contribution under the current incident phenotype.
+This gives `2^12 = 4096` coalitions per case, which is small after service-level pruning.
 
-## Incident Phenotype Inference
+## Causal Explanation Probability
 
-Extend trace extraction to retain separable trace components:
+The explanation probability matrix replaces binary explainability.
 
-```python
-@dataclass(frozen=True)
-class _TraceFeatures:
-    trace_scores: dict | None
-    trace_error_scores: dict | None
-    trace_latency_scores: dict | None
-    call_graph: dict
-```
-
-`trace_scores` remains the existing max-combined signal. The two new dictionaries are optional, normalized service-level views of status-code error rate and duration ratio. Missing trace data returns `None` for all trace score dictionaries and `{}` for the call graph.
-
-Add a small helper:
-
-```python
-def _incident_phenotype(
-    cols,
-    metric_ev,
-    svc_anom_dict,
-    trace_error_scores,
-    trace_latency_scores,
-    semantic_evidence,
-    topology_edges,
-    config,
-):
-    return {
-        "resource": pi_resource,
-        "latency": pi_latency,
-        "error": pi_error,
-        "propagation": pi_propagation,
-    }
-```
-
-Metric type detection is lexical but generic:
-
-- resource metrics: suffix contains `cpu`, `mem`, `memory`, `disk`, `io`, `socket`, `net`, `network`;
-- latency metrics: suffix contains `lat`, `latency`, `duration`, `rt`, `response`;
-- error metrics: trace error contribution from status code and error-rate time series when available.
-
-These are telemetry semantic groups, not benchmark labels. They can be applied to new microservice datasets without knowing the injected fault type.
-
-Propagation score uses existing bounded topology:
+For candidate `i` and service `j`:
 
 ```text
-edge_alignment = mean_{(u, v, w) in E} w * A_u * A_v
-propagation = edge_alignment normalized by observed edge weights
+p_ij =
+    1,                                  if i = j
+    sigma(T_ij * L_ij * S_ij),          otherwise
 ```
 
-This makes propagation high only when anomalous services are structurally connected, which is typical for delay/loss cascades.
-
-## Phenotype-Conditioned Service Features
-
-Add a helper that returns per-service semantic evidence after topology construction:
-
-```python
-def _semantic_service_evidence(
-    cols,
-    metric_ev,
-    trace_scores,
-    topology_edges,
-    svc_anom_dict,
-):
-    return {
-        svc: {
-            "resource": q,
-            "latency": l,
-            "trace": t,
-            "propagation": h,
-        }
-    }
-```
-
-Each component is normalized to `[0, 1]`. Missing trace data becomes zero-valued evidence, preserving a single formula without switching algorithms.
-
-## Banzhaf Integration
-
-Replace the current `fitness_signal` passed into deterministic Banzhaf with phenotype-conditioned payoff weights:
+where `sigma` is a bounded calibration function:
 
 ```text
-fitness_signal[j] = W_j(pi)
+sigma(x) = 1 - exp(-lambda * x)
 ```
 
-The topology matrix and deterministic Banzhaf backend remain unchanged. This limits implementation risk and preserves the existing `O(N^2)` Banzhaf cost.
-
-## Final Ranking
-
-Metric ranking should remain metric-level, not collapse to service-only ranking:
+`T_ij` comes from the existing bounded topology matrix. `L_ij` comes from lag correlation or trace temporal direction. `S_ij` is anomaly alignment:
 
 ```text
-score(m_j) =
-    alpha * root_score(service(j), pi)
-  + beta  * metric_local_score(m_j)
-  + eta   * root_score(service(j), pi) * metric_local_score(m_j)
-  + rho   * semantic_match(m_j, pi)
+S_ij = sqrt(A_i * A_j)
 ```
 
-where `semantic_match` is derived from the metric's generic semantic group:
+This keeps high explanation probability only when three conditions agree:
+
+1. `i` is structurally able to influence `j`;
+2. the temporal relation is plausible;
+3. both services are anomalous.
+
+Shared dependencies are no longer automatically rewarded for every connected anomaly. They must provide high marginal coverage under the noisy-OR game.
+
+## Noisy-OR Coverage Payoff
+
+For a coalition `S subseteq P_K`, service `j` is probabilistically covered by:
 
 ```text
-resource metric -> pi_resource
-latency metric  -> pi_latency
-error metric    -> pi_error
-other metric    -> 0
+c_j(S) = 1 - prod_{i in S} (1 - p_ij)
 ```
 
-This is not fault-type hardcoding because the score depends on the inferred incident phenotype, not on a supplied fault label.
+The game payoff is:
+
+```text
+v(S) = sum_{j in V} A_j * c_j(S)
+```
+
+This is the central simplification.
+
+The old binary payoff gives no diminishing return once a service is explainable. The new payoff is submodular: if one candidate already explains `j`, adding another candidate that explains the same `j` contributes less. This directly addresses shared-dependency over-ranking without an explicit shared-dependency penalty.
+
+The marginal contribution of candidate `i` is:
+
+```text
+Delta_i(S)
+= v(S union {i}) - v(S)
+= sum_j A_j * p_ij * prod_{h in S} (1 - p_hj)
+```
+
+This formula shows the desired behavior:
+
+- if no existing coalition member explains `j`, `i` receives high marginal contribution;
+- if many services already explain `j`, `i` receives low marginal contribution;
+- duplicated explanations are naturally discounted.
+
+## Exact Banzhaf Score
+
+The Banzhaf score for candidate `i` is:
+
+```text
+beta_i =
+1 / 2^(K-1)
+sum_{S subseteq P_K \ {i}} Delta_i(S)
+```
+
+Using the noisy-OR marginal form:
+
+```text
+beta_i =
+1 / 2^(K-1)
+sum_{S subseteq P_K \ {i}}
+sum_j A_j * p_ij * prod_{h in S} (1 - p_hj)
+```
+
+This is exact Banzhaf on the truncated candidate game. It is not Monte Carlo and not deterministic approximation.
+
+## Closed-Form Optimization
+
+The noisy-OR Banzhaf score has a closed-form simplification.
+
+For fixed `i` and `j`:
+
+```text
+1 / 2^(K-1)
+sum_{S subseteq P_K \ {i}} prod_{h in S} (1 - p_hj)
+= prod_{h in P_K \ {i}} (1 + (1 - p_hj)) / 2
+= prod_{h in P_K \ {i}} (1 - p_hj / 2)
+```
+
+Therefore:
+
+```text
+beta_i =
+sum_j A_j * p_ij * prod_{h in P_K \ {i}} (1 - p_hj / 2)
+```
+
+This is still exact Banzhaf for the noisy-OR game, but avoids enumerating all coalitions.
+
+The implementation should use this closed form by default because it is mathematically equivalent and faster. The paper can describe it as an exact closed-form Banzhaf estimator for the noisy-OR causal coverage game.
+
+## Metric Ranking
+
+The final metric score should remain simple:
+
+```text
+score(m) =
+    beta_service(m) * (epsilon + E_m)
+```
+
+where:
+
+- `beta_service(m)` is the normalized Banzhaf score of the service that owns metric `m`;
+- `E_m` is the local metric anomaly evidence;
+- `epsilon` preserves service-level root evidence when the root metric is not the single largest shifted metric.
+
+No extra semantic or fault-type ranking term is added.
+
+This keeps the paper story clean:
+
+```text
+service root probability comes from Banzhaf;
+metric identity comes from local anomaly evidence.
+```
+
+## Expected Effect on Fault Types
+
+The same mechanism applies across fault types:
+
+- CPU, memory, disk, socket: self-explanation `p_ii = 1` plus high local anomaly should favor the true service over downstream victims.
+- Delay: topology and temporal relation allow upstream causal explanation, but duplicated downstream coverage has diminishing return.
+- Loss: trace/status anomalies contribute to service anomaly weights, while noisy-OR prevents common dependencies from dominating only because many services are affected.
+
+This is not implemented as fault-specific logic. It follows from the same payoff.
 
 ## Configuration
 
-Add conservative fixed parameters to `_GabanzhafConfig`:
+Keep the configurable surface small:
 
 ```python
-phenotype_temperature: float = 0.7
-phenotype_gain_resource: float = 0.35
-phenotype_gain_latency: float = 0.45
-phenotype_gain_error: float = 0.45
-phenotype_gain_propagation: float = 0.35
+exact_candidate_k: int = 12
+causal_probability_lambda: float = 1.5
+metric_rank_epsilon: float = 0.15
 ```
 
-These are global constants, not dataset-specific parameters. They should be exposed through kwargs only for experiments.
+Avoid introducing phenotype gains, semantic gains, dataset-specific knobs, or fallback thresholds.
 
 ## Complexity
 
-Existing dominant costs are:
+Let:
+
+- `T` be time-series length;
+- `M` be metric count;
+- `N` be bounded service count;
+- `K` be the fixed candidate count, with `K << N`;
+- `E` be bounded topology edge count.
+
+Existing preprocessing remains:
 
 ```text
 metric evidence      O(T * M)
 service aggregation  O(M)
 topology building    O(T * N^2)
-Banzhaf              O(N^2)
-ranking              O(M log M)
+metric ranking       O(M log M)
 ```
 
-The new helpers add:
+New probabilistic Banzhaf steps:
 
 ```text
-semantic evidence    O(M + N + E)
-phenotype inference  O(N + E)
-payoff construction  O(N)
-semantic ranking     O(M)
+candidate selection        O(N log K)
+explanation matrix P       O(K * N)
+closed-form Banzhaf        O(K * N)
 ```
 
-Total complexity remains:
+Total:
 
 ```text
-O(T * M + T * N^2 + N^2 + M log M)
+O(T * M + T * N^2 + M log M + K * N)
 ```
 
-The added terms are lower order because `N` is already bounded by `max_candidate_svcs`, and `E` is bounded by topological pruning. No `O(M^2)`, `O(N^3)`, or `O(2^N)` step is introduced.
+Because `K` is fixed, the new game layer is effectively linear in the bounded service count. It should not be the runtime bottleneck.
+
+If the implementation includes an optional test-only enumerator to validate the closed form, its complexity is:
+
+```text
+O(2^K * K * N)
+```
+
+That enumerator must not be used in the production RCA path.
 
 ## Testing Strategy
 
-Add focused unit tests for:
+Add focused tests for:
 
-- semantic metric grouping does not depend on dataset names or fault labels;
-- phenotype vector is normalized and finite with missing trace data;
-- latency-dominant synthetic incident yields higher latency phenotype than resource phenotype;
-- error-dominant synthetic trace incident yields higher error phenotype;
-- propagation score increases when anomalous connected services appear on high-confidence edges;
-- deterministic Banzhaf still ranks an upstream root above downstream victims when phenotype-conditioned payoff is used;
-- final ranking gives semantic match a bounded boost without overriding service root evidence.
+- noisy-OR coverage is monotone and bounded in `[0, 1]`;
+- noisy-OR payoff has diminishing marginal returns;
+- closed-form Banzhaf matches brute-force exact Banzhaf on a small synthetic game;
+- shared duplicated explanations receive lower marginal contribution than unique local explanations;
+- candidate truncation is deterministic and uses no labels;
+- final metric ranking combines service Banzhaf and local metric evidence only;
+- no dataset name, fault label, root-cause field, or service-name exception appears in the implementation.
 
 Benchmark validation:
 
 - run `gabanzhaf` on `re2-ob`, `re2-ss`, and `re2-tt`;
-- compare `AC@1`, `AC@3`, `AC@5`, `Avg@5`, wall time, and average speed against the current `benchmark_results.json`;
-- inspect any regression larger than `0.05` in `AC@1` or `Avg@5`;
-- verify runtime remains within the Baro-compatible budget and does not add more than a small constant overhead.
+- compare `AC@1`, `AC@3`, `AC@5`, `Avg@5`, wall time, and average speed against the current result file;
+- inspect any large regression, especially in CPU/SOCKET top-1 and DELAY/LOSS top-5;
+- verify runtime remains close to the current budget.
 
 ## Non-Goals
 
-- Do not train a supervised model.
+- Do not add supervised training.
 - Do not use ground-truth root cause or fault labels.
-- Do not branch by dataset name, case ID, or service name.
+- Do not branch by dataset name, case ID, fault type, or service name.
+- Do not add a separate semantic ranking correction.
+- Do not add a phenotype-specific payoff branch.
+- Do not add deterministic fallback or Monte Carlo fallback.
 - Do not build a full metric-level causal graph.
-- Do not introduce graph neural networks, Hawkes training, or Neural Granger training in this change.
-- Do not remove deterministic Banzhaf or the existing MC experimental backend.
+- Do not introduce GNN, Hawkes training, or Neural Granger training.
 
 ## Implementation Scope
 
@@ -278,20 +382,17 @@ Test file:
 
 - `tests/test_gabanzhaf_improvements.py`
 
-The implementation should keep the current orchestration structure:
+The implementation should reduce conceptual complexity where possible:
 
 ```text
 window split
-preprocess
 metric evidence
-service evidence
-topology
-residual scoring
-semantic service evidence
-phenotype inference
-phenotype-conditioned payoff
-deterministic Banzhaf
+service anomaly aggregation
+topology / trace relation
+top-K candidate game
+probabilistic explanation matrix
+closed-form exact Banzhaf
 metric ranking
 ```
 
-This is a single algorithmic improvement, not a rewrite.
+Existing helper functions that only support phenotype or semantic correction should be removed or bypassed if they are no longer part of the method.
