@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 import pandas as pd
 import warnings
 from dataclasses import dataclass
@@ -36,6 +37,10 @@ class _GabanzhafConfig:
     exact_candidate_k: int = 12
     causal_probability_lambda: float = 1.5
     metric_rank_epsilon: float = 0.15
+    early_window_ratio: float = 0.25
+    early_window_min_len: int = 5
+    onset_threshold: float = 1.5
+    onset_consecutive: int = 2
 
     @staticmethod
     def _positive_int_or_default(value, default):
@@ -67,6 +72,16 @@ class _GabanzhafConfig:
                 kwargs.get("causal_probability_lambda", cls.causal_probability_lambda)
             ),
             metric_rank_epsilon=float(kwargs.get("metric_rank_epsilon", cls.metric_rank_epsilon)),
+            early_window_ratio=float(kwargs.get("early_window_ratio", cls.early_window_ratio)),
+            early_window_min_len=cls._positive_int_or_default(
+                kwargs.get("early_window_min_len", cls.early_window_min_len),
+                cls.early_window_min_len,
+            ),
+            onset_threshold=float(kwargs.get("onset_threshold", cls.onset_threshold)),
+            onset_consecutive=cls._positive_int_or_default(
+                kwargs.get("onset_consecutive", cls.onset_consecutive),
+                cls.onset_consecutive,
+            ),
         )
 
 
@@ -407,7 +422,14 @@ def _cheap_service_filter(cols, normal_mat, anomal_mat, top_k):
     denom = np.maximum(col_iqr, baseline_floor)
     denom = np.maximum(denom, global_iqr_floor)
 
-    col_score = np.abs(anomal_mean - normal_mean) / denom  # (M,)
+    full_score = np.abs(anomal_mean - normal_mean) / denom  # (M,)
+    early_len = max(int(round(anomal_mat.shape[0] * _GabanzhafConfig.early_window_ratio)), 1)
+    if early_len < _GabanzhafConfig.early_window_min_len:
+        early_score = full_score
+    else:
+        early_mean = np.nanmean(anomal_mat[:early_len], axis=0)
+        early_score = np.abs(early_mean - normal_mean) / denom
+    col_score = 0.60 * early_score + 0.40 * full_score
 
     svc_scores: dict = {}
     for i, col in enumerate(cols):
@@ -446,13 +468,38 @@ def _norm_trace_component_dict(d):
     return {k: max(0.0, min((float(v) - lo) / span, 1.0)) for k, v in d.items()}
 
 
-def _metric_evidence(normal_mat, anomal_mat, cols):
+def _first_sustained_onset(values, threshold=1.5, consecutive=2):
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.size == 0:
+        return np.full(arr.shape[1] if arr.ndim == 2 else 0, 0, dtype=int)
+    n_rows, n_cols = arr.shape
+    run_len = max(1, int(consecutive))
+    sentinel = n_rows + 1
+    if n_rows < run_len:
+        return np.full(n_cols, sentinel, dtype=int)
+
+    active = arr > float(threshold)
+    # window_all[s, j] is True when active[s : s + run_len, j] are all True.
+    windows = sliding_window_view(active, run_len, axis=0)  # (n_starts, n_cols, run_len)
+    window_all = windows.all(axis=2)                        # (n_starts, n_cols)
+    has_run = window_all.any(axis=0)                        # (n_cols,)
+    first_start = window_all.argmax(axis=0)                 # smallest qualifying start
+    return np.where(has_run, first_start, sentinel).astype(int)
+
+
+def _metric_evidence(normal_mat, anomal_mat, cols, config=None):
     """Metric-level evidence from robust magnitude, persistence and peak.
 
     The score remains unsupervised: it only compares the post-injection window
     with the pre-injection baseline.  Percentile and persistence terms reduce
     the chance that a single noisy spike dominates the ranking.
     """
+    if config is None:
+        config = _GabanzhafConfig.from_kwargs({})
+    normal_mat = np.asarray(normal_mat, dtype=float)
+    anomal_mat = np.asarray(anomal_mat, dtype=float)
     med = np.nanmedian(normal_mat, axis=0)
     q75 = np.nanpercentile(normal_mat, 75, axis=0)
     q25 = np.nanpercentile(normal_mat, 25, axis=0)
@@ -468,15 +515,34 @@ def _metric_evidence(normal_mat, anomal_mat, cols):
     near_zero_baseline = ((q75 - q25) <= 0) & (std <= 1e-6)   # shape (n_cols,)
     rz = np.where(near_zero_baseline, np.clip(rz, 0., 10.), rz)
 
+    anomal_len = rz.shape[0]
+    early_len = max(int(round(anomal_len * config.early_window_ratio)), 1)
+    use_full_for_early = early_len < config.early_window_min_len
+    early_rz = rz if use_full_for_early else rz[:early_len]
+
     mag = _norm01_arr(np.nanpercentile(rz, 95, axis=0))
     peak = _norm01_arr(np.nanmax(rz, axis=0))
     persistence = _norm01_arr(np.mean(rz > 3.0, axis=0))
-    raw = 0.55 * mag + 0.30 * persistence + 0.15 * peak
+    full_raw = 0.55 * mag + 0.30 * persistence + 0.15 * peak
+    full = _norm01_arr(full_raw)
+    early_mag = _norm01_arr(np.nanpercentile(early_rz, 95, axis=0))
+    early_peak = _norm01_arr(np.nanmax(early_rz, axis=0))
+    early_raw = 0.70 * early_mag + 0.30 * early_peak
+    early = full.copy() if use_full_for_early else _norm01_arr(early_raw)
+    onset_idx = _first_sustained_onset(
+        rz,
+        threshold=config.onset_threshold,
+        consecutive=config.onset_consecutive,
+    )
+    raw = 0.60 * early + 0.40 * full
     score = _norm01_arr(raw)
 
     return {
         col: {
             "score": float(score[i]),
+            "full": float(full[i]),
+            "early": float(early[i]),
+            "onset_idx": int(onset_idx[i]),
             "mag": float(mag[i]),
             "persistence": float(persistence[i]),
             "peak": float(peak[i]),
@@ -553,6 +619,25 @@ def _service_evidence(cols, metric_ev):
         for svc in svc_agg
     }
     return _norm_dict(svc_scores)
+
+
+def _service_metric_component(cols, metric_ev, key, reducer="top"):
+    svc_to_values: dict = {}
+    for col in cols:
+        svc_to_values.setdefault(_parse_svc(col), []).append(
+            _finite_nonnegative(metric_ev.get(col, {}).get(key, 0.0))
+        )
+    result = {}
+    for svc, values in svc_to_values.items():
+        arr = np.asarray(values, dtype=float)
+        if arr.size == 0:
+            result[svc] = 0.0
+        elif reducer == "min":
+            result[svc] = float(np.min(arr))
+        else:
+            top = np.sort(arr)[-min(3, len(arr)):]
+            result[svc] = float(0.60 * np.max(arr) + 0.40 * np.mean(top))
+    return result
 
 
 
@@ -743,18 +828,52 @@ def _call_graph_topology_edges(lag_corr_edges, call_graph, pool_svcs, svc_anom_d
     return call_graph_edges
 
 
-def _upstream_maps(svc_names, lag_corr_edges, call_graph_edges, svc_anom_dict, config):
+def _call_graph_residual_allowed(u, v, svc_anom_dict, config, svc_onset=None, svc_early=None):
+    if svc_anom_dict.get(u, 0.) < svc_anom_dict.get(v, 0.) * config.residual_call_graph_ratio:
+        return False
+    if svc_onset is None or svc_early is None:
+        return True
+
+    u_onset = svc_onset.get(u)
+    v_onset = svc_onset.get(v)
+    if u_onset is None or v_onset is None:
+        return True
+    if u_onset < v_onset:
+        return True
+    if u_onset == v_onset:
+        return svc_early.get(u, 0.0) > svc_early.get(v, 0.0)
+    return False
+
+
+def _upstream_maps(
+    svc_names,
+    lag_corr_edges,
+    call_graph_edges,
+    svc_anom_dict,
+    config,
+    svc_onset=None,
+    svc_early=None,
+):
     upstream_map_full = {s: set() for s in svc_names}
     upstream_map_residual = {s: set() for s in svc_names}
     edge_conf = {}
+    call_edge_set = {(u, v) for u, v, _ in call_graph_edges}
 
     for u, v, w in lag_corr_edges + call_graph_edges:
         upstream_map_full.get(v, set()).add(u)
         edge_conf[(u, v)] = max(edge_conf.get((u, v), 0.), w)
     for u, v, _ in lag_corr_edges:
-        upstream_map_residual.get(v, set()).add(u)
+        if (v, u) not in call_edge_set:
+            upstream_map_residual.get(v, set()).add(u)
     for u, v, _ in call_graph_edges:
-        if svc_anom_dict.get(u, 0.) >= svc_anom_dict.get(v, 0.) * config.residual_call_graph_ratio:
+        if _call_graph_residual_allowed(
+            u,
+            v,
+            svc_anom_dict,
+            config,
+            svc_onset=svc_onset,
+            svc_early=svc_early,
+        ):
             upstream_map_residual.get(v, set()).add(u)
 
     return upstream_map_full, upstream_map_residual, edge_conf
@@ -942,9 +1061,11 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     else:
         active_cols, active_normal, active_anomal = cols, normal_mat, anomal_mat
 
-    metric_ev = _metric_evidence(active_normal, active_anomal, active_cols)
+    metric_ev = _metric_evidence(active_normal, active_anomal, active_cols, config=config)
     metric_score = {c: metric_ev[c]["score"] for c in active_cols}
     svc_anom_dict = _service_evidence(active_cols, metric_ev)
+    svc_early = _norm_dict(_service_metric_component(active_cols, metric_ev, "early"))
+    svc_onset = _service_metric_component(active_cols, metric_ev, "onset_idx", reducer="min")
     svc_names = sorted(svc_anom_dict.keys())
     _mark_stage("metric_evidence")
 
@@ -975,7 +1096,13 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     # upstream_map_full: for candidate expansion (all topology edges)
     upstream_map_full, upstream_map_residual, edge_conf = _upstream_maps(
-        svc_names, lag_corr_edges, call_graph_edges, svc_anom_dict, config
+        svc_names,
+        lag_corr_edges,
+        call_graph_edges,
+        svc_anom_dict,
+        config,
+        svc_onset=svc_onset,
+        svc_early=svc_early,
     )
 
     # ── 5. Pre-filter with upstream rescue, then bound runtime ───────────────
@@ -1044,20 +1171,46 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
 
     Final ranking keeps metric-local evidence so metric-level AC@k is not
     collapsed to a service-only score.
+
+    Set env var GABANZHAF_PROFILE=1 to print per-case stage timing to stderr.
+    Stages: trace | preprocess | metric_evidence | topology | banzhaf | ranking
     """
+    import sys
+    _profile = os.environ.get("GABANZHAF_PROFILE") == "1"
+
     args_ns  = kwargs.get("args")
     case_dir = (os.path.dirname(args_ns.data_path)
                 if args_ns and hasattr(args_ns, "data_path") else None)
-    _t_inject    = inject_time if inject_time is not None else 0
+    _t_inject = inject_time if inject_time is not None else 0
+
+    _t0 = perf_counter()
     trace_features = _extract_trace_features(case_dir, _t_inject)
+    _trace_sec = perf_counter() - _t0
 
     runtime_kwargs = dict(kwargs)
     # Experiment flag: GABANZHAF_PREFILTER=1 enables early candidate selection.
     if os.environ.get("GABANZHAF_PREFILTER") == "1":
         runtime_kwargs.setdefault("use_prefilter", True)
+    if _profile:
+        runtime_kwargs["return_stage_timing"] = True
     runtime_kwargs["trace_scores"] = trace_features.trace_scores
     runtime_kwargs["trace_error_scores"] = trace_features.trace_error_scores
     runtime_kwargs["trace_latency_scores"] = trace_features.trace_latency_scores
     runtime_kwargs["call_graph"] = trace_features.call_graph
     runtime_kwargs["sli"] = sli
-    return _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
+
+    result = _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
+
+    if _profile and "stage_timing" in result:
+        st = result["stage_timing"]
+        core_total = sum(st.values())
+        grand_total = _trace_sec + core_total
+        label = case_dir or str(dataset) or "?"
+        parts = (
+            [f"trace={_trace_sec:.3f}s"]
+            + [f"{k}={v:.3f}s" for k, v in st.items()]
+            + [f"core={core_total:.3f}s", f"total={grand_total:.3f}s"]
+        )
+        print(f"[PROFILE] {label}  " + "  ".join(parts), file=sys.stderr)
+
+    return result

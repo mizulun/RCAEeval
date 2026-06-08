@@ -1,0 +1,29 @@
+---
+description: GaBanzhaf coordination workflow - read at the start of every session
+---
+
+# Active Task Context
+
+At the start of every conversation, read `TASK.md` in the repo root and treat it as the active task. The plan details are in `docs/superpowers/plans/2026-06-01-probabilistic-causal-banzhaf.md`.
+
+# Hard Constraints
+
+Never violate these regardless of what the user asks:
+
+- No ground truth, fault labels, dataset names (`re2-ob`, `re2-ss`, `re2-tt`), case IDs, or service-name exceptions in `RCAEval/e2e/gabanzhaf.py`
+- No fallback branches — one unified flow for every incident
+- No phenotype-specific or semantic ranking correction in the main path
+- K=12 fixed candidate game (configurable via `exact_candidate_k`)
+- If you are unsure whether a change violates these constraints, refuse and ask the user
+
+# Sync Protocol
+
+- Before editing, check `TASK.md` for current status and handoff notes
+- After completing a step, update the checkbox in `TASK.md`
+- Commit before switching to the other agent (Claude Code in terminal)
+
+# Primary Files
+
+- `RCAEval/e2e/gabanzhaf.py` — main implementation
+- `tests/test_gabanzhaf_improvements.py` — tests
+- `TASK.md` — shared task state

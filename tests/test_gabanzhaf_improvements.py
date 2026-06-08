@@ -12,7 +12,33 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from RCAEval.e2e.gabanzhaf import _metric_evidence, _extract_call_graph, _gabanzhaf_core
+from RCAEval.e2e.gabanzhaf import (
+    _metric_evidence,
+    _extract_call_graph,
+    _gabanzhaf_core,
+    _first_sustained_onset,
+)
+
+
+def _reference_first_sustained_onset(values, threshold=1.5, consecutive=2):
+    """Naive double-loop reference for the vectorized onset detector."""
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    if arr.size == 0:
+        return np.full(arr.shape[1] if arr.ndim == 2 else 0, 0, dtype=int)
+    n_rows, n_cols = arr.shape
+    run_len = max(1, int(consecutive))
+    onset = np.full(n_cols, n_rows + 1, dtype=int)
+    active = arr > float(threshold)
+    for j in range(n_cols):
+        if n_rows < run_len:
+            continue
+        for i in range(0, n_rows - run_len + 1):
+            if bool(np.all(active[i : i + run_len, j])):
+                onset[j] = i
+                break
+    return onset
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +126,33 @@ def test_metric_evidence_selective_winsorization():
         f"near_zero_score={ev['near_zero_svc_lat']['score']:.3f}, "
         f"normal_score={ev['normal_svc_lat']['score']:.3f}"
     )
+
+
+def test_metric_evidence_exposes_early_and_onset_signals():
+    n_normal = 40
+    n_anomal = 40
+    normal = np.column_stack([
+        np.r_[np.zeros(n_normal)],
+        np.r_[np.zeros(n_normal)],
+    ])
+    early_root = np.r_[np.full(8, 8.0), np.zeros(n_anomal - 8)]
+    slow_victim = np.r_[np.zeros(12), np.full(n_anomal - 12, 4.0)]
+    anomal = np.column_stack([early_root, slow_victim])
+
+    ev = _metric_evidence(normal, anomal, ["root_latency", "victim_latency"])
+
+    assert ev["root_latency"]["early"] > ev["victim_latency"]["early"]
+    assert ev["root_latency"]["onset_idx"] == 0
+    assert ev["victim_latency"]["onset_idx"] == 12
+
+
+def test_metric_evidence_uses_full_window_when_early_window_is_too_short():
+    normal = np.zeros((10, 1), dtype=float)
+    anomal = np.full((4, 1), 5.0, dtype=float)
+
+    ev = _metric_evidence(normal, anomal, ["svc_latency"])
+
+    assert ev["svc_latency"]["early"] == ev["svc_latency"]["full"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -552,6 +605,60 @@ def test_callgraph_edges_reach_banzhaf_topology_when_lag_corr_is_empty(monkeypat
     )
 
     assert np.count_nonzero(captured["prob_matrix"]) > captured["prob_matrix"].shape[0]
+
+
+def test_upstream_maps_excludes_reverse_lag_edge_from_residual_when_callgraph_conflicts():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _upstream_maps
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    full, residual, edge_conf = _upstream_maps(
+        ["callee", "caller"],
+        lag_corr_edges=[("caller", "callee", 0.9)],
+        call_graph_edges=[("callee", "caller", 0.5)],
+        svc_anom_dict={"callee": 0.8, "caller": 0.9},
+        config=cfg,
+        svc_onset={"callee": 2, "caller": 5},
+        svc_early={"callee": 0.7, "caller": 0.6},
+    )
+
+    assert "caller" in full["callee"]
+    assert "caller" not in residual["callee"]
+    assert "callee" in residual["caller"]
+    assert edge_conf[("callee", "caller")] == 0.5
+
+
+def test_upstream_maps_allows_same_bucket_callgraph_suppression_with_early_guard():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _upstream_maps
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    _, residual, _ = _upstream_maps(
+        ["callee", "caller"],
+        lag_corr_edges=[],
+        call_graph_edges=[("callee", "caller", 0.5)],
+        svc_anom_dict={"callee": 0.8, "caller": 0.9},
+        config=cfg,
+        svc_onset={"callee": 3, "caller": 3},
+        svc_early={"callee": 0.7, "caller": 0.6},
+    )
+
+    assert "callee" in residual["caller"]
+
+
+def test_upstream_maps_blocks_same_bucket_callgraph_suppression_without_early_guard():
+    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _upstream_maps
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    _, residual, _ = _upstream_maps(
+        ["callee", "caller"],
+        lag_corr_edges=[],
+        call_graph_edges=[("callee", "caller", 0.5)],
+        svc_anom_dict={"callee": 0.8, "caller": 0.9},
+        config=cfg,
+        svc_onset={"callee": 3, "caller": 3},
+        svc_early={"callee": 0.5, "caller": 0.6},
+    )
+
+    assert "callee" not in residual["caller"]
 
 
 def test_callgraph_does_not_penalise_caller_root_cause():
@@ -1037,6 +1144,26 @@ def test_cheap_service_filter_returns_at_most_top_k():
     assert len(_cheap_service_filter(cols, normal_mat, anomal_mat, top_k=10)) == 5
 
 
+def test_cheap_service_filter_uses_early_window_signal():
+    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
+
+    n_normal = 40
+    n_anomal = 40
+    normal_mat = np.zeros((n_normal, 2), dtype=float)
+    root_anomal = np.r_[np.full(8, 8.0), np.zeros(n_anomal - 8)]
+    victim_anomal = np.r_[np.zeros(12), np.full(n_anomal - 12, 4.0)]
+    anomal_mat = np.column_stack([root_anomal, victim_anomal])
+
+    top_svcs = _cheap_service_filter(
+        ["root_latency", "victim_latency"],
+        normal_mat,
+        anomal_mat,
+        top_k=2,
+    )
+
+    assert top_svcs[0] == "root"
+
+
 def test_gabanzhaf_core_with_prefilter_does_not_promote_constant_baseline_service():
     """End-to-end: a constant-baseline shared-hub service must not rank #1
     when a root-cause service has a clear metric anomaly."""
@@ -1099,3 +1226,46 @@ def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
     ]
     for token in forbidden:
         assert token not in source
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _first_sustained_onset: vectorized implementation matches the loop reference
+# ─────────────────────────────────────────────────────────────────────────────
+def test_first_sustained_onset_matches_reference_on_random_matrices():
+    rng = np.random.default_rng(20260608)
+    for _ in range(50):
+        n_rows = int(rng.integers(1, 40))
+        n_cols = int(rng.integers(1, 25))
+        threshold = float(rng.uniform(0.0, 3.0))
+        consecutive = int(rng.integers(1, 5))
+        # Mix below/above threshold so runs are non-trivial.
+        mat = rng.normal(loc=threshold, scale=1.5, size=(n_rows, n_cols))
+        got = _first_sustained_onset(mat, threshold=threshold, consecutive=consecutive)
+        expected = _reference_first_sustained_onset(
+            mat, threshold=threshold, consecutive=consecutive
+        )
+        assert np.array_equal(got, expected), (
+            f"mismatch rows={n_rows} cols={n_cols} "
+            f"thr={threshold} run={consecutive}\n{got}\n{expected}"
+        )
+
+
+def test_first_sustained_onset_edge_cases():
+    # Empty input → empty array.
+    assert _first_sustained_onset(np.empty((0, 0))).size == 0
+    # 1-D input is treated as a single column.
+    col = np.array([0.0, 2.0, 2.0, 0.0])
+    assert np.array_equal(
+        _first_sustained_onset(col, threshold=1.0, consecutive=2), np.array([1])
+    )
+    # Fewer rows than the run length → "never fired" sentinel (n_rows + 1).
+    short = np.array([[5.0], [5.0]])
+    assert np.array_equal(
+        _first_sustained_onset(short, threshold=1.0, consecutive=3), np.array([3])
+    )
+    # No sustained run anywhere → sentinel for every column.
+    flat = np.zeros((6, 3))
+    assert np.array_equal(
+        _first_sustained_onset(flat, threshold=1.0, consecutive=2),
+        np.array([7, 7, 7]),
+    )
