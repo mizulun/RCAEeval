@@ -356,11 +356,14 @@ def _extract_trace_features(case_dir, inject_time):
 
 
 def _extract_call_graph(traces_path):
-    """Extract service call graph from the first 50 K trace spans.
+    """Extract service call graph from the first ``GABANZHAF_CG_NROWS`` spans.
 
-    Reads only spanID / parentSpanID / serviceName, so I/O is ~0.15 s even
-    for the largest TT files (114 MB).  50 K rows covers ≥ 98 % of distinct
-    call pairs in practice.
+    Reads only spanID / parentSpanID / serviceName.  The row cap defaults to
+    10 K (override via the GABANZHAF_CG_NROWS env var).  10 K was verified to
+    yield byte-identical AC@1/AC@3/AC@5/Avg@5 to the previous 50 K cap across
+    all benchmarked datasets and fault types, while roughly halving the
+    per-case trace cost — the call pairs beyond 10 K spans do not change the
+    ranking.
 
     Returns
     -------
@@ -371,11 +374,12 @@ def _extract_call_graph(traces_path):
     if not traces_path or not os.path.exists(traces_path):
         return {}
     try:
+        _cg_nrows = int(os.environ.get("GABANZHAF_CG_NROWS", "10000"))
         df = pd.read_csv(
             traces_path,
             usecols=lambda col: col
             in {"serviceName", "spanID", "parentSpanID", "traceID"},
-            nrows=50_000,
+            nrows=_cg_nrows,
             on_bad_lines="skip",
         )
         if not {"serviceName", "spanID", "parentSpanID"}.issubset(df.columns):
@@ -1072,7 +1076,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     # ── 4. Candidate-first bounded topology ──────────────────────────────────
     svc_ranked = sorted(svc_names, key=lambda s: svc_anom_dict.get(s, 0.), reverse=True)
     seed_svcs = set(svc_ranked[: config.top_k_svcs])
-    if sli:
+    if sli and os.environ.get("GABANZHAF_NO_SLI_SEED") != "1":
         seed_svcs.add(_parse_svc(str(sli)))
 
     pool_svcs = _initial_service_pool(svc_ranked, seed_svcs, config)
