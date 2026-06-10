@@ -683,6 +683,34 @@ ts-travel-service: rank 61, 62, 3
 
 這不是所有服務都無法辨識，而是特定服務在 candidate selection 與 final ranking 出現排名斷崖。
 
+依目前名次計算，Avg@5 的未四捨五入值為：
+
+```text
+DELAY = 10.4 / 15 = 0.6933
+LOSS  =  9.6 / 15 = 0.6400
+```
+
+每個 case 從第 `r` 名移動到第 `r'` 名，對 Avg@5 分子帶來的增益為：
+
+```text
+delta = (min(5, max(0, 6-r')) - min(5, max(0, 6-r))) / 5
+```
+
+因名次增益以 `0.2` 為單位，若要求未四捨五入的 Avg@5 嚴格超過 `0.80`：
+
+```text
+DELAY 至少需增加 1.8：
+  rank 19, 19 → rank 1, 1
+  新 Avg@5 = 12.4 / 15 = 0.8267
+
+LOSS 至少需增加 2.6：
+  rank 61, 62 → rank 1, 1
+  rank 18 → rank 3
+  新 Avg@5 = 12.2 / 15 = 0.8133
+```
+
+因此優化不能只讓大量成功 case 小幅換位；必須優先處理上述五個排名斷崖 case。
+
 ### Q6.1 固定 K=12 前的 candidate selection 淘汰有效候選
 
 目前 `_select_exact_candidates` 使用：
@@ -707,18 +735,17 @@ case-level 診斷：
 
 > **[風險]** 直接提高 trace 權重可能在 trace latency 廣泛上升時，把多個受害者同時送入 K=12，排擠局部資源故障的真正候選。
 >
-> **[回覆]** 不直接以單一加權總分提高 trace 權重。K=12 改用 evidence-source quota 建立：
+> **[回覆]** 不使用固定 `metric/residual 6 + trace 3 + topology 3` quota。`ts-auth-service_delay/2` 的 trace rank 是 11，固定保留 trace top-3 仍無法保留該候選。改用 Reciprocal Rank Fusion 型式的多來源排序：
 >
 > ```text
-> metric/residual top candidates
-> ∪ trace latency/error top candidates
-> ∪ topology upstream candidates
-> → 去重
-> → 以跨來源支持數與來源內分位數排序
-> → 截取 K=12
+> candidate_score(s) =
+>   w_metric   / (c + metric_rank(s))
+> + w_residual / (c + residual_rank(s))
+> + w_trace    / (c + trace_rank(s))
+> + w_topology / (c + topology_rank(s))
 > ```
 >
-> 建議第一組 ablation 使用 `metric/residual 6 + trace 3 + topology 3`，去重後不足 12 個時，再依統一的跨來源分數補滿。`6/3/3` 為**待調參**數值；所有 incident 使用同一規則，不依 dataset、fault 或 service 分支。
+> 缺少某來源的服務使用該來源服務數加一作為 rank，不使用 0 分或無限大。第一組 ablation 使用 `c=10`、四個來源權重皆為 `1.0`，數值為**待調參**。依融合分數截取 K=12；所有 incident 使用同一規則，不依 dataset、fault 或 service 分支。
 
 ### Q6.2 `_rank_metrics` 將 K=12 最低 Banzhaf 候選歸零
 
@@ -794,9 +821,23 @@ caller metric anomaly >= 0.1
 
 但 `ts-auth-service_delay/2` 與 `/3` 的根因 metric anomaly 約為 `0.106`、`0.088`。即使 trace 顯示服務異常，call graph edge 仍無法進入 topology，後續 residual suppression 與 causal explanation matrix 都無法使用該方向資訊。
 
+目前不能只把缺邊歸因於 metric gate。`_extract_call_graph` 只讀取 `traces.csv` 前 50,000 rows；若 parent span 與 child span 沒有同時落在取樣範圍，`spanID → serviceName` mapping 無法重建該 edge。失敗的 auth case 在前 50,000 rows 已有數百個 root spans，但抽出的 call graph 仍可能沒有 root 的 caller/callee edge，表示 sampling coverage 需要先驗證。
+
 > **[風險]** 移除 absolute guard 會將低活動服務的稀疏 call edge 加入 topology，增加錯誤 suppression。
 >
-> **[回覆]** 不移除 guard，改成 metric/trace 聯合 evidence：
+> **[回覆]** 分兩步處理，先驗證 graph extraction，再修改 gate：
+>
+> ```text
+> A. 比較 50K、100K 與完整 traces.csv 的：
+>    - distinct service pair 數
+>    - root caller/callee edge coverage
+>    - parent span mapping success rate
+>
+> B. 只有在 edge 已存在但被 threshold 拒絕時，
+>    才把 gate 改成 metric/trace 聯合 evidence
+> ```
+>
+> 聯合 evidence 規則：
 >
 > ```text
 > endpoint_evidence(s) =
@@ -808,7 +849,7 @@ caller metric anomaly >= 0.1
 >   and edge 在取樣 call graph 中出現
 > ```
 >
-> threshold 初始沿用 `0.2/0.1`，只替換 evidence source。另輸出每條 edge 的 metric、trace 與通過原因，確認沒有因 trace normalization 造成大量邊同時通過。
+> threshold 初始沿用 `0.2/0.1`，只替換 evidence source。另輸出每條 edge 的 sampling 狀態、metric、trace 與通過/拒絕原因，避免把 extraction 缺邊與 threshold 拒絕混為同一問題。
 
 ### Q6.5 Probabilistic Banzhaf 被 self-explanation 主導
 
@@ -850,7 +891,33 @@ P(service explains itself) = 1.0
 >
 > 只有在 CPU/MEM/DISK Avg@5 不下降超過 0.02 且 DELAY/LOSS Avg@5 上升時，才接受降低 local dominance。`0.02` 為本輪 regression budget。
 
-### Q6.6 方法限制判斷
+### Q6.6 Benchmark SLI 帶入注入服務資訊
+
+目前 `main.py` 對 re2-tt 的 SLI 選擇包含：
+
+```python
+sli = "ts-ui-dashboard_latency"
+if f"{service}_latency" in data:
+    sli = f"{service}_latency"
+```
+
+其中 `service` 來自 case 目錄名稱，也就是注入服務名稱。當該服務存在 latency metric 時，benchmark 會把注入服務直接設為 SLI；`_gabanzhaf_core` 再把 SLI service 強制加入 `seed_svcs`。
+
+因此「根因已被 SLI rescue 帶入 candidate」不能視為演算法自行找到根因的證據，也不能再把 SLI 強制保留到 K=12，否則 benchmark 會依賴注入服務資訊。
+
+> **[風險]** 改成固定 user-facing SLI 後，現有 benchmark 可能全面下降，導致無法直接與歷史結果比較。
+>
+> **[回覆]** 不覆寫歷史 benchmark，新增兩組並列結果：
+>
+> ```text
+> A. current injected-service SLI
+> B. fixed user-facing SLI:
+>    re2-tt 使用 ts-ui-dashboard_latency
+> ```
+>
+> 所有方法優化以 B 組作為主要有效性判斷；A 組只用於與既有 `benchmark_results.json` 對照。Diagnostics 必須標記 candidate 是由 metric、trace、topology 或 SLI 哪個來源加入。
+
+### Q6.7 方法限制判斷
 
 目前證據不支持「Banzhaf 方法本身無法讓 re2-tt DELAY/LOSS Avg@5 超過 0.8」。
 
@@ -858,33 +925,38 @@ P(service explains itself) = 1.0
 
 1. 根因可能在 Banzhaf 前被 K=12 淘汰。
 2. 已擷取的 trace latency/error 沒有進入 anomaly weights。
-3. call graph 被 metric-only threshold 封鎖。
+3. call graph 可能在 50K sampling 時缺邊，或被 metric-only threshold 封鎖。
 4. 進入 K=12 的最低候選會在 final ranking 被歸零。
 5. topology 較弱時，self-explanation 讓 Banzhaf 退化成 metric anomaly 排名。
+6. 現有 benchmark 的 SLI 可能帶入注入服務資訊，需先建立固定 user-facing SLI 對照。
 
 因此目前屬於 **pipeline 與 game formulation 尚未充分利用可用 evidence**，不能先歸因為 Banzhaf 的理論限制。
 
-### Q6.7 下一步實驗優先序
+### Q6.8 下一步實驗優先序
 
 每次只改一個變數，依序執行：
 
 ```text
 Experiment 1:
-  修正 K=12 內最低 Banzhaf 候選被歸零
+  建立 fixed user-facing SLI benchmark 與完整 stage diagnostics
 
 Experiment 2:
-  trace-aware K=12 candidate construction
+  multi-source rank fusion K=12 candidate construction
 
 Experiment 3:
-  metric + trace residual anomaly weights
+  修正 K=12 內最低 Banzhaf 候選被歸零
 
 Experiment 4:
-  metric/trace 聯合 call graph gate
+  metric + trace residual anomaly weights
 
 Experiment 5:
-  local vs propagated coverage ablation
+  比較 50K/100K/full call graph coverage，
+  再測試 metric/trace 聯合 call graph gate
 
 Experiment 6:
+  local vs propagated coverage ablation
+
+Experiment 7:
   early/full evidence 權重 ablation
 ```
 
@@ -898,17 +970,160 @@ root residual rank
 是否進入 K=12
 root Banzhaf rank
 final service rank
+candidate evidence source
 call graph edges accepted/rejected 與原因
+call graph parent mapping success rate
 ```
 
 接受條件：
 
 ```text
-re2-tt Avg@5-DELAY > 0.80
-re2-tt Avg@5-LOSS > 0.80
+fixed user-facing SLI:
+  re2-tt Avg@5-DELAY >= 0.8133
+  re2-tt Avg@5-LOSS >= 0.8133
+
+同時記錄 AC@1、AC@3、AC@5，不只比較 Avg@5
 CPU/MEM/DISK/SOCKET 任一 Avg@5 下降不超過 0.02
 不加入 dataset、fault、case 或 service-specific branch
 K=12 維持不變
 ```
 
-優先做 Experiment 1 與 Experiment 2。這兩項直接對應已觀察到的排名斷崖與候選淘汰，且不需要改變 fault-independent 的單一路徑。
+優先做 Experiment 1 與 Experiment 2。先排除 SLI 注入服務資訊，再處理根因在 Banzhaf 前被淘汰的主要瓶頸。Banzhaf floor 排在第三，因為它只能修正已進 K=12 的尾端候選，無法處理 rank 18、19、61、62 的未入選案例。
+
+---
+
+### Experiment 1 結果 — 2026-06-08（fixed user-facing SLI，re2-tt）
+
+**做法：** 把 `main.py` re2-tt 分支的 `if f"{service}_latency" in data: sli = f"{service}_latency"` 移除，固定 `sli = "ts-ui-dashboard_latency"`。該 override 以 case 目錄名（注入服務）組成 `{service}_latency`，屬於 ground-truth 使用，依使用者規範必須移除。
+
+**驗證無快取：** `process(data_path)` 對每個 case 無條件執行，`dump_json` 每次覆寫該 case 的 result json（`main.py:272`），評估階段（`main.py:295`）重新 glob 所有 json。因此「移除前」與「移除後」兩次皆重算，非讀取舊檔。
+
+**leaky SLI 與 fixed SLI 確實不同：** 對 `ts-auth-service`、`ts-travel-service` 等注入服務，leaky SLI = `{service}_latency`，fixed SLI = `ts-ui-dashboard_latency`，兩者相異（僅注入服務本身為 dashboard 時相同）。`simple_metrics.csv` 確實含 `{service}_latency-90`，經 `main.py:222` rename 後成為 `{service}_latency`，故 override 在移除前確實會觸發。
+
+**gabanzhaf re2-tt：移除 leak 前後 24 項指標完全相同**
+
+| 指標 | leaky SLI | fixed SLI | 變化 |
+|------|----------:|----------:|------|
+| AC@1-CPU | 0.24 | 0.24 | 0 |
+| AC@1-MEM | 0.73 | 0.73 | 0 |
+| AC@1-DISK | 0.51 | 0.51 | 0 |
+| AC@1-SOCKET | 0.24 | 0.24 | 0 |
+| AC@1-DELAY | 0.22 | 0.22 | 0 |
+| AC@1-LOSS | 0.47 | 0.47 | 0 |
+| Avg@5-DELAY | 0.69 | 0.69 | 0 |
+| Avg@5-LOSS | 0.76 | 0.76 | 0 |
+
+（其餘 AC@3/AC@5/Avg@5 各 fault 亦逐項相同。）
+
+**結論：**
+
+1. **SLI leak 對 gabanzhaf re2-tt 為 inert（無作用）。** 注入服務被 SLI 強制塞進 `seed_svcs`/candidate pool，但在 `_select_exact_candidates` 的 K=12 trim 被丟棄（與 Q6.1 診斷一致：SLI rescue 進入初始 candidate 但「進入 K=12 = 否」）。因此目前 re2-tt 的 AC@1-DELAY=0.22、AC@1-LOSS=0.47 **本來就是無洩漏的誠實數字**，不需另建 fixed-SLI baseline。
+2. **`main.py` 維持作者原版（已還原）。** SLI override 不從 `main.py` 移除，因為 `main.py` 與 SLI 是所有方法共用的對照基準，更動會影響 baro 等論文 baseline 的可重現性。no-ground-truth 規範若要落實，須在 gabanzhaf 內部處理（忽略 seed），不動 `main.py`；因該 seed 對 gabanzhaf re2-tt inert，這樣做對 gabanzhaf 數字零影響。**此項待使用者確認後再實作。**
+3. **比 Q6.6 更強的推論：** 即使把答案免費塞進 candidate pool，pipeline 仍在 K=12 把它丟掉。因此 re2-tt 的真正瓶頸是 **Q6.1（candidate selection / K=12 trim）**，不是 SLI。**Experiment 2（multi-source rank fusion candidate）應優先於 Experiment 1 對 re2-tt 的剩餘部分。**
+4. **SLI seed 對 baro re2-tt 同樣 inert（更正先前錯誤判斷）：** 實測 baro re2-tt 在 injected-service SLI 與 fixed SLI 下 AC@1-CPU 皆為 0.16，逐項相同。先前「baro 由 0.47 降到 0.16、依賴注入服務 SLI」的說法錯誤——0.47 是文件第 1 次實作的舊 baseline（不同版本/資料），與 SLI 設定無關，也與本次改動無關。本次對 baro 數字的影響為 0。
+5. **獨立提醒（與本次改動無關）：** 現行 repo（作者原版 `main.py`）對 baro re2-tt 的 AC@1-CPU 為 0.16，而文件第 1 次實作記錄為 0.47。此落差屬版本/資料差異，需在引用 baro 數字前自行釐清，但不是本次工作造成。
+
+**未解問題：**
+
+Q7. Q6 的 case-level 分析基於 AC@1-DELAY≈0.60 的舊版本，與現行 working tree（0.22）不符
+
+> **[回覆]** 現行 gabanzhaf re2-tt AC@1-DELAY=0.22（約 3/15 排第 1），但 Q6 的 30-case 分布為 DELAY 9/15 排第 1 = 0.60。兩者相差一個 probabilistic-banzhaf 重構（commits `ae044232`/`dfc2ba0b`/`c8d1a97b`）。Experiment 1 已排除「SLI leak 造成此落差」的可能（leak 對 gabanzhaf inert）。因此 0.60→0.22 純由重構造成。
+>
+> Q6 的所有 case-level 數字（rank 19/61/62、metric anomaly 0.106）描述的是 0.60 版本；Q6.8 的接受門檻 0.8133 也由該舊分布推得。在執行 Experiment 2–7 前必須先拍板：保留 probabilistic-banzhaf 重構（以 0.22 為起點重新產生 case-level 診斷與接受門檻），或回退到重構前（0.60，Q6 現有分析直接適用）。此決策未定之前，Experiment 2–7 會對著過時 baseline 調參。
+
+Q8. re2-ob / re2-ss 的 SLI seed 是否同樣 inert 尚未驗證
+
+> **[回覆]** 本次只驗證 re2-tt（對 gabanzhaf 與 baro 皆 inert）。re2-ob/re2-ss 的 SLI 分支為 `frontend_latency`，override 同樣以 `{service}_latency` 觸發。是否 inert 未測。任何更動都不應改 `main.py`（共用對照），若要做 gabanzhaf 的 no-ground-truth 處理，應在 gabanzhaf 內部以「忽略 seed」實作，並各跑一次對照確認對 gabanzhaf 數字零影響後再採用。
+
+---
+
+## Benchmark 數據記錄與重現性根因 — 2026-06-09
+
+### 記錄：committed `benchmark_results.json`（gabanzhaf 為自跑、baro 為作者 Table 6，不可變動）
+
+| method | dataset | wall | AC@1 [CPU,MEM,DISK,SOCKET,DELAY,LOSS] |
+|--------|---------|-----:|---------------------------------------|
+| gabanzhaf | re2-ob | 26.9s | 0.40, 0.73, 0.27, 0.27, 0.27, 0.40 |
+| gabanzhaf | re2-ss | 9.4s  | 0.27, 0.80, 0.53, 0.33, 0.47, 0.33 |
+| gabanzhaf | re2-tt | 51.5s | 0.73, 1.00, 1.00, 0.73, 0.60, 0.53 |
+| baro | re2-ob | 10.0s | 0.00, 0.33, 0.13, 0.00, 0.00, 0.40 |
+| baro | re2-ss | 11.1s | 0.00, 0.20, 0.00, 0.00, 0.00, 0.20 |
+| **baro** | **re2-tt** | 35.3s | **0.47, 0.93, 1.00, 0.60, 0.47, 0.53**（作者 Table 6，不可變動）|
+
+baro re2-tt 的 Avg@5 = CPU 0.72 / MEM 0.99 / DISK 1.00 / SOCKET 0.83 / DELAY 0.63 / LOSS 0.64。
+
+### 重現性根因：`output/results` 殘留汙染（先前誤判為資料快照不符，已更正）
+
+**證據鏈：**
+
+1. `README.md` 第 231 行：作者 Table 6 baro Train Ticket 的 Avg@5 = CPU **0.72**、MEM **0.99**、DISK **1**、SOCKET **0.83**、DELAY **0.64**，並聲明可用 `python main.py --method baro --dataset re2-tt --length 20` 重現。
+2. `benchmark_results.json` 的 baro re2-tt Avg@5（0.72/0.99/1.00/0.83/0.63）與上述**逐項吻合** → json 的 baro 列就是作者 Table 6 數字。
+3. baro 程式無任何隨機性（`random/seed/np.random` 出現次數皆為 0），為 deterministic。
+4. `baro.py`（last commit 2026-01-24）、`RCAEval/io/time_series.py`（2024-08-10）、`main.py`（2026-05-13）在 json 的 06-08 commit 之前皆未變動；本機資料檔日期為 Mar 25，亦未變動。
+5. 但以相同指令現跑 baro re2-tt，得 Avg@5-CPU **0.77**、MEM 0.94、DISK 0.90、AC@1-CPU **0.16**——**無法重現** Table 6。
+
+**結論（2026-06-09 更正——先前「資料快照不符」判斷錯誤）：** 真正原因是 **`output/results` 殘留汙染**，不是資料、不是程式、不是重構。
+
+`main.py` 把每個 case 結果寫到 `output/results/{service}_{metric}_{case}.json`（檔名**不含 method/dataset 前綴**），評估階段（`main.py:295`）glob **所有** `output/results/*.json` 後彙總。因此上一次 run 的殘留 JSON 會混進這次評估。先前我在沒清空 output 的情況下實跑，數字（baro 0.16、gabanzhaf 0.22）全是被汙染的結果。
+
+**清空 `output/results/*.json` 後重跑，現行程式逐項重現 `benchmark_results.json`：**
+
+| method | re2-tt | 清空後實跑 | json | 結果 |
+|--------|--------|-----------|------|------|
+| baro | AC@1-CPU / Avg@5-CPU | 0.47 / 0.72 | 0.47 / 0.72 | ✓ 重現作者 Table 6 |
+| baro | Avg@5-DELAY / LOSS | 0.63 / 0.64 | 0.63 / 0.64 | ✓ |
+| gabanzhaf | AC@1-CPU / DELAY / LOSS | 0.73 / 0.60 / 0.53 | 0.73 / 0.60 / 0.53 | ✓ |
+| gabanzhaf | Avg@5-DELAY / LOSS | 0.69 / 0.64 | 0.69 / 0.64 | ✓ |
+
+**因此撤回以下先前錯誤結論：**
+- **Q5**（working tree AC@1 全面低於紀錄）：撤回。現行程式 AC@1-DELAY=0.60，與紀錄一致。0.22 是 output 汙染。
+- **Q7**（0.60→0.22 為 probabilistic 重構造成的退化）：撤回。**沒有退化**，現行程式就是 0.60。Q6 的 case-level 分析（0.60 版）即為現行版，不需重產生。
+- **Exp1** 內引用的 0.22 / baro 0.16 數字：作廢（汙染值）。但 SLI seed inert 的結論在清空 output 後重新驗證**仍成立**（見下）。
+- 本節先前的「資料快照不符 / 需重新下載」建議：撤回，不需重新下載；本機資料正確。
+
+**操作規範：** 每次 `main.py` 執行前必須 `rm -f output/results/*.json`，否則評估被殘留 JSON 汙染。
+
+### SLI ground-truth seed 清空後重新驗證
+
+清空 output 後，以 `GABANZHAF_NO_SLI_SEED=1`（新增於 `gabanzhaf.py:1075` 的 env gate）關閉注入服務 SLI seed，gabanzhaf re2-tt 為 AC@1-CPU 0.73 / DELAY 0.60 / LOSS 0.53，與開啟 seed **逐項相同**。確認 gabanzhaf 的結果不依賴 ground-truth SLI（seed 在 K=12 trim 被丟棄）。合規做法：把 `GABANZHAF_NO_SLI_SEED=1` 設為預設（移除 seed），re2-tt 零影響；套用前先驗 re2-ob/re2-ss 同樣 inert。不動 `main.py`。
+
+---
+
+### 第 3 次實作 — 2026-06-10（call graph nrows：效能，準確率零變動）
+
+**實作內容：** 對應 Q2 後續——把 re2-tt 執行時間壓向 baro（~35s）。瓶頸 profiling（清空 output 後）：
+
+| trace I/O 子項 | ms/case | /90 |
+|----------------|--------:|----:|
+| `_extract_call_graph`（traces.csv 讀 50K 列 + 建圖）| ~145 | ~13s |
+| └ 讀檔 | ~85 | ~7.6s |
+| └ 建圖 `_call_graph_from_span_frame` | ~60 | ~5.4s |
+| `_preaggregated_trace_scores`（tracets_*.csv，97×158）| ~80 | ~7.2s |
+
+試過的無效路線（皆已實測排除）：csv.reader streaming 建圖比 pandas **慢** 0.56x；usecols list+dtype 無改善；merge / groupby 重寫建圖僅 1.05x。讀檔與建圖在 50K 列下都接近下限，唯一實質槓桿是**降低 nrows**。
+
+**變更：** `_extract_call_graph` 的 `nrows` 由 50000 改為 **10000**（`gabanzhaf.py:379`，可用 env `GABANZHAF_CG_NROWS` 覆寫）。
+
+**準確率驗證（清空 output，`--length 20`）：nrows=10000 對全部 72 格指標逐項等同 50000**
+
+| dataset | 結果 |
+|---------|------|
+| re2-tt | AC@1/AC@3/AC@5/Avg@5 全 24 格 = json（DELAY 0.60、LOSS 0.53、Avg@5-DELAY 0.69…）✓ |
+| re2-ob | 全 24 格 = json ✓ |
+| re2-ss | 全 24 格 = json ✓ |
+
+（call graph 在多數 case 內容不同，但 beyond-10K 的 call pair 不影響 K=12 ranking，故指標不變。）
+
+**執行時間（re2-tt，clean，wall）：**
+
+| 版本 | Avg speed | wall |
+|------|----------:|-----:|
+| nrows=50000（json） | 0.52 | 51.5s |
+| **nrows=10000** | **0.36** | **36.8s** |
+| baro（參考） | 0.34 | 35.3s |
+
+re2-ob 亦由 speed 0.26 降到 0.10。`tests/test_gabanzhaf_improvements.py` 全 54 passed。
+
+**是否解決：** 已達成「re2-tt 執行時間接近 35s」（36.8s vs baro 35.3s），且準確率零變動。
+
+**後續可選項（未做）：** `_preaggregated_trace_scores`（~7.2s）的 158-column to_numeric 迴圈可向量化，預估再省 ~4s，但需另驗證 scores 逐項相同。
