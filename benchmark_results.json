@@ -3,7 +3,7 @@
     "method": "gabanzhaf",
     "dataset": "re2-ob",
     "status": "OK",
-    "wall_time_sec": 12.8,
+    "wall_time_sec": 12.7,
     "returncode": 0,
     "AC@1-CPU": 0.4,
     "AC@1-MEM": 0.73,
@@ -35,7 +35,7 @@
     "method": "gabanzhaf",
     "dataset": "re2-ss",
     "status": "OK",
-    "wall_time_sec": 9.4,
+    "wall_time_sec": 9.1,
     "returncode": 0,
     "AC@1-CPU": 0.27,
     "AC@1-MEM": 0.8,
@@ -67,7 +67,7 @@
     "method": "gabanzhaf",
     "dataset": "re2-tt",
     "status": "OK",
-    "wall_time_sec": 38.8,
+    "wall_time_sec": 38.1,
     "returncode": 0,
     "AC@1-CPU": 0.73,
     "AC@1-MEM": 1.0,
@@ -93,13 +93,13 @@
     "Avg@5-SOCKET": 0.89,
     "Avg@5-DELAY": 0.69,
     "Avg@5-LOSS": 0.64,
-    "Avg speed": 0.38
+    "Avg speed": 0.37
   },
   {
     "method": "baro",
     "dataset": "re2-ob",
     "status": "OK",
-    "wall_time_sec": 9.4,
+    "wall_time_sec": 10.0,
     "returncode": 0,
     "AC@1-CPU": 0.0,
     "AC@1-MEM": 0.33,
@@ -125,13 +125,13 @@
     "Avg@5-SOCKET": 0.67,
     "Avg@5-DELAY": 0.67,
     "Avg@5-LOSS": 0.8,
-    "Avg speed": 0.06
+    "Avg speed": 0.07
   },
   {
     "method": "baro",
     "dataset": "re2-ss",
     "status": "OK",
-    "wall_time_sec": 10.6,
+    "wall_time_sec": 10.3,
     "returncode": 0,
     "AC@1-CPU": 0.0,
     "AC@1-MEM": 0.2,
@@ -157,13 +157,13 @@
     "Avg@5-SOCKET": 0.71,
     "Avg@5-DELAY": 0.68,
     "Avg@5-LOSS": 0.8,
-    "Avg speed": 0.08
+    "Avg speed": 0.07
   },
   {
     "method": "baro",
     "dataset": "re2-tt",
     "status": "OK",
-    "wall_time_sec": 35.5,
+    "wall_time_sec": 34.9,
     "returncode": 0,
     "AC@1-CPU": 0.47,
     "AC@1-MEM": 0.93,
@@ -189,6 +189,6 @@
     "Avg@5-SOCKET": 0.83,
     "Avg@5-DELAY": 0.63,
     "Avg@5-LOSS": 0.64,
-    "Avg speed": 0.35
+    "Avg speed": 0.34
   }
 ]

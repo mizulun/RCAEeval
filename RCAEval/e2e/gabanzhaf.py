@@ -24,7 +24,6 @@ class _GabanzhafConfig:
     """Centralized runtime configuration for the GA-Banzhaf pipeline."""
 
     top_k_svcs: int = 15
-    max_candidate_svcs: int = 20
     dk_select_useful: bool = False
     topology_pool_multiplier: int = 2
     topology_pool_extra: int = 5
@@ -60,9 +59,6 @@ class _GabanzhafConfig:
         top_k_svcs = int(kwargs.get("top_k_svcs", cls.top_k_svcs))
         return cls(
             top_k_svcs=top_k_svcs,
-            max_candidate_svcs=int(
-                kwargs.get("max_candidate_svcs", top_k_svcs + cls.topology_pool_extra)
-            ),
             dk_select_useful=bool(kwargs.get("dk_select_useful", cls.dk_select_useful)),
             exact_candidate_k=cls._positive_int_or_default(
                 kwargs.get("exact_candidate_k", cls.exact_candidate_k),
@@ -809,6 +805,15 @@ def _initial_service_pool(svc_ranked, seed_svcs, config):
     return set(svc_ranked[:pool_k]) | set(seed_svcs)
 
 
+def _trace_seed_services(svc_names, trace_scores, top_k):
+    trace_source = trace_scores or {}
+    observed = [svc for svc in svc_names if svc in trace_source]
+    return sorted(
+        observed,
+        key=lambda svc: (-_finite_nonnegative(trace_source.get(svc, 0.0)), svc),
+    )[:max(0, int(top_k))]
+
+
 def _call_graph_topology_edges(lag_corr_edges, call_graph, pool_svcs, svc_anom_dict, config):
     if not call_graph:
         return []
@@ -883,17 +888,11 @@ def _upstream_maps(
     return upstream_map_full, upstream_map_residual, edge_conf
 
 
-def _candidate_services(seed_svcs, upstream_map_full, svc_anom_dict, config):
+def _candidate_services(seed_svcs, upstream_map_full):
     candidates = set(seed_svcs)
     for svc in list(candidates):
         candidates |= upstream_map_full.get(svc, set())
-    if len(candidates) <= config.max_candidate_svcs:
-        return sorted(candidates)
-    return sorted(
-        sorted(candidates, key=lambda s: svc_anom_dict.get(s, 0.), reverse=True)[
-            : config.max_candidate_svcs
-        ]
-    )
+    return sorted(candidates)
 
 
 def _select_exact_candidates(
@@ -901,30 +900,29 @@ def _select_exact_candidates(
     svc_anom_dict,
     svc_residual,
     trace_scores,
-    topology_edges,
     config,
 ):
     k = max(1, int(config.exact_candidate_k))
     candidates = list(dict.fromkeys(candidates))
-    trace_source = trace_scores or {}
-    graph_participation = {svc: 0.0 for svc in candidates}
-    for u, v, w in topology_edges:
-        weight = _finite_nonnegative(w)
-        if u in graph_participation:
-            graph_participation[u] += weight
-        if v in graph_participation:
-            graph_participation[v] += weight
-    graph_participation = _norm_trace_component_dict(graph_participation)
+    sources = (svc_anom_dict or {}, svc_residual or {}, trace_scores or {})
+    source_ranks = []
+    for source in sources:
+        present = [svc for svc in candidates if svc in source]
+        ranked = sorted(
+            present,
+            key=lambda svc: (-_finite_nonnegative(source.get(svc, 0.0)), svc),
+        )
+        ranks = {svc: rank for rank, svc in enumerate(ranked, start=1)}
+        missing_rank = len(ranked) + 1
+        source_ranks.append((ranks, missing_rank))
 
     def score(svc):
-        return (
-            0.50 * _finite_nonnegative(svc_anom_dict.get(svc, 0.0))
-            + 0.40 * _finite_nonnegative(svc_residual.get(svc, 0.0))
-            + 0.05 * _finite_nonnegative(trace_source.get(svc, 0.0))
-            + 0.05 * _finite_nonnegative(graph_participation.get(svc, 0.0))
+        return sum(
+            1.0 / (10.0 + ranks.get(svc, missing_rank))
+            for ranks, missing_rank in source_ranks
         )
 
-    return sorted(candidates, key=lambda svc: (score(svc), svc), reverse=True)[:k]
+    return sorted(candidates, key=lambda svc: (-score(svc), svc))[:k]
 
 
 def _causal_explanation_matrix(
@@ -983,7 +981,6 @@ def _residual_scores(svc_anom_dict, upstream_map_residual, edge_conf, config):
     return residual
 
 
-
 def _finite_nonnegative(value):
     try:
         value = float(value)
@@ -994,7 +991,6 @@ def _finite_nonnegative(value):
     return value
 
 
-
 def _rank_metrics(all_cols, svc_banzhaf, metric_score, config):
     finite_banzhaf = {
         svc: _finite_nonnegative(score)
@@ -1003,7 +999,11 @@ def _rank_metrics(all_cols, svc_banzhaf, metric_score, config):
     if not finite_banzhaf or len(set(finite_banzhaf.values())) == 1:
         nb = {svc: 1.0 for svc in {_parse_svc(col) for col in all_cols}}
     else:
-        nb = _norm_dict(finite_banzhaf)
+        max_banzhaf = max(finite_banzhaf.values())
+        nb = {
+            svc: score / max_banzhaf
+            for svc, score in finite_banzhaf.items()
+        }
     nm = _norm_dict(metric_score)
     epsilon = _finite_nonnegative(config.metric_rank_epsilon)
 
@@ -1026,7 +1026,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     """
     config = _GabanzhafConfig.from_kwargs(kwargs)
     trace_scores = kwargs.get("trace_scores", None)
-    sli = kwargs.get("sli", None)
     return_stage_timing = bool(kwargs.get("return_stage_timing", False))
     stage_timing = {}
     last_tick = perf_counter()
@@ -1076,8 +1075,9 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     # ── 4. Candidate-first bounded topology ──────────────────────────────────
     svc_ranked = sorted(svc_names, key=lambda s: svc_anom_dict.get(s, 0.), reverse=True)
     seed_svcs = set(svc_ranked[: config.top_k_svcs])
-    if sli and os.environ.get("GABANZHAF_NO_SLI_SEED") != "1":
-        seed_svcs.add(_parse_svc(str(sli)))
+    seed_svcs.update(
+        _trace_seed_services(svc_names, trace_scores, config.top_k_svcs)
+    )
 
     pool_svcs = _initial_service_pool(svc_ranked, seed_svcs, config)
     svc_series_full = _service_series_for_pool(cols, no_time, pool_svcs)
@@ -1110,7 +1110,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     )
 
     # ── 5. Pre-filter with upstream rescue, then bound runtime ───────────────
-    cand_list = _candidate_services(seed_svcs, upstream_map_full, svc_anom_dict, config)
+    cand_list = _candidate_services(seed_svcs, upstream_map_full)
 
     # ── 7. Weighted residual + probabilistic causal game ─────────────────────
     # Scale effective confidence by 2× (cap 0.95) so call_graph (0.5→0.95) fully
@@ -1124,7 +1124,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         svc_anom_dict,
         svc_residual,
         trace_scores,
-        topology_edges,
         config,
     )
     game_services = sorted(svc_anom_dict.keys())
@@ -1156,6 +1155,12 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     result = {"ranks": ranks, "node_names": cols}
     if bool(kwargs.get("return_diagnostics", False)):
         result["game_candidates"] = game_candidates
+        result["metric_service_evidence"] = dict(svc_anom_dict)
+        result["trace_service_evidence"] = {
+            svc: _finite_nonnegative((trace_scores or {}).get(svc, 0.0))
+            for svc in svc_names
+        }
+        result["residual_service_evidence"] = dict(svc_residual)
     if return_stage_timing:
         result["stage_timing"] = stage_timing
     return result
