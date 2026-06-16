@@ -757,18 +757,11 @@ def test_gabanzhaf_config_centralizes_runtime_parameters():
     """Runtime knobs should be centralized instead of read ad hoc in the core."""
     cfg = _GabanzhafConfig.from_kwargs({
         "top_k_svcs": "9",
-        "max_candidate_svcs": "14",
         "dk_select_useful": True,
     })
 
     assert cfg.top_k_svcs == 9
-    assert cfg.max_candidate_svcs == 14
     assert cfg.dk_select_useful is True
-
-
-def test_gabanzhaf_config_default_candidate_cap_tracks_top_k():
-    cfg = _GabanzhafConfig.from_kwargs({"top_k_svcs": "11"})
-    assert cfg.max_candidate_svcs == 16
 
 
 def test_banzhaf_power_uses_probabilistic_game_single_flow():
@@ -912,22 +905,20 @@ def test_probabilistic_banzhaf_matches_bruteforce_noisy_or_game():
     assert np.all(closed >= 0.0)
 
 
-def test_select_exact_candidates_uses_fixed_unsupervised_score():
+def test_select_exact_candidates_uses_three_source_rrf():
     from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _select_exact_candidates
 
     cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": 3})
     candidates = ["svc-a", "svc-b", "svc-c", "svc-d"]
     selected = _select_exact_candidates(
         candidates,
-        svc_anom_dict={"svc-a": 0.9, "svc-b": 0.1, "svc-c": 0.5, "svc-d": 0.4},
-        svc_residual={"svc-a": 0.1, "svc-b": 0.9, "svc-c": 0.4, "svc-d": 0.2},
-        trace_scores={"svc-d": 1.0},
-        topology_edges=[("svc-c", "svc-a", 0.8), ("svc-c", "svc-d", 0.7)],
+        svc_anom_dict={"svc-a": 0.9, "svc-b": 0.1, "svc-c": 0.8, "svc-d": 0.7},
+        svc_residual={"svc-a": 0.9, "svc-b": 0.1, "svc-c": 0.8, "svc-d": 0.7},
+        trace_scores={"svc-a": 0.8, "svc-b": 1.0, "svc-c": 0.7, "svc-d": 0.6},
         config=cfg,
     )
 
-    assert len(selected) == 3
-    assert selected[0] in {"svc-a", "svc-c"}
+    assert selected == ["svc-a", "svc-c", "svc-b"]
     assert "svc-b" in selected
 
 
@@ -940,11 +931,50 @@ def test_select_exact_candidates_deduplicates_before_limiting_slots():
         svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8, "svc-c": 0.7},
         svc_residual={},
         trace_scores={},
-        topology_edges=[],
         config=cfg,
     )
 
     assert selected == ["svc-a", "svc-b", "svc-c"]
+
+
+def test_candidate_services_preserves_rescued_candidates_until_exact_selection():
+    from RCAEval.e2e.gabanzhaf import _candidate_services
+
+    candidates = _candidate_services(
+        {"metric-a", "metric-b", "trace-root"},
+        upstream_map_full={"metric-a": {"upstream"}},
+    )
+
+    assert candidates == ["metric-a", "metric-b", "trace-root", "upstream"]
+
+
+def test_trace_seed_services_requires_observed_trace_evidence():
+    from RCAEval.e2e.gabanzhaf import _trace_seed_services
+
+    assert _trace_seed_services(["svc-a", "svc-b"], None, top_k=1) == []
+    assert _trace_seed_services(
+        ["svc-a", "svc-b"],
+        {"svc-b": 0.4, "trace-only": 1.0},
+        top_k=2,
+    ) == ["svc-b"]
+
+
+def test_call_graph_gate_remains_metric_only_when_trace_evidence_is_high():
+    from RCAEval.e2e.gabanzhaf import (
+        _GabanzhafConfig,
+        _call_graph_topology_edges,
+    )
+
+    cfg = _GabanzhafConfig.from_kwargs({})
+    edges = _call_graph_topology_edges(
+        lag_corr_edges=[],
+        call_graph={"caller": {"callee"}},
+        pool_svcs={"callee", "caller"},
+        svc_anom_dict={"callee": 0.05, "caller": 0.05},
+        config=cfg,
+    )
+
+    assert edges == []
 
 
 def test_exact_candidate_k_invalid_values_fall_back_to_default():
@@ -1021,7 +1051,21 @@ def test_rank_metrics_uses_service_banzhaf_times_local_metric_evidence():
     )
 
     assert ranks[0] == "svc-a_cpu"
-    assert ranks.index("svc-a_mem") < ranks.index("svc-b_cpu")
+    assert ranks.index("svc-b_cpu") < ranks.index("svc-a_mem")
+
+
+def test_rank_metrics_keeps_positive_banzhaf_above_non_candidate_service():
+    from RCAEval.e2e.gabanzhaf import _rank_metrics
+
+    cols = ["svc-a_cpu", "svc-c_cpu", "svc-b_cpu"]
+    ranks = _rank_metrics(
+        cols,
+        svc_banzhaf={"svc-a": 1.0, "svc-b": 0.2},
+        metric_score={"svc-a_cpu": 1.0, "svc-b_cpu": 0.1, "svc-c_cpu": 1.0},
+        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
+    )
+
+    assert ranks.index("svc-b_cpu") < ranks.index("svc-c_cpu")
 
 
 def test_rank_metrics_uses_local_metric_evidence_when_banzhaf_ties_positive():
@@ -1075,6 +1119,29 @@ def test_gabanzhaf_core_returns_game_candidates_when_requested():
     assert "stage_timing" in result
     assert "game_candidates" in result
     assert len(result["game_candidates"]) > 0
+
+
+def test_gabanzhaf_core_reports_separate_metric_trace_and_residual_evidence():
+    data = pd.DataFrame({
+        "time": np.arange(12),
+        "svc-a_cpu": [1, 1, 1, 1, 1, 1, 8, 8, 8, 8, 8, 8],
+        "svc-b_cpu": [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2],
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "trace_scores": {"svc-a": 0.2, "svc-b": 1.0},
+            "return_diagnostics": True,
+        },
+    )
+
+    assert result["metric_service_evidence"]["svc-b"] < 1.0
+    assert result["trace_service_evidence"]["svc-b"] == 1.0
+    assert "svc-b" in result["residual_service_evidence"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
