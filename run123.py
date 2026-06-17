@@ -13,6 +13,11 @@ RCAEval 自動化測試腳本
     python run123.py --output results.csv         # 指定輸出摘要檔案
     python run123.py --workers 3                  # 同時執行 3 個任務（預設 3）
     python run123.py --workers 1                  # 關閉平行，循序執行
+    python run123.py --methods gabanzhaf_closed_form gabanzhaf_bruteforce \
+        --datasets re2-ob re2-ss re2-tt --workers 1 \
+        --output benchmark_banzhaf_ablation.csv   # 比較 closed-form 與純枚舉 Banzhaf
+    python run123.py --methods gabanzhaf_approx_banzhaf gabanzhaf_pure_banzhaf \
+        --re2 --workers 1 --output benchmark_banzhaf_ablation.csv
 """
 
 import argparse
@@ -39,6 +44,72 @@ DEFAULT_METHODS = [
     "circa", "microcause", "cloudranger", "easyrca",
     "microrank", "tracerca",
 ]
+
+METHOD_VARIANTS = {
+    "gabanzhaf_approx_banzhaf": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_BANZHAF_MODE": "closed_form"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "banzhaf_mode": "closed_form",
+            "ablation_role": "approx_banzhaf",
+        },
+    },
+    "gabanzhaf_pure_banzhaf": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_BANZHAF_MODE": "bruteforce"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "banzhaf_mode": "bruteforce",
+            "ablation_role": "pure_banzhaf",
+        },
+    },
+    "gabanzhaf_k6": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "6"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 6,
+            "ablation_role": "exact_candidate_k=6",
+        },
+    },
+    "gabanzhaf_k8": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "8"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 8,
+            "ablation_role": "exact_candidate_k=8",
+        },
+    },
+    "gabanzhaf_k10": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "10"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 10,
+            "ablation_role": "exact_candidate_k=10",
+        },
+    },
+    "gabanzhaf_k12": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "12"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 12,
+            "ablation_role": "exact_candidate_k=12",
+        },
+    },
+    "gabanzhaf_k16": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "16"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 16,
+            "ablation_role": "exact_candidate_k=16",
+        },
+    },
+}
 
 # 保存每個 (method, dataset) 的詳細結果（用於後續 print）
 _results_store = {}
@@ -84,21 +155,37 @@ def clear_result_dir(method, dataset):
         shutil.rmtree(rdir)
 
 
+def resolve_method_variant(method):
+    variant = METHOD_VARIANTS.get(method)
+    if variant is None:
+        return method, {}, {}
+    return (
+        variant["base_method"],
+        dict(variant.get("env", {})),
+        dict(variant.get("metadata", {})),
+    )
+
+
 def run_single(method, dataset, length=20, tdelta=0, smoke_test=False):
+    base_method, extra_env, metadata = resolve_method_variant(method)
     rdir = result_dir_for(method, dataset)
     # 刪除上一次同資料集的結果
     clear_result_dir(method, dataset)
 
     cmd = [sys.executable, "main.py",
-           "--method", method, "--dataset", dataset,
+           "--method", base_method, "--dataset", dataset,
            "--length", str(length), "--tdelta", str(tdelta),
            "--result-dir", rdir]
     if smoke_test:
         cmd.append("--test")
 
+    env = os.environ.copy()
+    env.update(extra_env)
+
     start = datetime.now()
     proc = subprocess.run(cmd, text=True, capture_output=True,
-                          cwd=os.path.dirname(os.path.abspath(__file__)))
+                          cwd=os.path.dirname(os.path.abspath(__file__)),
+                          env=env)
     elapsed = round((datetime.now() - start).total_seconds(), 1)
 
     lines = [
@@ -118,6 +205,7 @@ def run_single(method, dataset, length=20, tdelta=0, smoke_test=False):
         "status": "OK" if proc.returncode == 0 else "FAIL",
         "wall_time_sec": elapsed, "returncode": proc.returncode,
     }
+    record.update(metadata)
     if proc.returncode == 0:
         parsed = parse_output(proc.stdout)
         record.update(parsed)
@@ -131,7 +219,17 @@ def run_single(method, dataset, length=20, tdelta=0, smoke_test=False):
 def save_csv(records, path):
     if not records:
         return
-    keys = ["method", "dataset", "status", "wall_time_sec"]
+    metadata_keys = [
+        key
+        for key in [
+            "base_method",
+            "banzhaf_mode",
+            "exact_candidate_k",
+            "ablation_role",
+        ]
+        if any(key in record for record in records)
+    ]
+    keys = ["method"] + metadata_keys + ["dataset", "status", "wall_time_sec"]
     metric_keys = sorted({
         k for r in records for k in r
         if any(k.startswith(f"{m}-") for m in METRICS) or k == "Avg speed"
