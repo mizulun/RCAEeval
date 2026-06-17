@@ -1,107 +1,72 @@
-"""Tests for gabanzhaf DELAY/LOSS improvements.
+"""Tests for the pure-Banzhaf gabanzhaf pipeline.
 
-Three behaviors under test:
-1. _metric_evidence: Winsorization caps rz at 10 (no unbounded scores)
-2. _extract_call_graph: extracts caller→callee from traces.csv (50K row limit)
-3. _gabanzhaf_core: call graph topology demotes callers of root cause
+After ablation showed trace onset, call-graph and residual stages were
+net-negative on re2 (see benchmark_*.json), the pipeline was stripped to:
+metric evidence → service evidence → lag-1 correlation topology →
+probabilistic noisy-OR Banzhaf → rank by Banzhaf score.  These tests cover
+the surviving math core, the configuration, and the entry point.
 """
+import importlib.util
 import os
-import tempfile
-import importlib
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from RCAEval.e2e.gabanzhaf import (
-    _metric_evidence,
-    _extract_call_graph,
-    _gabanzhaf_core,
-    _first_sustained_onset,
+# Load the module directly from its file so the tests do not drag in the
+# torch-dependent RCAEval.e2e package __init__ (gabanzhaf itself needs none of it).
+_spec = importlib.util.spec_from_file_location(
+    "gabanzhaf_under_test",
+    pathlib.Path(__file__).resolve().parent.parent / "RCAEval" / "e2e" / "gabanzhaf.py",
 )
+gabanzhaf_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(gabanzhaf_mod)
 
-
-def _reference_first_sustained_onset(values, threshold=1.5, consecutive=2):
-    """Naive double-loop reference for the vectorized onset detector."""
-    arr = np.asarray(values, dtype=float)
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 1)
-    if arr.size == 0:
-        return np.full(arr.shape[1] if arr.ndim == 2 else 0, 0, dtype=int)
-    n_rows, n_cols = arr.shape
-    run_len = max(1, int(consecutive))
-    onset = np.full(n_cols, n_rows + 1, dtype=int)
-    active = arr > float(threshold)
-    for j in range(n_cols):
-        if n_rows < run_len:
-            continue
-        for i in range(0, n_rows - run_len + 1):
-            if bool(np.all(active[i : i + run_len, j])):
-                onset[j] = i
-                break
-    return onset
+_GabanzhafConfig = gabanzhaf_mod._GabanzhafConfig
+_gabanzhaf_core = gabanzhaf_mod._gabanzhaf_core
+_metric_evidence = gabanzhaf_mod._metric_evidence
+_banzhaf_power = gabanzhaf_mod._banzhaf_power
+_noisy_or_coverage = gabanzhaf_mod._noisy_or_coverage
+_probabilistic_banzhaf = gabanzhaf_mod._probabilistic_banzhaf
+_select_exact_candidates = gabanzhaf_mod._select_exact_candidates
+_candidate_services = gabanzhaf_mod._candidate_services
+_causal_explanation_matrix = gabanzhaf_mod._causal_explanation_matrix
+_rank_metrics = gabanzhaf_mod._rank_metrics
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Winsorization in _metric_evidence
+# 1. Metric evidence: Winsorization and early-window sensitivity
+# (_metric_evidence returns {col: score}; score blends 0.6*early + 0.4*full)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_metric_evidence_winsorizes_near_zero_baseline():
-    """Near-zero baseline metric must not produce unbounded rz scores.
-
-    Reproduces the LOSS failure mode: a service with near-zero normal latency
-    gets a tiny non-zero anomaly value → raw IQR-normalized score would be
-    astronomical. After Winsorization the score must be ≤ 1.0 (normalised).
-    """
+    """Near-zero baseline metric must not produce unbounded rz scores."""
     rng = np.random.default_rng(0)
     n_rows, n_cols = 100, 3
 
-    # normal: near-zero baseline (simulates services with no traffic)
     normal = np.zeros((n_rows, n_cols))
     normal[:, 0] = rng.uniform(0, 0.001, n_rows)   # near-zero baseline
 
-    # anomaly: one column shoots up (would produce ~1e6 IQR-units without cap)
     anomal = np.zeros((n_rows, n_cols))
     anomal[:, 0] = rng.uniform(100, 200, n_rows)    # large anomaly
 
     cols = ["svc_latency", "svc_cpu", "svc_mem"]
     ev = _metric_evidence(normal, anomal, cols)
 
-    # All scores must be in [0, 1] — normalisation already does this,
-    # but the key check is that the near-zero-baseline column does NOT
-    # dominate at exactly 1.0 while all others collapse to 0.0.
-    scores = [ev[c]["score"] for c in cols]
+    scores = [ev[c] for c in cols]
     assert all(0.0 <= s <= 1.0 for s in scores), f"Scores out of [0,1]: {scores}"
-
-    # With Winsorization: the anomalous column still wins, but the gap
-    # between columns should not be extreme (other cols get non-zero scores).
-    # Without Winsorization the near-zero-baseline col's rz is ~1e5 while
-    # others are ~0 → after norm, anomalous col = 1.0, rest = 0.0.
-    # With Winsorization all rz are capped at 10 → fairer comparison.
-    anomalous_score = ev["svc_latency"]["score"]
-    other_scores = [ev["svc_cpu"]["score"], ev["svc_mem"]["score"]]
-    # The near-zero col should still win (highest score)
-    assert anomalous_score == max(scores), "Anomalous column should have highest score"
+    assert ev["svc_latency"] == max(scores), "Anomalous column should win"
 
 
 def test_metric_evidence_selective_winsorization():
-    """Selective Winsorization: only cap metrics with near-constant normal period.
-
-    - col 0: near-zero baseline (IQR=0, std=0) → Winsorization applies → capped at 10
-    - col 1: normal baseline (IQR>0) → Winsorization does NOT apply → full rz preserved
-
-    Without selective Winsorization, near-zero col would dominate with rz ~100
-    (using iqr=1 fallback). With selective cap, near-zero col is capped at 10
-    while normal col keeps its higher rz, so normal col can have equal or higher mag.
-    """
+    """A near-constant-baseline column (capped at rz=10) must not dominate a
+    column whose real variation gives a higher uncapped rz."""
     n_rows = 100
 
-    # col 0: near-constant normal baseline (IQR=0, std=0) → iqr fallback = 1
-    # anomaly value = 50 → rz = 50/1 = 50 (capped to 10 by selective Winsorization)
     normal_0 = np.zeros(n_rows)        # exactly constant → std=0, IQR=0
-    anomal_0 = np.full(n_rows, 50.0)  # rz would be 50 without cap
+    anomal_0 = np.full(n_rows, 50.0)   # rz would be 50 without cap
 
-    # col 1: real baseline variation (IQR>0) → NOT Winsorized
-    # anomaly gives rz ~15 (above the cap value of 10, to confirm no cap)
     rng = np.random.default_rng(0)
     normal_1 = rng.normal(100.0, 5.0, n_rows)  # std~5, IQR~6.7
     anomal_1 = np.full(n_rows, 200.0)           # |200-100|/6.7 ≈ 14.9
@@ -112,668 +77,45 @@ def test_metric_evidence_selective_winsorization():
 
     ev = _metric_evidence(normal, anomal, cols)
 
-    # near_zero_svc_lat: rz was 50, capped to 10 → after norm: mag ≤ 1.0
-    # normal_svc_lat: rz ~14.9, NOT capped → after norm: mag > near_zero if rz > 10
-    # The normal col should win (rz ~15 > capped 10)
-    assert ev["normal_svc_lat"]["mag"] >= ev["near_zero_svc_lat"]["mag"], (
-        f"Non-Winsorized col should have >= mag than capped col. "
-        f"normal={ev['normal_svc_lat']['mag']:.3f}, near_zero={ev['near_zero_svc_lat']['mag']:.3f}"
-    )
-
-    # And near_zero is effectively capped (score should not be 1.0 if normal col is higher)
-    assert ev["near_zero_svc_lat"]["score"] <= ev["normal_svc_lat"]["score"] + 0.01, (
-        f"Near-zero col should not dominate. "
-        f"near_zero_score={ev['near_zero_svc_lat']['score']:.3f}, "
-        f"normal_score={ev['normal_svc_lat']['score']:.3f}"
-    )
+    assert ev["near_zero_svc_lat"] <= ev["normal_svc_lat"] + 0.01
 
 
-def test_metric_evidence_exposes_early_and_onset_signals():
-    n_normal = 40
-    n_anomal = 40
-    normal = np.column_stack([
-        np.r_[np.zeros(n_normal)],
-        np.r_[np.zeros(n_normal)],
-    ])
-    early_root = np.r_[np.full(8, 8.0), np.zeros(n_anomal - 8)]
-    slow_victim = np.r_[np.zeros(12), np.full(n_anomal - 12, 4.0)]
+def test_metric_evidence_rewards_early_onset():
+    """Score weights the early window 0.6, so an early-onset signal outscores a
+    late-onset victim of equal magnitude."""
+    normal = np.column_stack([np.zeros(40), np.zeros(40)])
+    early_root = np.r_[np.full(8, 8.0), np.zeros(32)]
+    slow_victim = np.r_[np.zeros(12), np.full(28, 4.0)]
     anomal = np.column_stack([early_root, slow_victim])
 
     ev = _metric_evidence(normal, anomal, ["root_latency", "victim_latency"])
 
-    assert ev["root_latency"]["early"] > ev["victim_latency"]["early"]
-    assert ev["root_latency"]["onset_idx"] == 0
-    assert ev["victim_latency"]["onset_idx"] == 12
-
-
-def test_metric_evidence_uses_full_window_when_early_window_is_too_short():
-    normal = np.zeros((10, 1), dtype=float)
-    anomal = np.full((4, 1), 5.0, dtype=float)
-
-    ev = _metric_evidence(normal, anomal, ["svc_latency"])
-
-    assert ev["svc_latency"]["early"] == ev["svc_latency"]["full"]
+    assert ev["root_latency"] > ev["victim_latency"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. _extract_call_graph
+# 2. Banzhaf power index
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _make_traces_csv(rows, path):
-    """Write a minimal traces.csv for testing."""
-    df = pd.DataFrame(rows, columns=["serviceName", "spanID", "parentSpanID",
-                                     "startTimeMillis", "statusCode", "duration"])
-    df.to_csv(path, index=False)
-
-
-def test_extract_call_graph_basic():
-    """Call graph extracts correct caller→callee from parentSpanID links."""
-    rows = [
-        # span A (svc-a) is the root span (no parent in dataset)
-        ("svc-a", "span-a", "root-span", 1000, 0, 10),
-        # span B (svc-b) called by svc-a
-        ("svc-b", "span-b", "span-a", 1001, 0, 5),
-        # span C (svc-c) called by svc-b
-        ("svc-c", "span-c", "span-b", 1002, 0, 3),
-    ]
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-        path = f.name
-    try:
-        _make_traces_csv(rows, path)
-        cg = _extract_call_graph(path)
-        # svc-a calls svc-b
-        assert "svc-a" in cg, f"svc-a should be a caller. cg={cg}"
-        assert "svc-b" in cg["svc-a"], f"svc-a should call svc-b. cg={cg}"
-        # svc-b calls svc-c
-        assert "svc-b" in cg, f"svc-b should be a caller. cg={cg}"
-        assert "svc-c" in cg["svc-b"], f"svc-b should call svc-c. cg={cg}"
-    finally:
-        os.unlink(path)
-
-
-def test_extract_call_graph_no_self_loops():
-    """Same service calling itself (e.g., internal spans) must not appear."""
-    rows = [
-        ("svc-a", "span-a1", "span-root", 1000, 0, 10),
-        ("svc-a", "span-a2", "span-a1", 1001, 0, 5),  # same svc → internal
-        ("svc-b", "span-b",  "span-a1", 1002, 0, 3),
-    ]
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-        path = f.name
-    try:
-        _make_traces_csv(rows, path)
-        cg = _extract_call_graph(path)
-        if "svc-a" in cg:
-            assert "svc-a" not in cg["svc-a"], "Self-loop should be excluded"
-    finally:
-        os.unlink(path)
-
-
-def test_extract_call_graph_missing_file():
-    """Missing traces file must return empty dict (RE1 / no-trace fallback)."""
-    cg = _extract_call_graph("/nonexistent/path/traces.csv")
-    assert cg == {}, f"Expected empty dict, got {cg}"
-
-
-def test_extract_call_graph_row_limit():
-    """Function must only read first 50K rows (fast path for large files)."""
-    # Build a traces file with >50K rows; the extra rows introduce a new edge
-    # that should NOT appear in the result (because we cap at 50K rows).
-    n_rows = 60_000
-    span_ids   = [f"span-{i}" for i in range(n_rows)]
-    parent_ids = ["span-root"] + span_ids[:-1]
-    # First 50K rows: svc-a → svc-b edges
-    svc_names  = ["svc-a" if i % 2 == 0 else "svc-b" for i in range(n_rows)]
-    # Row 55000: introduce svc-z → svc-x edge (should be ignored)
-    svc_names[55000] = "svc-z"
-    svc_names[55001] = "svc-x"
-    # Make span 55001's parent = span 55000
-    parent_ids[55001] = span_ids[55000]
-
-    rows = list(zip(svc_names, span_ids, parent_ids,
-                    [1000] * n_rows, [0] * n_rows, [5] * n_rows))
-
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-        path = f.name
-    try:
-        _make_traces_csv(rows, path)
-        cg = _extract_call_graph(path)
-        # svc-z→svc-x edge is beyond 50K rows and must not appear
-        assert "svc-z" not in cg or "svc-x" not in cg.get("svc-z", set()), (
-            "Edge beyond 50K row limit should not be extracted"
-        )
-    finally:
-        os.unlink(path)
-
-
-def test_extract_call_graph_uses_trace_id_when_span_ids_repeat():
-    rows = [
-        ("trace-1", "svc-a", "root", "none", 1000, 0, 10),
-        ("trace-1", "svc-b", "child", "root", 1001, 0, 5),
-        ("trace-2", "svc-x", "root", "none", 1002, 0, 10),
-        ("trace-2", "svc-y", "child", "root", 1003, 0, 5),
-    ]
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-        path = f.name
-    try:
-        pd.DataFrame(
-            rows,
-            columns=[
-                "traceID",
-                "serviceName",
-                "spanID",
-                "parentSpanID",
-                "startTimeMillis",
-                "statusCode",
-                "duration",
-            ],
-        ).to_csv(path, index=False)
-
-        cg = _extract_call_graph(path)
-
-    finally:
-        os.unlink(path)
-
-    assert cg == {"svc-a": {"svc-b"}, "svc-x": {"svc-y"}}
-
-
-from RCAEval.e2e.gabanzhaf import _extract_trace_features, _TraceFeatures
-
-
-def test_extract_trace_features_returns_scores_and_call_graph():
-    rows = [
-        ("svc-a", "span-a", "root", 1000, 0, 10),
-        ("svc-b", "span-b", "span-a", 1001, 0, 5),
-        ("svc-b", "span-c", "span-a", 60000, 1, 200),
-        ("svc-c", "span-d", "span-b", 60001, 0, 1),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "traces.csv")
-        _make_traces_csv(rows, path)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert isinstance(features, _TraceFeatures)
-    assert "svc-b" in features.trace_scores
-    assert features.trace_scores["svc-b"] > 0.0
-    assert features.call_graph == {"svc-a": {"svc-b"}, "svc-b": {"svc-c"}}
-
-
-def test_extract_trace_features_call_graph_uses_trace_id_when_span_ids_repeat():
-    rows = [
-        ("trace-1", "svc-a", "root", "none", 1000, 0, 10),
-        ("trace-1", "svc-b", "child", "root", 60000, 0, 20),
-        ("trace-2", "svc-x", "root", "none", 1002, 0, 10),
-        ("trace-2", "svc-y", "child", "root", 60001, 0, 20),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "traces.csv")
-        pd.DataFrame(
-            rows,
-            columns=[
-                "traceID",
-                "serviceName",
-                "spanID",
-                "parentSpanID",
-                "startTimeMillis",
-                "statusCode",
-                "duration",
-            ],
-        ).to_csv(path, index=False)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.call_graph == {"svc-a": {"svc-b"}, "svc-x": {"svc-y"}}
-
-
-def test_extract_trace_features_exposes_error_and_latency_components():
-    rows = [
-        ("svc-a", "span-a0", "root", 1000, 0, 10),
-        ("svc-b", "span-b0", "span-a0", 1001, 0, 10),
-        ("svc-a", "span-a1", "root-2", 60000, 1, 10),
-        ("svc-b", "span-b1", "span-a1", 60001, 0, 300),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "traces.csv")
-        _make_traces_csv(rows, path)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.trace_scores is not None
-    assert features.trace_error_scores is not None
-    assert features.trace_latency_scores is not None
-    assert features.trace_error_scores["svc-a"] > features.trace_error_scores.get("svc-b", 0.0)
-    assert features.trace_latency_scores["svc-b"] > features.trace_latency_scores.get("svc-a", 0.0)
-
-
-def test_extract_trace_features_preserves_singleton_component_evidence():
-    rows = [
-        ("svc-a", "span-a0", "root", 1000, 0, 10),
-        ("svc-a", "span-a1", "root-2", 60000, 1, 300),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "traces.csv")
-        _make_traces_csv(rows, path)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.trace_error_scores is not None
-    assert features.trace_latency_scores is not None
-    assert features.trace_error_scores["svc-a"] > 0.0
-    assert features.trace_latency_scores["svc-a"] > 0.0
-
-
-def test_extract_trace_features_missing_file_returns_neutral_features():
-    features = _extract_trace_features("/nonexistent/path", inject_time=50)
-    assert features == _TraceFeatures(
-        trace_scores=None,
-        trace_error_scores=None,
-        trace_latency_scores=None,
-        call_graph={},
-    )
-
-
-def test_extract_trace_features_keeps_call_graph_when_score_columns_missing():
-    rows = [
-        ("svc-a", "span-a", "root"),
-        ("svc-b", "span-b", "span-a"),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "traces.csv")
-        pd.DataFrame(rows, columns=["serviceName", "spanID", "parentSpanID"]).to_csv(
-            path, index=False
-        )
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.trace_scores is None
-    assert features.call_graph == {"svc-a": {"svc-b"}}
-
-
-def test_extract_trace_features_keeps_scores_when_span_columns_missing():
-    rows = [
-        ("svc-a", 1000, 0, 10),
-        ("svc-a", 60000, 1, 200),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "traces.csv")
-        pd.DataFrame(
-            rows,
-            columns=["serviceName", "startTimeMillis", "statusCode", "duration"],
-        ).to_csv(path, index=False)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.call_graph == {}
-    assert features.trace_scores is not None
-    assert "svc-a" in features.trace_scores
-
-
-def test_extract_trace_features_uses_preaggregated_trace_scores_without_raw_traces():
-    with tempfile.TemporaryDirectory() as d:
-        pd.DataFrame(
-            {
-                "time": [10, 20, 60, 70],
-                "svc-a_GET": [0, 0, 5, 6],
-                "svc-b_GET": [0, 0, 0, 0],
-            }
-        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
-        pd.DataFrame(
-            {
-                "time": [10, 20, 60, 70],
-                "svc-a_GET": [10, 10, 10, 10],
-                "svc-b_GET": [10, 10, 80, 90],
-            }
-        ).to_csv(os.path.join(d, "tracets_lat.csv"), index=False)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.call_graph == {}
-    assert features.trace_scores is not None
-    assert features.trace_scores["svc-a"] > features.trace_scores["svc-b"]
-
-
-def test_extract_trace_features_preserves_preaggregated_singleton_component_evidence():
-    with tempfile.TemporaryDirectory() as d:
-        pd.DataFrame(
-            {
-                "time": [10, 20, 60, 70],
-                "svc-a_GET": [0, 0, 3, 5],
-            }
-        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
-        pd.DataFrame(
-            {
-                "time": [10, 20, 60, 70],
-                "svc-a_GET": [10, 10, 80, 90],
-            }
-        ).to_csv(os.path.join(d, "tracets_lat.csv"), index=False)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.trace_error_scores is not None
-    assert features.trace_latency_scores is not None
-    assert features.trace_error_scores["svc-a"] > 0.0
-    assert features.trace_latency_scores["svc-a"] > 0.0
-
-
-def test_preaggregated_trace_scores_parse_service_names_from_right_suffix():
-    with tempfile.TemporaryDirectory() as d:
-        pd.DataFrame(
-            {
-                "time": [10, 20, 60, 70],
-                "order_service_GET": [0, 0, 3, 5],
-            }
-        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    assert features.trace_error_scores is not None
-    assert "order_service" in features.trace_error_scores
-    assert "order" not in features.trace_error_scores
-
-
-def test_extract_trace_features_prefers_preaggregated_scores_over_raw_trace_scan(monkeypatch):
-    read_calls = []
-    real_read_csv = pd.read_csv
-
-    def tracking_read_csv(path, *args, **kwargs):
-        read_calls.append((os.path.basename(str(path)), kwargs.get("chunksize")))
-        return real_read_csv(path, *args, **kwargs)
-
-    monkeypatch.setattr(pd, "read_csv", tracking_read_csv)
-
-    rows = [
-        ("svc-a", "span-a", "root"),
-        ("svc-b", "span-b", "span-a"),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        pd.DataFrame(rows, columns=["serviceName", "spanID", "parentSpanID"]).to_csv(
-            os.path.join(d, "traces.csv"), index=False
-        )
-        pd.DataFrame(
-            {"time": [10, 60], "svc-a_GET": [0, 9], "svc-b_GET": [0, 0]}
-        ).to_csv(os.path.join(d, "tracets_err.csv"), index=False)
-
-        features = _extract_trace_features(d, inject_time=50)
-
-    trace_reads = [call for call in read_calls if call[0] == "traces.csv"]
-    assert trace_reads == [("traces.csv", None)]
-    assert features.call_graph == {"svc-a": {"svc-b"}}
-    assert features.trace_scores["svc-a"] > 0.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Call graph topology demotes callers in _gabanzhaf_core
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _make_simple_dataframe(svc_root, svc_caller, inject_row=50, n_rows=100):
-    """Synthetic metrics: svc_root has delay anomaly; svc_caller shows propagated latency."""
-    rng = np.random.default_rng(42)
-    time_col = list(range(n_rows))
-
-    # Root cause: latency spikes at inject_row
-    root_lat  = np.concatenate([rng.normal(10, 1, inject_row),
-                                 rng.normal(200, 10, n_rows - inject_row)])
-    # Caller: smaller propagated spike (caller waits for root)
-    call_lat  = np.concatenate([rng.normal(15, 1, inject_row),
-                                 rng.normal(80, 10, n_rows - inject_row)])
-    # Both have normal cpu
-    root_cpu  = rng.normal(30, 2, n_rows)
-    call_cpu  = rng.normal(25, 2, n_rows)
-
-    df = pd.DataFrame({
-        "time": time_col,
-        f"{svc_root}_latency-50": root_lat,
-        f"{svc_root}_cpu":        root_cpu,
-        f"{svc_caller}_latency-50": call_lat,
-        f"{svc_caller}_cpu":        call_cpu,
-    })
-    return df
-
-
-def test_callgraph_demotes_caller_service():
-    """With correct call graph, the caller of the root cause must rank below it.
-
-    Setup:
-    - svc-root has injected delay (HIGH latency: score will exceed 0.2 threshold)
-    - svc-caller calls svc-root, shows propagated (but smaller) latency spike
-    - call_graph = {"svc-caller": {"svc-root"}}  (caller calls root)
-    - Expected: svc-root ranked #1, svc-caller ranked #2
-
-    Without call graph, svc-caller might beat svc-root because Banzhaf
-    topology built from lag-correlation could be wrong.
-    Note: svc-root must have anomaly score ≥ 0.2 for the call graph edge to
-    activate (the guard prevents adding edges for unaffected callees).
-    """
-    svc_root   = "svc-root"
-    svc_caller = "svc-caller"
-    inject_row = 50
-
-    df = _make_simple_dataframe(svc_root, svc_caller, inject_row=inject_row)
-    inject_time = inject_row  # "time" column = row index
-
-    call_graph = {svc_caller: {svc_root}}  # caller calls root → root explains caller
-
-    result = _gabanzhaf_core(
-        df, inject_time=inject_time, dataset=None, anomalies=None,
-        kwargs={"call_graph": call_graph}
-    )
-
-    ranks = result["ranks"]
-    # Extract service-level ranking (take first occurrence per service)
-    svc_order = []
-    seen = set()
-    for col in ranks:
-        svc = col.rsplit("_", 1)[0]
-        if svc not in seen:
-            svc_order.append(svc)
-            seen.add(svc)
-
-    assert svc_order[0] == svc_root, (
-        f"Root cause should rank first. Got order: {svc_order}"
-    )
-
-
-def test_callgraph_edges_reach_banzhaf_topology_when_lag_corr_is_empty(monkeypatch):
-    svc_root = "svc-root"
-    svc_caller = "svc-caller"
-    inject_row = 50
-    df = _make_simple_dataframe(svc_root, svc_caller, inject_row=inject_row)
-    df["svc-neutral_latency-50"] = 10.0
-    df["svc-neutral_cpu"] = 20.0
-    captured = {}
-
-    monkeypatch.setattr(gabanzhaf_mod, "_build_topology", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        gabanzhaf_mod,
-        "_call_graph_topology_edges",
-        lambda *args, **kwargs: [(svc_root, svc_caller, 0.5)],
-    )
-
-    def capture_banzhaf(prob_matrix, anomaly_weights, config):
-        captured["prob_matrix"] = np.asarray(prob_matrix).copy()
-        return np.ones(prob_matrix.shape[0], dtype=float)
-
-    monkeypatch.setattr(gabanzhaf_mod, "_banzhaf_power", capture_banzhaf)
-
-    _gabanzhaf_core(
-        df,
-        inject_time=inject_row,
-        dataset=None,
-        anomalies=None,
-        kwargs={"call_graph": {svc_caller: {svc_root}}},
-    )
-
-    assert np.count_nonzero(captured["prob_matrix"]) > captured["prob_matrix"].shape[0]
-
-
-def test_upstream_maps_excludes_reverse_lag_edge_from_residual_when_callgraph_conflicts():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _upstream_maps
-
-    cfg = _GabanzhafConfig.from_kwargs({})
-    full, residual, edge_conf = _upstream_maps(
-        ["callee", "caller"],
-        lag_corr_edges=[("caller", "callee", 0.9)],
-        call_graph_edges=[("callee", "caller", 0.5)],
-        svc_anom_dict={"callee": 0.8, "caller": 0.9},
-        config=cfg,
-        svc_onset={"callee": 2, "caller": 5},
-        svc_early={"callee": 0.7, "caller": 0.6},
-    )
-
-    assert "caller" in full["callee"]
-    assert "caller" not in residual["callee"]
-    assert "callee" in residual["caller"]
-    assert edge_conf[("callee", "caller")] == 0.5
-
-
-def test_upstream_maps_allows_same_bucket_callgraph_suppression_with_early_guard():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _upstream_maps
-
-    cfg = _GabanzhafConfig.from_kwargs({})
-    _, residual, _ = _upstream_maps(
-        ["callee", "caller"],
-        lag_corr_edges=[],
-        call_graph_edges=[("callee", "caller", 0.5)],
-        svc_anom_dict={"callee": 0.8, "caller": 0.9},
-        config=cfg,
-        svc_onset={"callee": 3, "caller": 3},
-        svc_early={"callee": 0.7, "caller": 0.6},
-    )
-
-    assert "callee" in residual["caller"]
-
-
-def test_upstream_maps_blocks_same_bucket_callgraph_suppression_without_early_guard():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _upstream_maps
-
-    cfg = _GabanzhafConfig.from_kwargs({})
-    _, residual, _ = _upstream_maps(
-        ["callee", "caller"],
-        lag_corr_edges=[],
-        call_graph_edges=[("callee", "caller", 0.5)],
-        svc_anom_dict={"callee": 0.8, "caller": 0.9},
-        config=cfg,
-        svc_onset={"callee": 3, "caller": 3},
-        svc_early={"callee": 0.5, "caller": 0.6},
-    )
-
-    assert "callee" not in residual["caller"]
-
-
-def test_callgraph_does_not_penalise_caller_root_cause():
-    """When the CALLER is the root cause, call graph must not hurt it.
-
-    Setup:
-    - svc-caller has injected fault (high cpu)
-    - svc-callee is called by svc-caller but is unaffected (normal metrics)
-    - call_graph = {"svc-caller": {"svc-callee"}}
-    - Because svc-callee has low anomaly (< 0.2 threshold), the edge
-      (svc-callee, svc-caller) must NOT be added.
-    - Expected: svc-caller still ranks #1.
-    """
-    rng = np.random.default_rng(7)
-    n_rows = 100
-    inject_row = 50
-
-    # Caller has CPU fault
-    caller_cpu = np.concatenate([rng.normal(30, 2, inject_row),
-                                  rng.normal(95, 3, n_rows - inject_row)])
-    caller_lat = np.concatenate([rng.normal(10, 1, inject_row),
-                                  rng.normal(12, 1, n_rows - inject_row)])
-    # Callee is unaffected
-    callee_cpu = rng.normal(30, 2, n_rows)
-    callee_lat = rng.normal(10, 1, n_rows)
-
-    df = pd.DataFrame({
-        "time": list(range(n_rows)),
-        "svc-caller_cpu":        caller_cpu,
-        "svc-caller_latency-50": caller_lat,
-        "svc-callee_cpu":        callee_cpu,
-        "svc-callee_latency-50": callee_lat,
-    })
-    call_graph = {"svc-caller": {"svc-callee"}}
-
-    result = _gabanzhaf_core(
-        df, inject_time=inject_row, dataset=None, anomalies=None,
-        kwargs={"call_graph": call_graph}
-    )
-    ranks = result["ranks"]
-    svc_order = []
-    seen = set()
-    for col in ranks:
-        svc = col.rsplit("_", 1)[0]
-        if svc not in seen:
-            svc_order.append(svc)
-            seen.add(svc)
-
-    assert svc_order[0] == "svc-caller", (
-        f"Caller (root cause) should rank first. Got: {svc_order}"
-    )
-
-
-def test_callgraph_no_effect_when_empty():
-    """Empty call graph must not crash and must behave like current algorithm."""
-    svc_root   = "svc-root"
-    svc_caller = "svc-caller"
-
-    df = _make_simple_dataframe(svc_root, svc_caller)
-    result = _gabanzhaf_core(
-        df, inject_time=50, dataset=None, anomalies=None,
-        kwargs={"call_graph": {}}
-    )
-    assert "ranks" in result
-    assert len(result["ranks"]) > 0
-
-
-def test_gabanzhaf_core_can_return_stage_timing():
-    df = _make_simple_dataframe("svc-root", "svc-caller")
-
-    result = _gabanzhaf_core(
-        df,
-        inject_time=50,
-        dataset=None,
-        anomalies=None,
-        kwargs={"call_graph": {}, "return_stage_timing": True},
-    )
-
-    assert "stage_timing" in result
-    for key in ["preprocess", "metric_evidence", "topology", "banzhaf", "ranking"]:
-        assert key in result["stage_timing"]
-        assert isinstance(result["stage_timing"][key], float)
-        assert result["stage_timing"][key] >= 0.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. Banzhaf topology approximation
-# ─────────────────────────────────────────────────────────────────────────────
-gabanzhaf_mod = importlib.import_module("RCAEval.e2e.gabanzhaf")
-from RCAEval.e2e.gabanzhaf import (
-    _GabanzhafConfig,
-)
-
 
 def test_gabanzhaf_config_centralizes_runtime_parameters():
-    """Runtime knobs should be centralized instead of read ad hoc in the core."""
-    cfg = _GabanzhafConfig.from_kwargs({
-        "top_k_svcs": "9",
-        "dk_select_useful": True,
-    })
-
+    cfg = _GabanzhafConfig.from_kwargs({"top_k_svcs": "9", "dk_select_useful": True})
     assert cfg.top_k_svcs == 9
     assert cfg.dk_select_useful is True
 
 
-def test_banzhaf_power_uses_probabilistic_game_single_flow():
-    from RCAEval.e2e.gabanzhaf import _banzhaf_power
+def test_gabanzhaf_config_defaults_to_closed_form_banzhaf():
+    assert _GabanzhafConfig.from_kwargs({}).banzhaf_mode == "closed_form"
 
-    prob = np.array(
-        [
-            [1.0, 0.7],
-            [0.0, 1.0],
-        ],
-        dtype=float,
-    )
+
+def test_exact_candidate_k_invalid_values_fall_back_to_default():
+    for value in ["nan", np.nan, np.inf, "-2", 0, "0.5", 0.5]:
+        cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": value})
+        assert cfg.exact_candidate_k == _GabanzhafConfig.exact_candidate_k
+
+
+def test_banzhaf_power_uses_probabilistic_game_single_flow():
+
+    prob = np.array([[1.0, 0.7], [0.0, 1.0]], dtype=float)
     weights = np.array([0.9, 0.5], dtype=float)
 
     values = _banzhaf_power(prob, weights, _GabanzhafConfig.from_kwargs({}))
@@ -783,17 +125,34 @@ def test_banzhaf_power_uses_probabilistic_game_single_flow():
     assert np.all(values >= 0.0)
 
 
-
-def test_noisy_or_coverage_is_monotone_and_bounded():
-    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
+def test_banzhaf_power_bruteforce_matches_closed_form():
 
     prob = np.array(
-        [
-            [1.0, 0.6, 0.0],
-            [0.0, 0.5, 0.8],
-        ],
+        [[1.0, 0.4, 0.2], [0.0, 0.7, 0.5], [0.1, 0.2, 0.9]],
         dtype=float,
     )
+    weights = np.array([0.9, 0.6, 0.4], dtype=float)
+
+    closed = _banzhaf_power(prob, weights, _GabanzhafConfig.from_kwargs({"banzhaf_mode": "closed_form"}))
+    brute = _banzhaf_power(prob, weights, _GabanzhafConfig.from_kwargs({"banzhaf_mode": "bruteforce"}))
+
+    assert np.allclose(brute, closed, atol=1e-10)
+    assert np.all(brute >= 0.0)
+
+
+def test_banzhaf_power_rejects_unknown_mode():
+
+    with pytest.raises(ValueError, match="Unsupported banzhaf_mode"):
+        _banzhaf_power(
+            np.array([[1.0]], dtype=float),
+            np.array([0.5], dtype=float),
+            _GabanzhafConfig.from_kwargs({"banzhaf_mode": "invalid"}),
+        )
+
+
+def test_noisy_or_coverage_is_monotone_and_bounded():
+
+    prob = np.array([[1.0, 0.6, 0.0], [0.0, 0.5, 0.8]], dtype=float)
 
     empty = _noisy_or_coverage(prob, [])
     one = _noisy_or_coverage(prob, [0])
@@ -808,78 +167,37 @@ def test_noisy_or_coverage_is_monotone_and_bounded():
 
 
 def test_noisy_or_coverage_deduplicates_coalition_players():
-    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
 
-    prob = np.array(
-        [
-            [0.2, 0.5],
-            [0.7, 0.4],
-        ],
-        dtype=float,
-    )
-
+    prob = np.array([[0.2, 0.5], [0.7, 0.4]], dtype=float)
     deduped = _noisy_or_coverage(prob, [0, 1])
     duplicated = _noisy_or_coverage(prob, [0, 1, 0])
-
     assert np.allclose(duplicated, deduped)
 
 
 def test_noisy_or_coverage_rejects_invalid_coalition_indices():
-    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
 
-    prob = np.array(
-        [
-            [0.2, 0.5],
-            [0.7, 0.4],
-        ],
-        dtype=float,
-    )
-
-    with pytest.raises(ValueError, match="coalition"):
-        _noisy_or_coverage(prob, [-1])
-
-    with pytest.raises(ValueError, match="coalition"):
-        _noisy_or_coverage(prob, [0, 1.5])
-
-    with pytest.raises(ValueError, match="coalition"):
-        _noisy_or_coverage(prob, [2])
-
-    with pytest.raises(ValueError, match="coalition"):
-        _noisy_or_coverage(prob, [[0]])
+    prob = np.array([[0.2, 0.5], [0.7, 0.4]], dtype=float)
+    for bad in ([-1], [0, 1.5], [2], [[0]]):
+        with pytest.raises(ValueError, match="coalition"):
+            _noisy_or_coverage(prob, bad)
 
 
 def test_noisy_or_payoff_has_diminishing_marginal_returns():
-    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage
 
-    prob = np.array(
-        [
-            [1.0, 0.8],
-            [0.0, 0.7],
-            [0.0, 0.6],
-        ],
-        dtype=float,
-    )
+    prob = np.array([[1.0, 0.8], [0.0, 0.7], [0.0, 0.6]], dtype=float)
     weights = np.array([1.0, 1.0], dtype=float)
 
     def payoff(coalition):
         return float(np.dot(weights, _noisy_or_coverage(prob, coalition)))
 
-    marginal_to_empty = payoff([0]) - payoff([])
-    marginal_after_overlap = payoff([0, 1, 2]) - payoff([1, 2])
-
-    assert marginal_to_empty > marginal_after_overlap
+    assert (payoff([0]) - payoff([])) > (payoff([0, 1, 2]) - payoff([1, 2]))
 
 
 def test_probabilistic_banzhaf_matches_bruteforce_noisy_or_game():
     from itertools import combinations
-    from RCAEval.e2e.gabanzhaf import _noisy_or_coverage, _probabilistic_banzhaf
 
     prob = np.array(
-        [
-            [1.0, 0.4, 0.2],
-            [0.0, 0.7, 0.5],
-            [0.1, 0.2, 0.9],
-        ],
+        [[1.0, 0.4, 0.2], [0.0, 0.7, 0.5], [0.1, 0.2, 0.9]],
         dtype=float,
     )
     weights = np.array([0.9, 0.6, 0.4], dtype=float)
@@ -900,102 +218,56 @@ def test_probabilistic_banzhaf_matches_bruteforce_noisy_or_game():
         brute[i] = total / count
 
     closed = _probabilistic_banzhaf(prob, weights)
-
     assert np.allclose(closed, brute, atol=1e-10)
     assert np.all(closed >= 0.0)
 
 
-def test_select_exact_candidates_uses_three_source_rrf():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _select_exact_candidates
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Candidate selection (anomaly-ranked) and lag-correlation expansion
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_select_exact_candidates_ranks_by_anomaly_score():
 
     cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": 3})
-    candidates = ["svc-a", "svc-b", "svc-c", "svc-d"]
     selected = _select_exact_candidates(
-        candidates,
+        ["svc-a", "svc-b", "svc-c", "svc-d"],
         svc_anom_dict={"svc-a": 0.9, "svc-b": 0.1, "svc-c": 0.8, "svc-d": 0.7},
-        svc_residual={"svc-a": 0.9, "svc-b": 0.1, "svc-c": 0.8, "svc-d": 0.7},
-        trace_scores={"svc-a": 0.8, "svc-b": 1.0, "svc-c": 0.7, "svc-d": 0.6},
         config=cfg,
     )
-
-    assert selected == ["svc-a", "svc-c", "svc-b"]
-    assert "svc-b" in selected
+    assert selected == ["svc-a", "svc-c", "svc-d"]
 
 
 def test_select_exact_candidates_deduplicates_before_limiting_slots():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _select_exact_candidates
 
     cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": 3})
     selected = _select_exact_candidates(
         ["svc-a", "svc-a", "svc-b", "svc-c"],
         svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8, "svc-c": 0.7},
-        svc_residual={},
-        trace_scores={},
         config=cfg,
     )
-
     assert selected == ["svc-a", "svc-b", "svc-c"]
 
 
-def test_candidate_services_preserves_rescued_candidates_until_exact_selection():
-    from RCAEval.e2e.gabanzhaf import _candidate_services
+def test_candidate_services_expands_seeds_with_lag_upstreams():
 
     candidates = _candidate_services(
         {"metric-a", "metric-b", "trace-root"},
-        upstream_map_full={"metric-a": {"upstream"}},
+        lag_corr_edges=[("upstream", "metric-a", 0.5)],
+        svc_names=["metric-a", "metric-b", "trace-root", "upstream"],
     )
-
     assert candidates == ["metric-a", "metric-b", "trace-root", "upstream"]
 
 
-def test_trace_seed_services_requires_observed_trace_evidence():
-    from RCAEval.e2e.gabanzhaf import _trace_seed_services
-
-    assert _trace_seed_services(["svc-a", "svc-b"], None, top_k=1) == []
-    assert _trace_seed_services(
-        ["svc-a", "svc-b"],
-        {"svc-b": 0.4, "trace-only": 1.0},
-        top_k=2,
-    ) == ["svc-b"]
-
-
-def test_call_graph_gate_remains_metric_only_when_trace_evidence_is_high():
-    from RCAEval.e2e.gabanzhaf import (
-        _GabanzhafConfig,
-        _call_graph_topology_edges,
-    )
-
-    cfg = _GabanzhafConfig.from_kwargs({})
-    edges = _call_graph_topology_edges(
-        lag_corr_edges=[],
-        call_graph={"caller": {"callee"}},
-        pool_svcs={"callee", "caller"},
-        svc_anom_dict={"callee": 0.05, "caller": 0.05},
-        config=cfg,
-    )
-
-    assert edges == []
-
-
-def test_exact_candidate_k_invalid_values_fall_back_to_default():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig
-
-    invalid_values = ["nan", np.nan, np.inf, "-2", 0, "0.5", 0.5]
-
-    for value in invalid_values:
-        cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": value})
-        assert cfg.exact_candidate_k == _GabanzhafConfig.exact_candidate_k
-
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Causal explanation matrix
+# ─────────────────────────────────────────────────────────────────────────────
 
 def test_causal_explanation_matrix_builds_self_and_topology_probabilities():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
 
     cfg = _GabanzhafConfig.from_kwargs({"causal_probability_lambda": 1.5})
-    cand = ["svc-a", "svc-b"]
-    services = ["svc-a", "svc-b", "svc-c"]
     matrix = _causal_explanation_matrix(
-        cand,
-        services,
+        ["svc-a", "svc-b"],
+        ["svc-a", "svc-b", "svc-c"],
         svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8, "svc-c": 0.5},
         topology_edges=[("svc-a", "svc-c", 0.6), ("svc-b", "svc-c", 0.2)],
         config=cfg,
@@ -1010,9 +282,6 @@ def test_causal_explanation_matrix_builds_self_and_topology_probabilities():
 
 
 def test_causal_explanation_matrix_rejects_duplicate_candidates():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
-
-    cfg = _GabanzhafConfig.from_kwargs({})
 
     with pytest.raises(ValueError, match="Duplicate candidate"):
         _causal_explanation_matrix(
@@ -1020,14 +289,11 @@ def test_causal_explanation_matrix_rejects_duplicate_candidates():
             ["svc-a", "svc-b"],
             svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8},
             topology_edges=[],
-            config=cfg,
+            config=_GabanzhafConfig.from_kwargs({}),
         )
 
 
 def test_causal_explanation_matrix_rejects_duplicate_services():
-    from RCAEval.e2e.gabanzhaf import _GabanzhafConfig, _causal_explanation_matrix
-
-    cfg = _GabanzhafConfig.from_kwargs({})
 
     with pytest.raises(ValueError, match="Duplicate service"):
         _causal_explanation_matrix(
@@ -1035,67 +301,58 @@ def test_causal_explanation_matrix_rejects_duplicate_services():
             ["svc-a", "svc-b", "svc-b"],
             svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8},
             topology_edges=[],
-            config=cfg,
+            config=_GabanzhafConfig.from_kwargs({}),
         )
 
 
-def test_rank_metrics_uses_service_banzhaf_times_local_metric_evidence():
-    from RCAEval.e2e.gabanzhaf import _rank_metrics
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Banzhaf-score ranking
+# ─────────────────────────────────────────────────────────────────────────────
 
-    cols = ["svc-a_cpu", "svc-a_mem", "svc-b_cpu"]
+def test_rank_metrics_orders_by_service_banzhaf_then_column_name():
+
     ranks = _rank_metrics(
-        cols,
+        ["svc-b_mem", "svc-a_z", "svc-a_a"],
         svc_banzhaf={"svc-a": 1.0, "svc-b": 0.2},
-        metric_score={"svc-a_cpu": 0.9, "svc-a_mem": 0.1, "svc-b_cpu": 1.0},
-        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
     )
-
-    assert ranks[0] == "svc-a_cpu"
-    assert ranks.index("svc-b_cpu") < ranks.index("svc-a_mem")
+    assert ranks == ["svc-a_a", "svc-a_z", "svc-b_mem"]
 
 
 def test_rank_metrics_keeps_positive_banzhaf_above_non_candidate_service():
-    from RCAEval.e2e.gabanzhaf import _rank_metrics
 
-    cols = ["svc-a_cpu", "svc-c_cpu", "svc-b_cpu"]
     ranks = _rank_metrics(
-        cols,
+        ["svc-a_cpu", "svc-c_cpu", "svc-b_cpu"],
         svc_banzhaf={"svc-a": 1.0, "svc-b": 0.2},
-        metric_score={"svc-a_cpu": 1.0, "svc-b_cpu": 0.1, "svc-c_cpu": 1.0},
-        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
     )
-
     assert ranks.index("svc-b_cpu") < ranks.index("svc-c_cpu")
 
 
-def test_rank_metrics_uses_local_metric_evidence_when_banzhaf_ties_positive():
-    from RCAEval.e2e.gabanzhaf import _rank_metrics
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Core pipeline and entry point
+# ─────────────────────────────────────────────────────────────────────────────
 
-    cols = ["svc-a_low", "svc-b_high", "svc-a_mid"]
-    ranks = _rank_metrics(
-        cols,
-        svc_banzhaf={"svc-a": 0.5, "svc-b": 0.5},
-        metric_score={"svc-a_low": 0.1, "svc-b_high": 0.9, "svc-a_mid": 0.4},
-        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
+def _simple_core_frame():
+    return pd.DataFrame({
+        "time": np.arange(12),
+        "svc-a_cpu": [1, 1, 1, 1, 1, 1, 9, 9, 9, 9, 9, 9],
+        "svc-b_cpu": [1, 1, 1, 1, 1, 1, 6, 6, 6, 6, 6, 6],
+    })
+
+
+def test_gabanzhaf_core_can_return_stage_timing():
+    result = _gabanzhaf_core(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={"return_stage_timing": True},
     )
 
-    assert ranks.index("svc-b_high") < ranks.index("svc-a_mid")
-    assert ranks.index("svc-a_mid") < ranks.index("svc-a_low")
-
-
-def test_rank_metrics_uses_local_metric_evidence_when_banzhaf_empty():
-    from RCAEval.e2e.gabanzhaf import _rank_metrics
-
-    cols = ["svc-a_low", "svc-b_high", "svc-c_mid"]
-    ranks = _rank_metrics(
-        cols,
-        svc_banzhaf={},
-        metric_score={"svc-a_low": 0.1, "svc-b_high": 0.9, "svc-c_mid": 0.4},
-        config=_GabanzhafConfig.from_kwargs({"metric_rank_epsilon": 0.15}),
-    )
-
-    assert ranks.index("svc-b_high") < ranks.index("svc-c_mid")
-    assert ranks.index("svc-c_mid") < ranks.index("svc-a_low")
+    assert "stage_timing" in result
+    for key in ["preprocess", "metric_evidence", "topology", "banzhaf", "ranking"]:
+        assert key in result["stage_timing"]
+        assert isinstance(result["stage_timing"][key], float)
+        assert result["stage_timing"][key] >= 0.0
 
 
 def test_gabanzhaf_core_returns_game_candidates_when_requested():
@@ -1121,218 +378,35 @@ def test_gabanzhaf_core_returns_game_candidates_when_requested():
     assert len(result["game_candidates"]) > 0
 
 
-def test_gabanzhaf_core_reports_separate_metric_trace_and_residual_evidence():
-    data = pd.DataFrame({
-        "time": np.arange(12),
-        "svc-a_cpu": [1, 1, 1, 1, 1, 1, 8, 8, 8, 8, 8, 8],
-        "svc-b_cpu": [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2],
-    })
+def test_gabanzhaf_entry_reads_banzhaf_mode_env(monkeypatch):
+    captured_kwargs = {}
 
-    result = _gabanzhaf_core(
-        data,
-        inject_time=6,
-        dataset="unit",
-        anomalies=None,
-        kwargs={
-            "trace_scores": {"svc-a": 0.2, "svc-b": 1.0},
-            "return_diagnostics": True,
-        },
+    def fake_core(data, inject_time, dataset, anomalies, kwargs):
+        captured_kwargs.update(kwargs)
+        return {"ranks": []}
+
+    monkeypatch.setenv("GABANZHAF_BANZHAF_MODE", "bruteforce")
+    monkeypatch.setattr(gabanzhaf_mod, "_gabanzhaf_core", fake_core)
+
+    gabanzhaf_mod.gabanzhaf(
+        pd.DataFrame({"time": [0, 1], "svc_cpu": [0.0, 1.0]}),
+        inject_time=1,
     )
 
-    assert result["metric_service_evidence"]["svc-b"] < 1.0
-    assert result["trace_service_evidence"]["svc-b"] == 1.0
-    assert "svc-b" in result["residual_service_evidence"]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Pre-filter: early candidate selection
-# ─────────────────────────────────────────────────────────────────────────────
-
-def test_cheap_service_filter_ranks_real_anomaly_above_constant_baseline():
-    """Constant-baseline service (IQR≈0, tiny absolute change) must rank below
-    a service with a real proportional anomaly."""
-    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
-
-    rng = np.random.default_rng(0)
-
-    # redis_diskio: constant at 1000, tiny bump to 1010 in anomal period
-    n_normal, n_anomal = 100, 100
-    redis_normal = np.full((n_normal, 1), 1000.0)
-    redis_anomal = np.full((n_anomal, 1), 1010.0)
-
-    # app_cpu: variable baseline ~50, large shift to ~80 in anomal period
-    app_normal = rng.normal(50, 10, (n_normal, 1))
-    app_anomal = rng.normal(80, 10, (n_anomal, 1))
-
-    cols = ["redis_diskio", "app_cpu"]
-    normal_mat = np.hstack([redis_normal, app_normal])
-    anomal_mat = np.hstack([redis_anomal, app_anomal])
-
-    top_svcs = _cheap_service_filter(cols, normal_mat, anomal_mat, top_k=2)
-
-    assert top_svcs[0] == "app", f"Expected 'app' first, got {top_svcs}"
-
-
-def test_cheap_service_filter_suppresses_near_zero_constant_service():
-    """Near-zero constant metric (like idle diskio at ~0) must not inflate when
-    there is even a tiny absolute change, if other services have real anomalies."""
-    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
-
-    rng = np.random.default_rng(1)
-
-    # cache_bytes: near-zero constant, tiny noise, tiny change
-    cache_normal = rng.normal(0, 1e-4, (80, 1))
-    cache_anomal = np.full((80, 1), 1e-3)
-
-    # root_cpu: real baseline, meaningful anomaly
-    root_normal = rng.normal(40, 8, (80, 1))
-    root_anomal = rng.normal(75, 8, (80, 1))
-
-    cols = ["cache_bytes", "root_cpu"]
-    normal_mat = np.hstack([cache_normal, root_normal])
-    anomal_mat = np.hstack([cache_anomal, root_anomal])
-
-    top_svcs = _cheap_service_filter(cols, normal_mat, anomal_mat, top_k=2)
-
-    assert top_svcs[0] == "root", f"Expected 'root' first, got {top_svcs}"
-
-
-def test_cheap_service_filter_returns_at_most_top_k():
-    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
-
-    rng = np.random.default_rng(2)
-    n = 60
-    # 5 services with 1 metric each
-    normal_mat = rng.normal(10, 2, (n, 5))
-    anomal_mat = rng.normal(15, 2, (n, 5))
-    cols = [f"svc{i}_cpu" for i in range(5)]
-
-    assert len(_cheap_service_filter(cols, normal_mat, anomal_mat, top_k=3)) == 3
-    assert len(_cheap_service_filter(cols, normal_mat, anomal_mat, top_k=10)) == 5
-
-
-def test_cheap_service_filter_uses_early_window_signal():
-    from RCAEval.e2e.gabanzhaf import _cheap_service_filter
-
-    n_normal = 40
-    n_anomal = 40
-    normal_mat = np.zeros((n_normal, 2), dtype=float)
-    root_anomal = np.r_[np.full(8, 8.0), np.zeros(n_anomal - 8)]
-    victim_anomal = np.r_[np.zeros(12), np.full(n_anomal - 12, 4.0)]
-    anomal_mat = np.column_stack([root_anomal, victim_anomal])
-
-    top_svcs = _cheap_service_filter(
-        ["root_latency", "victim_latency"],
-        normal_mat,
-        anomal_mat,
-        top_k=2,
-    )
-
-    assert top_svcs[0] == "root"
-
-
-def test_gabanzhaf_core_with_prefilter_does_not_promote_constant_baseline_service():
-    """End-to-end: a constant-baseline shared-hub service must not rank #1
-    when a root-cause service has a clear metric anomaly."""
-    from RCAEval.e2e.gabanzhaf import _gabanzhaf_core
-
-    rng = np.random.default_rng(3)
-    n_rows = 40
-
-    # root: cpu spikes sharply in anomal period
-    root_normal = rng.normal(30, 5, n_rows // 2)
-    root_anomal = rng.normal(85, 5, n_rows // 2)
-
-    # hub: constant high diskio throughout (like redis in re2-ob)
-    hub_disk_normal = np.full(n_rows // 2, 5000.0)
-    hub_disk_anomal = np.full(n_rows // 2, 5050.0)  # tiny bump
-
-    time_col = np.arange(n_rows, dtype=float)
-    inject_time = float(n_rows // 2)
-
-    data = pd.DataFrame({
-        "time": time_col,
-        "root_cpu":   np.concatenate([root_normal, root_anomal]),
-        "hub_diskio": np.concatenate([hub_disk_normal, hub_disk_anomal]),
-    })
-
-    result = _gabanzhaf_core(
-        data,
-        inject_time=inject_time,
-        dataset="unit",
-        anomalies=None,
-        kwargs={"use_prefilter": True},
-    )
-
-    ranks = result["ranks"]
-    assert ranks[0] == "root_cpu", (
-        f"Expected 'root_cpu' at rank 1, got {ranks[:3]}"
-    )
+    assert captured_kwargs["banzhaf_mode"] == "bruteforce"
 
 
 def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
     source_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
-        "RCAEval",
-        "e2e",
-        "gabanzhaf.py",
+        "RCAEval", "e2e", "gabanzhaf.py",
     )
     with open(source_path, "r", encoding="utf-8") as f:
         source = f.read()
 
     forbidden = [
-        "ground_truth",
-        "root_cause",
-        "case_id",
-        "if dataset",
-        "re2-ob",
-        "re2-ss",
-        "re2-tt",
-        "DELAY",
-        "LOSS",
+        "ground_truth", "root_cause", "case_id", "if dataset",
+        "re2-ob", "re2-ss", "re2-tt", "DELAY", "LOSS",
     ]
     for token in forbidden:
         assert token not in source
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _first_sustained_onset: vectorized implementation matches the loop reference
-# ─────────────────────────────────────────────────────────────────────────────
-def test_first_sustained_onset_matches_reference_on_random_matrices():
-    rng = np.random.default_rng(20260608)
-    for _ in range(50):
-        n_rows = int(rng.integers(1, 40))
-        n_cols = int(rng.integers(1, 25))
-        threshold = float(rng.uniform(0.0, 3.0))
-        consecutive = int(rng.integers(1, 5))
-        # Mix below/above threshold so runs are non-trivial.
-        mat = rng.normal(loc=threshold, scale=1.5, size=(n_rows, n_cols))
-        got = _first_sustained_onset(mat, threshold=threshold, consecutive=consecutive)
-        expected = _reference_first_sustained_onset(
-            mat, threshold=threshold, consecutive=consecutive
-        )
-        assert np.array_equal(got, expected), (
-            f"mismatch rows={n_rows} cols={n_cols} "
-            f"thr={threshold} run={consecutive}\n{got}\n{expected}"
-        )
-
-
-def test_first_sustained_onset_edge_cases():
-    # Empty input → empty array.
-    assert _first_sustained_onset(np.empty((0, 0))).size == 0
-    # 1-D input is treated as a single column.
-    col = np.array([0.0, 2.0, 2.0, 0.0])
-    assert np.array_equal(
-        _first_sustained_onset(col, threshold=1.0, consecutive=2), np.array([1])
-    )
-    # Fewer rows than the run length → "never fired" sentinel (n_rows + 1).
-    short = np.array([[5.0], [5.0]])
-    assert np.array_equal(
-        _first_sustained_onset(short, threshold=1.0, consecutive=3), np.array([3])
-    )
-    # No sustained run anywhere → sentinel for every column.
-    flat = np.zeros((6, 3))
-    assert np.array_equal(
-        _first_sustained_onset(flat, threshold=1.0, consecutive=2),
-        np.array([7, 7, 7]),
-    )
