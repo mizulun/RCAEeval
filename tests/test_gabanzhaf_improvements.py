@@ -30,7 +30,6 @@ _banzhaf_power = gabanzhaf_mod._banzhaf_power
 _noisy_or_coverage = gabanzhaf_mod._noisy_or_coverage
 _probabilistic_banzhaf = gabanzhaf_mod._probabilistic_banzhaf
 _select_exact_candidates = gabanzhaf_mod._select_exact_candidates
-_candidate_services = gabanzhaf_mod._candidate_services
 _causal_explanation_matrix = gabanzhaf_mod._causal_explanation_matrix
 _rank_metrics = gabanzhaf_mod._rank_metrics
 
@@ -98,9 +97,14 @@ def test_metric_evidence_rewards_early_onset():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_gabanzhaf_config_centralizes_runtime_parameters():
-    cfg = _GabanzhafConfig.from_kwargs({"top_k_svcs": "9", "dk_select_useful": True})
+    cfg = _GabanzhafConfig.from_kwargs({
+        "top_k_svcs": "9",
+        "dk_select_useful": True,
+        "rank_mode": "service_evidence",
+    })
     assert cfg.top_k_svcs == 9
     assert cfg.dk_select_useful is True
+    assert cfg.rank_mode == "service_evidence"
 
 
 def test_gabanzhaf_config_defaults_to_closed_form_banzhaf():
@@ -138,6 +142,26 @@ def test_banzhaf_power_bruteforce_matches_closed_form():
 
     assert np.allclose(brute, closed, atol=1e-10)
     assert np.all(brute >= 0.0)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_random_small_noisy_or_games_match_bruteforce(seed):
+    rng = np.random.default_rng(seed)
+    prob = rng.uniform(0.0, 1.0, size=(4, 5))
+    weights = rng.uniform(0.0, 1.0, size=5)
+
+    closed = _banzhaf_power(
+        prob,
+        weights,
+        _GabanzhafConfig.from_kwargs({"banzhaf_mode": "closed_form"}),
+    )
+    brute = _banzhaf_power(
+        prob,
+        weights,
+        _GabanzhafConfig.from_kwargs({"banzhaf_mode": "bruteforce"}),
+    )
+
+    assert np.allclose(closed, brute, atol=1e-10)
 
 
 def test_banzhaf_power_rejects_unknown_mode():
@@ -248,61 +272,34 @@ def test_select_exact_candidates_deduplicates_before_limiting_slots():
     assert selected == ["svc-a", "svc-b", "svc-c"]
 
 
-def test_candidate_services_expands_seeds_with_lag_upstreams():
-
-    candidates = _candidate_services(
-        {"metric-a", "metric-b", "trace-root"},
-        lag_corr_edges=[("upstream", "metric-a", 0.5)],
-        svc_names=["metric-a", "metric-b", "trace-root", "upstream"],
-    )
-    assert candidates == ["metric-a", "metric-b", "trace-root", "upstream"]
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Causal explanation matrix
+# 4. Causal explanation matrix (diagonal base; coverage overlaid separately)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_causal_explanation_matrix_builds_self_and_topology_probabilities():
+def test_causal_explanation_matrix_builds_self_probabilities():
 
-    cfg = _GabanzhafConfig.from_kwargs({"causal_probability_lambda": 1.5})
     matrix = _causal_explanation_matrix(
         ["svc-a", "svc-b"],
         ["svc-a", "svc-b", "svc-c"],
-        svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8, "svc-c": 0.5},
-        topology_edges=[("svc-a", "svc-c", 0.6), ("svc-b", "svc-c", 0.2)],
-        config=cfg,
     )
 
     assert matrix.shape == (2, 3)
     assert matrix[0, 0] == 1.0
     assert matrix[1, 1] == 1.0
-    assert 0.0 < matrix[0, 2] <= 1.0
-    assert 0.0 < matrix[1, 2] < matrix[0, 2]
     assert matrix[0, 1] == 0.0
+    assert matrix[0, 2] == 0.0
 
 
 def test_causal_explanation_matrix_rejects_duplicate_candidates():
 
     with pytest.raises(ValueError, match="Duplicate candidate"):
-        _causal_explanation_matrix(
-            ["svc-a", "svc-a"],
-            ["svc-a", "svc-b"],
-            svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8},
-            topology_edges=[],
-            config=_GabanzhafConfig.from_kwargs({}),
-        )
+        _causal_explanation_matrix(["svc-a", "svc-a"], ["svc-a", "svc-b"])
 
 
 def test_causal_explanation_matrix_rejects_duplicate_services():
 
     with pytest.raises(ValueError, match="Duplicate service"):
-        _causal_explanation_matrix(
-            ["svc-a", "svc-b"],
-            ["svc-a", "svc-b", "svc-b"],
-            svc_anom_dict={"svc-a": 1.0, "svc-b": 0.8},
-            topology_edges=[],
-            config=_GabanzhafConfig.from_kwargs({}),
-        )
+        _causal_explanation_matrix(["svc-a", "svc-b"], ["svc-a", "svc-b", "svc-b"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,6 +324,37 @@ def test_rank_metrics_keeps_positive_banzhaf_above_non_candidate_service():
     assert ranks.index("svc-b_cpu") < ranks.index("svc-c_cpu")
 
 
+def test_rank_metrics_single_positive_candidate_does_not_degenerate_to_name_order():
+    ranks = _rank_metrics(
+        ["aaa-noncandidate_cpu", "root_cpu", "zzz_noncandidate_cpu"],
+        svc_banzhaf={"root": 0.7},
+    )
+
+    assert ranks[0] == "root_cpu"
+
+
+def test_service_evidence_ranking_orders_services_then_metrics():
+    ranks = gabanzhaf_mod._rank_evidence_metrics(
+        ["svc-b_mem", "svc-a_z", "svc-a_a"],
+        metric_ev={"svc-b_mem": 1.0, "svc-a_z": 0.1, "svc-a_a": 0.9},
+        svc_anom_dict={"svc-a": 1.0, "svc-b": 0.2},
+        rank_mode="service_evidence",
+    )
+
+    assert ranks == ["svc-a_a", "svc-a_z", "svc-b_mem"]
+
+
+def test_metric_evidence_ranking_uses_metric_score_and_stable_name_tie_break():
+    ranks = gabanzhaf_mod._rank_evidence_metrics(
+        ["svc-b_mem", "svc-a_z", "svc-a_a"],
+        metric_ev={"svc-b_mem": 1.0, "svc-a_z": 0.5, "svc-a_a": 0.5},
+        svc_anom_dict={"svc-a": 1.0, "svc-b": 0.2},
+        rank_mode="metric_evidence",
+    )
+
+    assert ranks == ["svc-b_mem", "svc-a_a", "svc-a_z"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Core pipeline and entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,7 +377,7 @@ def test_gabanzhaf_core_can_return_stage_timing():
     )
 
     assert "stage_timing" in result
-    for key in ["preprocess", "metric_evidence", "topology", "banzhaf", "ranking"]:
+    for key in ["preprocess", "metric_evidence", "candidates", "banzhaf", "ranking"]:
         assert key in result["stage_timing"]
         assert isinstance(result["stage_timing"][key], float)
         assert result["stage_timing"][key] >= 0.0
@@ -376,6 +404,56 @@ def test_gabanzhaf_core_returns_game_candidates_when_requested():
     assert "stage_timing" in result
     assert "game_candidates" in result
     assert len(result["game_candidates"]) > 0
+
+
+def test_gabanzhaf_core_uses_identity_only_causal_matrix_without_coverage():
+    # "unit" is not a train-ticket dataset, so no call graph loads and the
+    # explanation matrix is the pure diagonal.
+    result = _gabanzhaf_core(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "return_diagnostics": True,
+        },
+    )
+
+    prob = np.asarray(result["causal_probability_matrix"], dtype=float)
+    candidates = result["game_candidates"]
+    services = result["game_services"]
+    expected = np.zeros_like(prob)
+    service_idx = {service: i for i, service in enumerate(services)}
+    for row, candidate in enumerate(candidates):
+        expected[row, service_idx[candidate]] = 1.0
+    assert np.array_equal(prob, expected)
+
+
+@pytest.mark.parametrize("rank_mode", ["service_evidence", "metric_evidence"])
+def test_gabanzhaf_core_evidence_modes_skip_banzhaf(monkeypatch, rank_mode):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("causal game must not run in evidence-only modes")
+
+    monkeypatch.setattr(gabanzhaf_mod, "_banzhaf_power", fail_if_called)
+    monkeypatch.setattr(
+        gabanzhaf_mod,
+        "_causal_explanation_matrix",
+        fail_if_called,
+    )
+    result = _gabanzhaf_core(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "rank_mode": rank_mode,
+            "return_diagnostics": True,
+        },
+    )
+
+    assert result["rank_mode"] == rank_mode
+    assert result["service_banzhaf"] == {}
+    assert result["causal_probability_matrix"] == []
 
 
 def test_gabanzhaf_entry_reads_banzhaf_mode_env(monkeypatch):
