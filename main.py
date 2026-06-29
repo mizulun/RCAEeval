@@ -16,6 +16,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from RCAEval.benchmark.evaluation import Evaluator
+from RCAEval.benchmark.diagnostics import write_diagnostics_sidecar
 from RCAEval.classes.graph import Node
 
 from RCAEval.io.time_series import drop_constant, drop_time, preprocess
@@ -68,6 +69,7 @@ if is_py310():
         tracerca,
         banzhaf,
         gabanzhaf,
+        gabanzhaf_with_trace,
         predict_banzhaf,
     )
 
@@ -270,6 +272,12 @@ def process(data_path):
         # print(f"{data_path=}")
         # print(root_causes[:5])
         dump_json(filename=rp, data={0: root_causes})
+        if out.get("diagnostics") is not None:
+            write_diagnostics_sidecar(
+                result_path,
+                basename(rp),
+                out["diagnostics"],
+            )
     except Exception as e:
         raise e
         print(f"{args.method=} failed on {data_path=}")

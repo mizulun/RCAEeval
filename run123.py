@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from statistics import median
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -46,6 +47,72 @@ DEFAULT_METHODS = [
 ]
 
 METHOD_VARIANTS = {
+    "with_trace_full": {
+        "base_method": "gabanzhaf_with_trace",
+        "env": {},
+        "metadata": {
+            "base_method": "gabanzhaf_with_trace",
+            "ablation_role": "with_trace_full",
+        },
+    },
+    "with_trace_no_scores": {
+        "base_method": "gabanzhaf_with_trace",
+        "env": {"GABANZHAF_TRACE_DISABLE_SCORES": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf_with_trace",
+            "ablation_role": "with_trace_no_scores",
+        },
+    },
+    "with_trace_no_call_graph": {
+        "base_method": "gabanzhaf_with_trace",
+        "env": {"GABANZHAF_TRACE_DISABLE_CALL_GRAPH": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf_with_trace",
+            "ablation_role": "with_trace_no_call_graph",
+        },
+    },
+    "with_trace_no_trace": {
+        "base_method": "gabanzhaf_with_trace",
+        "env": {"GABANZHAF_TRACE_DISABLE_TRACE": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf_with_trace",
+            "ablation_role": "with_trace_no_trace",
+        },
+    },
+    "with_trace_no_residual": {
+        "base_method": "gabanzhaf_with_trace",
+        "env": {"GABANZHAF_TRACE_DISABLE_RESIDUAL": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf_with_trace",
+            "ablation_role": "with_trace_no_residual",
+        },
+    },
+    "gabanzhaf_no_lag_1": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_LAG_TOPOLOGY": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "ablation_role": "no_lag_1",
+        },
+    },
+    "gabanzhaf_evidence_service": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_RANK_MODE": "service_evidence"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "rank_mode": "service_evidence",
+            "ablation_role": "evidence_service",
+        },
+    },
+    "gabanzhaf_evidence_metric": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_RANK_MODE": "metric_evidence"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "rank_mode": "metric_evidence",
+            "ablation_role": "evidence_metric",
+        },
+    },
     "gabanzhaf_approx_banzhaf": {
         "base_method": "gabanzhaf",
         "env": {"GABANZHAF_BANZHAF_MODE": "closed_form"},
@@ -62,6 +129,51 @@ METHOD_VARIANTS = {
             "base_method": "gabanzhaf",
             "banzhaf_mode": "bruteforce",
             "ablation_role": "pure_banzhaf",
+        },
+    },
+    "gabanzhaf_k1": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 1,
+            "ablation_role": "exact_candidate_k=1",
+        },
+    },
+    "gabanzhaf_k2": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "2"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 2,
+            "ablation_role": "exact_candidate_k=2",
+        },
+    },
+    "gabanzhaf_k3": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "3"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 3,
+            "ablation_role": "exact_candidate_k=3",
+        },
+    },
+    "gabanzhaf_k4": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "4"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 4,
+            "ablation_role": "exact_candidate_k=4",
+        },
+    },
+    "gabanzhaf_k5": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_EXACT_CANDIDATE_K": "5"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "exact_candidate_k": 5,
+            "ablation_role": "exact_candidate_k=5",
         },
     },
     "gabanzhaf_k6": {
@@ -166,7 +278,14 @@ def resolve_method_variant(method):
     )
 
 
-def run_single(method, dataset, length=20, tdelta=0, smoke_test=False):
+def run_single(
+    method,
+    dataset,
+    length=20,
+    tdelta=0,
+    smoke_test=False,
+    diagnostics=False,
+):
     base_method, extra_env, metadata = resolve_method_variant(method)
     rdir = result_dir_for(method, dataset)
     # 刪除上一次同資料集的結果
@@ -181,6 +300,10 @@ def run_single(method, dataset, length=20, tdelta=0, smoke_test=False):
 
     env = os.environ.copy()
     env.update(extra_env)
+    env.setdefault("MPLCONFIGDIR", "/private/tmp/rcaeval-mpl-cache")
+    env.setdefault("XDG_CACHE_HOME", "/private/tmp/rcaeval-cache")
+    if diagnostics:
+        env["GABANZHAF_WRITE_DIAGNOSTICS"] = "1"
 
     start = datetime.now()
     proc = subprocess.run(cmd, text=True, capture_output=True,
@@ -216,6 +339,65 @@ def run_single(method, dataset, length=20, tdelta=0, smoke_test=False):
     return record
 
 
+def aggregate_repetitions(records):
+    """Aggregate repeated runs of one method/dataset using medians."""
+    if not records:
+        raise ValueError("records must not be empty")
+    first = dict(records[0])
+    first["repetitions"] = len(records)
+    first["status"] = "OK" if all(r.get("status") == "OK" for r in records) else "FAIL"
+    first["returncode"] = 0 if first["status"] == "OK" else next(
+        (r.get("returncode", -1) for r in records if r.get("status") != "OK"),
+        -1,
+    )
+
+    walls = [float(r.get("wall_time_sec", 0.0)) for r in records]
+    first["wall_time_sec"] = float(median(walls))
+    first["wall_time_min_sec"] = float(min(walls))
+    first["wall_time_max_sec"] = float(max(walls))
+
+    numeric_keys = {
+        key
+        for record in records
+        for key, value in record.items()
+        if (
+            key == "Avg speed"
+            or any(key.startswith(f"{metric}-") for metric in METRICS)
+        )
+        and isinstance(value, (int, float))
+    }
+    for key in numeric_keys:
+        values = [float(r[key]) for r in records if key in r]
+        first[key] = float(median(values))
+        if key == "Avg speed":
+            first["Avg speed min"] = float(min(values))
+            first["Avg speed max"] = float(max(values))
+    return first
+
+
+def run_repeated(
+    method,
+    dataset,
+    repetitions=1,
+    length=20,
+    tdelta=0,
+    smoke_test=False,
+    diagnostics=False,
+):
+    runs = [
+        run_single(
+            method,
+            dataset,
+            length=length,
+            tdelta=tdelta,
+            smoke_test=smoke_test,
+            diagnostics=diagnostics,
+        )
+        for _ in range(max(1, int(repetitions)))
+    ]
+    return aggregate_repetitions(runs)
+
+
 def save_csv(records, path):
     if not records:
         return
@@ -224,17 +406,25 @@ def save_csv(records, path):
         for key in [
             "base_method",
             "banzhaf_mode",
+            "rank_mode",
             "exact_candidate_k",
             "ablation_role",
         ]
         if any(key in record for record in records)
     ]
-    keys = ["method"] + metadata_keys + ["dataset", "status", "wall_time_sec"]
+    keys = ["method"] + metadata_keys + [
+        "dataset",
+        "status",
+        "repetitions",
+        "wall_time_sec",
+        "wall_time_min_sec",
+        "wall_time_max_sec",
+    ]
     metric_keys = sorted({
         k for r in records for k in r
         if any(k.startswith(f"{m}-") for m in METRICS) or k == "Avg speed"
     })
-    keys += metric_keys + ["returncode"]
+    keys += metric_keys + ["Avg speed min", "Avg speed max", "returncode"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
@@ -355,6 +545,10 @@ def main():
                         help="遇到失敗時繼續執行")
     parser.add_argument("--workers", type=int, default=3,
                         help="同時執行的任務數（預設 3，設為 1 即循序執行）")
+    parser.add_argument("--repetitions", type=int, default=1,
+                        help="每個 method × dataset 重跑次數，時間以中位數彙整")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="將每個 case 的演算法 diagnostics 寫入巢狀 sidecar 目錄")
     parser.add_argument("--show", action="store_true",
                         help="不執行測試，只載入已有結果並印出（需先跑過測試）")
     args = parser.parse_args()
@@ -392,7 +586,15 @@ def main():
     failed = False
 
     def _task(method, dataset):
-        return run_single(method, dataset, args.length, args.tdelta, args.test)
+        return run_repeated(
+            method,
+            dataset,
+            repetitions=args.repetitions,
+            length=args.length,
+            tdelta=args.tdelta,
+            smoke_test=args.test,
+            diagnostics=args.diagnostics,
+        )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_task = {

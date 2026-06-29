@@ -18,9 +18,17 @@ class _GabanzhafConfig:
     dk_select_useful: bool = False
     exact_candidate_k: int = 12
     banzhaf_mode: str = "closed_form"
-    causal_probability_lambda: float = 1.5
+    rank_mode: str = "banzhaf"
     early_window_ratio: float = 0.25
     early_window_min_len: int = 5
+    # Call-graph coverage: rescue a quiet upstream root that explains several
+    # loud downstream victims (the delay/loss propagation signature). Gated on
+    # >=min_loud children above loud_thr so single-strong-anomaly faults
+    # (cpu/mem/disk/socket) are left untouched.
+    coverage_conf: float = 0.7
+    coverage_loud_thr: float = 0.4
+    coverage_lat_floor: float = 0.1
+    coverage_min_loud: int = 2
 
     @staticmethod
     def _positive_int_or_default(value, default):
@@ -45,13 +53,18 @@ class _GabanzhafConfig:
                 cls.exact_candidate_k,
             ),
             banzhaf_mode=str(kwargs.get("banzhaf_mode", cls.banzhaf_mode)),
-            causal_probability_lambda=float(
-                kwargs.get("causal_probability_lambda", cls.causal_probability_lambda)
-            ),
+            rank_mode=str(kwargs.get("rank_mode", cls.rank_mode)),
             early_window_ratio=float(kwargs.get("early_window_ratio", cls.early_window_ratio)),
             early_window_min_len=cls._positive_int_or_default(
                 kwargs.get("early_window_min_len", cls.early_window_min_len),
                 cls.early_window_min_len,
+            ),
+            coverage_conf=float(kwargs.get("coverage_conf", cls.coverage_conf)),
+            coverage_loud_thr=float(kwargs.get("coverage_loud_thr", cls.coverage_loud_thr)),
+            coverage_lat_floor=float(kwargs.get("coverage_lat_floor", cls.coverage_lat_floor)),
+            coverage_min_loud=cls._positive_int_or_default(
+                kwargs.get("coverage_min_loud", cls.coverage_min_loud),
+                cls.coverage_min_loud,
             ),
         )
 
@@ -306,48 +319,83 @@ def _banzhaf_power(prob_matrix, anomaly_weights, config):
     raise ValueError(f"Unsupported banzhaf_mode: {config.banzhaf_mode}")
 
 
-def _build_topology(svc_names, svc_series, corr_thr=0.08, max_in=3):
-    """Build weighted directed topology from asymmetric lag-1 correlations.
+def _load_call_graph(dataset):
+    """Load the precomputed static service call graph for the dataset.
 
-    Vectorised: stacks all available service series into a matrix and
-    computes the full n_svc × n_svc lag-1 correlation matrix in one
-    numpy matmul.  Edge confidence is asymmetric: u→v is strong only when
-    u leads v more than v leads u.
+    Returns {caller: [callees]}. The graph is system-static, so it is built
+    once offline (see tt_callgraph.json) and only loaded — no per-case trace
+    parsing. Returns {} when no graph ships for the dataset.
     """
-    svcs = [s for s in svc_names if svc_series.get(s) is not None]
-    if len(svcs) < 2:
-        return []
+    import json
+    name = str(dataset or "").lower()
+    if "tt" not in name and "train-ticket" not in name:
+        return {}
+    path = os.path.join(os.path.dirname(__file__), "tt_callgraph.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
-    T = min(len(svc_series[s]) for s in svcs) - 1
-    if T < 3:
-        return []
 
-    # Stack: (n_svcs, T)
-    X = np.array([svc_series[s][:T]   for s in svcs], dtype=float)  # current
-    Y = np.array([svc_series[s][1:T+1] for s in svcs], dtype=float)  # lag-1
+def _service_latency_scores(cols, metric_ev):
+    """Per-service latency-metric score (max over its *_latency columns).
 
-    # Z-score each row
-    X -= X.mean(axis=1, keepdims=True)
-    Y -= Y.mean(axis=1, keepdims=True)
-    xn = np.linalg.norm(X, axis=1, keepdims=True) + 1e-9
-    yn = np.linalg.norm(Y, axis=1, keepdims=True) + 1e-9
-    X /= xn;  Y /= yn
+    Used to tell propagation victims (loud because latency spiked) from
+    services with their own resource fault (loud because of cpu/mem/disk).
+    """
+    out = {}
+    for col in cols:
+        if col.rsplit("_", 1)[-1] != "latency":
+            continue
+        svc = _parse_svc(col)
+        out[svc] = max(out.get(svc, 0.0), _finite_nonnegative(metric_ev.get(col, 0.0)))
+    return out
 
-    # Lag-1 correlation matrix: C[i,j] = corr(X[i], Y[j]) = X_i leads Y_j.
-    C = X @ Y.T  # (n_svcs, n_svcs)
-    np.fill_diagonal(C, 0.)
 
-    confidence = np.maximum(0., C - C.T)
-    np.fill_diagonal(confidence, 0.)
+def _coverage_parents(call_graph, svc_anom_dict, svc_latency, config):
+    """Parents that explain >=min_loud propagation victims (delay/loss).
 
-    edges = []
-    for j, v in enumerate(svcs):
-        parents = np.where(confidence[:, j] > corr_thr)[0]
-        if len(parents) > max_in:
-            parents = parents[np.argsort(confidence[parents, j])[-max_in:]]
-        for i in parents:
-            edges.append((svcs[i], v, float(confidence[i, j])))
-    return edges
+    A child counts as a victim when it is loud overall (anomaly >= loud_thr)
+    AND shows at least some latency signal (>= lat_floor). The latency floor
+    excludes a child that is loud purely from its own resource fault
+    (cpu/mem/disk, latency ~0) — that child is itself a root, so its parent
+    must not steal its #1. Returns {parent: [victim_child, ...]}.
+    """
+    loud_thr = _finite_nonnegative(config.coverage_loud_thr)
+    lat_floor = _finite_nonnegative(config.coverage_lat_floor)
+    min_loud = max(1, int(config.coverage_min_loud))
+    parents = {}
+    for caller, callees in (call_graph or {}).items():
+        loud = [
+            c for c in callees
+            if svc_anom_dict.get(c, 0.0) >= loud_thr
+            and svc_latency.get(c, 0.0) >= lat_floor
+        ]
+        if len(loud) >= min_loud:
+            parents[caller] = loud
+    return parents
+
+
+def _apply_coverage_edges(matrix, cand_list, service_list, coverage_parents, conf):
+    """Overlay parent->loud-child coverage with fixed confidence.
+
+    Bypasses the alignment damping in _causal_explanation_matrix (which zeroes
+    edges from a quiet parent) so a low-anomaly root still gets credited for
+    covering its loud victims.
+    """
+    cand_idx = {svc: i for i, svc in enumerate(cand_list)}
+    svc_idx = {svc: j for j, svc in enumerate(service_list)}
+    conf = float(np.clip(conf, 0.0, 1.0))
+    for parent, children in coverage_parents.items():
+        i = cand_idx.get(parent)
+        if i is None:
+            continue
+        for child in children:
+            j = svc_idx.get(child)
+            if j is not None:
+                matrix[i, j] = max(matrix[i, j], conf)
+    return matrix
 
 
 def _split_raw_windows(data, inject_time, anomalies):
@@ -384,34 +432,6 @@ def _preprocess_windows(normal_raw, anomal_raw, dataset, config):
     return normal_df, anomal_df, no_time
 
 
-def _service_series_for_pool(cols, no_time, pool_svcs):
-    values = no_time.values
-    svc_series = {}
-    for svc in pool_svcs:
-        idxs = [i for i, col in enumerate(cols) if _parse_svc(col) == svc]
-        if idxs:
-            svc_series[svc] = values[:, idxs].max(axis=1).astype(float)
-    return svc_series
-
-
-def _initial_service_pool(svc_ranked, seed_svcs, config):
-    # Pool = top services by anomaly score, widened to 2× top_k (or +5, whichever
-    # is larger) so lag-correlation has enough context to find upstream edges.
-    pool_k = min(len(svc_ranked), max(config.top_k_svcs * 2, config.top_k_svcs + 5))
-    return set(svc_ranked[:pool_k]) | set(seed_svcs)
-
-
-def _candidate_services(seed_svcs, lag_corr_edges, svc_names):
-    """Expand seeds with their lag-correlation upstreams (anomaly explainers)."""
-    upstream = {s: set() for s in svc_names}
-    for u, v, _ in lag_corr_edges:
-        upstream.get(v, set()).add(u)
-    candidates = set(seed_svcs)
-    for svc in list(candidates):
-        candidates |= upstream.get(svc, set())
-    return sorted(candidates)
-
-
 def _select_exact_candidates(candidates, svc_anom_dict, config):
     k = max(1, int(config.exact_candidate_k))
     candidates = list(dict.fromkeys(candidates))
@@ -421,42 +441,22 @@ def _select_exact_candidates(candidates, svc_anom_dict, config):
     )[:k]
 
 
-def _causal_explanation_matrix(
-    cand_list,
-    service_list,
-    svc_anom_dict,
-    topology_edges,
-    config,
-):
+def _causal_explanation_matrix(cand_list, service_list):
+    """Base explanation matrix: each candidate explains its own service (1.0).
+
+    Off-diagonal coverage edges are overlaid separately by
+    _apply_coverage_edges.
+    """
     if len(cand_list) != len(set(cand_list)):
         raise ValueError("Duplicate candidate name")
     if len(service_list) != len(set(service_list)):
         raise ValueError("Duplicate service name")
-    cand_idx = {svc: i for i, svc in enumerate(cand_list)}
     svc_idx = {svc: j for j, svc in enumerate(service_list)}
     matrix = np.zeros((len(cand_list), len(service_list)), dtype=float)
-    lam = _finite_nonnegative(config.causal_probability_lambda)
-    if lam <= 0.0:
-        lam = 1.0
-
-    for svc, i in cand_idx.items():
+    for i, svc in enumerate(cand_list):
         if svc in svc_idx:
             matrix[i, svc_idx[svc]] = 1.0
-
-    for u, v, w in topology_edges:
-        if u not in cand_idx or v not in svc_idx:
-            continue
-        alignment = np.sqrt(
-            _finite_nonnegative(svc_anom_dict.get(u, 0.0))
-            * _finite_nonnegative(svc_anom_dict.get(v, 0.0))
-        )
-        raw = _finite_nonnegative(w) * alignment
-        matrix[cand_idx[u], svc_idx[v]] = max(
-            matrix[cand_idx[u], svc_idx[v]],
-            1.0 - np.exp(-lam * raw),
-        )
-
-    return np.clip(matrix, 0.0, 1.0)
+    return matrix
 
 
 def _finite_nonnegative(value):
@@ -475,13 +475,35 @@ def _rank_metrics(all_cols, svc_banzhaf):
         svc: _finite_nonnegative(score)
         for svc, score in (svc_banzhaf or {}).items()
     }
-    if not finite_banzhaf or len(set(finite_banzhaf.values())) == 1:
-        nb = {svc: 1.0 for svc in {_parse_svc(col) for col in all_cols}}
-    else:
-        max_banzhaf = max(finite_banzhaf.values())
+    max_banzhaf = max(finite_banzhaf.values(), default=0.0)
+    if max_banzhaf > 0.0:
         nb = {svc: score / max_banzhaf for svc, score in finite_banzhaf.items()}
+    else:
+        nb = {svc: 1.0 for svc in {_parse_svc(col) for col in all_cols}}
 
     return sorted(all_cols, key=lambda col: (-nb.get(_parse_svc(col), 0.0), col))
+
+
+def _rank_evidence_metrics(all_cols, metric_ev, svc_anom_dict, rank_mode):
+    """Rank metrics without the causal game or Banzhaf power calculation."""
+    if rank_mode == "service_evidence":
+        return sorted(
+            all_cols,
+            key=lambda col: (
+                -_finite_nonnegative(svc_anom_dict.get(_parse_svc(col), 0.0)),
+                -_finite_nonnegative(metric_ev.get(col, 0.0)),
+                col,
+            ),
+        )
+    if rank_mode == "metric_evidence":
+        return sorted(
+            all_cols,
+            key=lambda col: (
+                -_finite_nonnegative(metric_ev.get(col, 0.0)),
+                col,
+            ),
+        )
+    raise ValueError(f"Unsupported evidence rank mode: {rank_mode}")
 
 
 # ==========================================
@@ -492,7 +514,7 @@ def _rank_metrics(all_cols, svc_banzhaf):
 def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     """
     Pipeline: window split → metric evidence → service evidence
-              → lag-1 correlation topology → Banzhaf → metric ranking
+              → call-graph coverage → Banzhaf → metric ranking
     """
     config = _GabanzhafConfig.from_kwargs(kwargs)
     return_stage_timing = bool(kwargs.get("return_stage_timing", False))
@@ -525,47 +547,90 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     svc_names = sorted(svc_anom_dict.keys())
     _mark_stage("metric_evidence")
 
-    # ── 4. Candidate-first bounded lag-correlation topology ──────────────────
+    if config.rank_mode not in {"banzhaf", "service_evidence", "metric_evidence"}:
+        raise ValueError(f"Unsupported rank_mode: {config.rank_mode}")
+
+    # ── 4. Candidates = top services by anomaly score ────────────────────────
     svc_ranked = sorted(svc_names, key=lambda s: svc_anom_dict.get(s, 0.), reverse=True)
     seed_svcs = set(svc_ranked[: config.top_k_svcs])
+    cand_list = sorted(seed_svcs)
+    _mark_stage("candidates")
 
-    pool_svcs = _initial_service_pool(svc_ranked, seed_svcs, config)
-    svc_series_full = _service_series_for_pool(cols, no_time, pool_svcs)
-    topology_edges = _build_topology(sorted(pool_svcs), svc_series_full)
-    cand_list = _candidate_services(seed_svcs, topology_edges, svc_names)
-    _mark_stage("topology")
+    # ── 4b. Call-graph coverage: rescue quiet roots of multi-victim faults ────
+    if bool(kwargs.get("use_coverage", True)):
+        call_graph = _load_call_graph(dataset)
+        svc_latency = _service_latency_scores(cols, metric_ev)
+        coverage_parents = _coverage_parents(call_graph, svc_anom_dict, svc_latency, config)
+    else:
+        coverage_parents = {}
 
     # ── 5. Probabilistic causal game ─────────────────────────────────────────
     game_candidates = _select_exact_candidates(cand_list, svc_anom_dict, config)
+    # Force qualified coverage parents into the game even when their own
+    # anomaly is too low to make the anomaly-ranked top-k cut.
+    for parent in coverage_parents:
+        if parent in svc_anom_dict and parent not in game_candidates:
+            game_candidates.append(parent)
     game_services = sorted(svc_anom_dict.keys())
-    prob_matrix = _causal_explanation_matrix(
-        game_candidates,
-        game_services,
-        svc_anom_dict,
-        topology_edges,
-        config,
-    )
-    anomaly_weights = np.asarray(
-        [svc_anom_dict.get(svc, 0.0) for svc in game_services],
-        dtype=float,
-    )
+    if config.rank_mode == "banzhaf":
+        prob_matrix = _causal_explanation_matrix(game_candidates, game_services)
+        prob_matrix = _apply_coverage_edges(
+            prob_matrix,
+            game_candidates,
+            game_services,
+            coverage_parents,
+            config.coverage_conf,
+        )
+        anomaly_weights = np.asarray(
+            [svc_anom_dict.get(svc, 0.0) for svc in game_services],
+            dtype=float,
+        )
+    else:
+        prob_matrix = np.zeros((0, 0), dtype=float)
+        anomaly_weights = np.zeros(0, dtype=float)
 
     # ── 6. Banzhaf power index ────────────────────────────────────────────────
-    banzhaf_values = _banzhaf_power(prob_matrix, anomaly_weights, config)
-    svc_banzhaf = {
-        game_candidates[i]: float(banzhaf_values[i])
-        for i in range(len(game_candidates))
-    }
+    svc_banzhaf = {}
+    if config.rank_mode == "banzhaf":
+        banzhaf_values = _banzhaf_power(prob_matrix, anomaly_weights, config)
+        svc_banzhaf = {
+            game_candidates[i]: float(banzhaf_values[i])
+            for i in range(len(game_candidates))
+        }
     _mark_stage("banzhaf")
 
     # ── 7. Final metric-level ranking by Banzhaf score ───────────────────────
-    ranks = _rank_metrics(cols, svc_banzhaf)
+    if config.rank_mode == "banzhaf":
+        ranks = _rank_metrics(cols, svc_banzhaf)
+    else:
+        ranks = _rank_evidence_metrics(
+            cols,
+            metric_ev,
+            svc_anom_dict,
+            config.rank_mode,
+        )
     _mark_stage("ranking")
 
     result = {"ranks": ranks, "node_names": cols}
     if bool(kwargs.get("return_diagnostics", False)):
-        result["game_candidates"] = game_candidates
-        result["metric_service_evidence"] = dict(svc_anom_dict)
+        diagnostics = {
+            "rank_mode": config.rank_mode,
+            "candidate_pool": list(cand_list),
+            "game_candidates": list(game_candidates),
+            "game_services": list(game_services),
+            "causal_probability_matrix": prob_matrix.tolist(),
+            "metric_evidence": dict(metric_ev),
+            "metric_service_evidence": dict(svc_anom_dict),
+            "service_banzhaf": dict(svc_banzhaf),
+            "root_service": kwargs.get("root_service"),
+            "root_candidate_recall": (
+                kwargs.get("root_service") in set(game_candidates)
+                if kwargs.get("root_service") is not None
+                else None
+            ),
+        }
+        result["diagnostics"] = diagnostics
+        result.update(diagnostics)
     if return_stage_timing:
         result["stage_timing"] = stage_timing
     return result
@@ -577,20 +642,20 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
 def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
-    """Pure probabilistic causal Banzhaf RCA.
+    """Probabilistic causal Banzhaf RCA with call-graph coverage.
 
     Pipeline: window split → metric evidence → service evidence →
-    lag-1 correlation topology → probabilistic noisy-OR Banzhaf → rank by
-    Banzhaf score.  Trace onset, call-graph and residual stages were removed
-    after ablation showed them net-negative on re2 (see benchmark_*.json):
-    the stripped pipeline matched or beat the full one while running ~30 %
-    faster.
+    static call-graph coverage (rescues quiet upstream roots of delay/loss
+    propagation) → probabilistic noisy-OR Banzhaf → rank by Banzhaf score.
+    Lag-1 correlation topology was removed after ablation showed it dead on
+    re2-{tt,ob,ss} and re1-{ss,tt} and net-negative on re1-ob.
 
     Env knobs:
       GABANZHAF_BANZHAF_MODE   closed_form (default) | bruteforce
       GABANZHAF_EXACT_CANDIDATE_K   override the game candidate count
+      GABANZHAF_DISABLE_COVERAGE=1  turn off call-graph coverage (ablation)
       GABANZHAF_PROFILE=1      print per-stage timing to stderr
-                               (preprocess | metric_evidence | topology |
+                               (preprocess | metric_evidence | candidates |
                                 banzhaf | ranking)
     """
     import sys
@@ -604,10 +669,26 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
             "exact_candidate_k",
             os.environ["GABANZHAF_EXACT_CANDIDATE_K"],
         )
+    if os.environ.get("GABANZHAF_DISABLE_COVERAGE") == "1":
+        runtime_kwargs.setdefault("use_coverage", False)
+    if os.environ.get("GABANZHAF_RANK_MODE"):
+        runtime_kwargs.setdefault("rank_mode", os.environ["GABANZHAF_RANK_MODE"])
+    if os.environ.get("GABANZHAF_WRITE_DIAGNOSTICS") == "1":
+        runtime_kwargs["return_diagnostics"] = True
+        runtime_kwargs["return_stage_timing"] = True
+    args_ns = kwargs.get("args")
+    if args_ns and hasattr(args_ns, "data_path"):
+        case_dir = os.path.dirname(args_ns.data_path)
+        fault_dir = os.path.basename(os.path.dirname(case_dir))
+        runtime_kwargs["root_service"] = fault_dir.split("_", 1)[0]
     if _profile:
         runtime_kwargs["return_stage_timing"] = True
 
     result = _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
+    if "diagnostics" in result:
+        result["diagnostics"]["stage_timing"] = dict(
+            result.get("stage_timing", {})
+        )
 
     if _profile and "stage_timing" in result:
         st = result["stage_timing"]

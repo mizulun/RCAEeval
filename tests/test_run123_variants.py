@@ -1,5 +1,6 @@
 import csv
 import importlib
+import json
 import subprocess
 
 
@@ -62,7 +63,7 @@ def test_gabanzhaf_ablation_aliases_are_available():
 
 
 def test_gabanzhaf_exact_candidate_k_variants_are_available():
-    for k in [6, 8, 10, 12, 16]:
+    for k in [1, 2, 3, 4, 5, 6, 8, 10, 12, 16]:
         base, env, meta = run123.resolve_method_variant(f"gabanzhaf_k{k}")
 
         assert base == "gabanzhaf"
@@ -70,6 +71,59 @@ def test_gabanzhaf_exact_candidate_k_variants_are_available():
         assert meta["base_method"] == "gabanzhaf"
         assert meta["exact_candidate_k"] == k
         assert meta["ablation_role"] == f"exact_candidate_k={k}"
+
+
+def test_gabanzhaf_component_ablation_variants_are_available():
+    expected = {
+        "gabanzhaf_no_lag_1": (
+            {"GABANZHAF_DISABLE_LAG_TOPOLOGY": "1"},
+            "no_lag_1",
+        ),
+        "gabanzhaf_evidence_service": (
+            {"GABANZHAF_RANK_MODE": "service_evidence"},
+            "evidence_service",
+        ),
+        "gabanzhaf_evidence_metric": (
+            {"GABANZHAF_RANK_MODE": "metric_evidence"},
+            "evidence_metric",
+        ),
+    }
+
+    for method, (expected_env, expected_role) in expected.items():
+        base, env, meta = run123.resolve_method_variant(method)
+        assert base == "gabanzhaf"
+        assert env == expected_env
+        assert meta["base_method"] == "gabanzhaf"
+        assert meta["ablation_role"] == expected_role
+
+
+def test_with_trace_variants_are_available():
+    expected = {
+        "with_trace_full": ({}, "with_trace_full"),
+        "with_trace_no_scores": (
+            {"GABANZHAF_TRACE_DISABLE_SCORES": "1"},
+            "with_trace_no_scores",
+        ),
+        "with_trace_no_call_graph": (
+            {"GABANZHAF_TRACE_DISABLE_CALL_GRAPH": "1"},
+            "with_trace_no_call_graph",
+        ),
+        "with_trace_no_trace": (
+            {"GABANZHAF_TRACE_DISABLE_TRACE": "1"},
+            "with_trace_no_trace",
+        ),
+        "with_trace_no_residual": (
+            {"GABANZHAF_TRACE_DISABLE_RESIDUAL": "1"},
+            "with_trace_no_residual",
+        ),
+    }
+
+    for method, (expected_env, role) in expected.items():
+        base, env, meta = run123.resolve_method_variant(method)
+        assert base == "gabanzhaf_with_trace"
+        assert env == expected_env
+        assert meta["base_method"] == "gabanzhaf_with_trace"
+        assert meta["ablation_role"] == role
 
 
 def test_save_csv_preserves_variant_metadata(tmp_path):
@@ -100,3 +154,47 @@ def test_save_csv_preserves_variant_metadata(tmp_path):
     assert row["banzhaf_mode"] == "closed_form"
     assert row["ablation_role"] == "approx_banzhaf"
     assert row["exact_candidate_k"] == "12"
+
+
+def test_aggregate_repetitions_uses_runtime_median_and_range():
+    records = [
+        {
+            "method": "gabanzhaf",
+            "dataset": "re2-ob",
+            "status": "OK",
+            "wall_time_sec": wall,
+            "Avg speed": speed,
+            "AC@1-CPU": 0.4,
+            "returncode": 0,
+        }
+        for wall, speed in [(12.0, 0.12), (10.0, 0.10), (20.0, 0.20)]
+    ]
+
+    aggregate = run123.aggregate_repetitions(records)
+
+    assert aggregate["wall_time_sec"] == 12.0
+    assert aggregate["wall_time_min_sec"] == 10.0
+    assert aggregate["wall_time_max_sec"] == 20.0
+    assert aggregate["Avg speed"] == 0.12
+    assert aggregate["repetitions"] == 3
+    assert aggregate["AC@1-CPU"] == 0.4
+
+
+def test_run_single_enables_diagnostics_sidecars(monkeypatch):
+    calls = {}
+
+    def fake_run(cmd, **kwargs):
+        calls["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, stdout="Avg speed: 0.1\n", stderr="")
+
+    monkeypatch.setattr(run123, "clear_result_dir", lambda method, dataset: None)
+    monkeypatch.setattr(run123.subprocess, "run", fake_run)
+
+    run123.run_single(
+        "gabanzhaf",
+        "re2-ob",
+        smoke_test=True,
+        diagnostics=True,
+    )
+
+    assert calls["env"]["GABANZHAF_WRITE_DIAGNOSTICS"] == "1"
