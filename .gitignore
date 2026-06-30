@@ -221,6 +221,7 @@ data/sock-shop-1
 data/sock-shop-2
 data/train-ticket
 output
+ablation_results/
 *.zip
 .DS_Store
 logparser/config.json
