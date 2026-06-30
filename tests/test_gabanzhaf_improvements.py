@@ -1,10 +1,9 @@
 """Tests for the pure-Banzhaf gabanzhaf pipeline.
 
-After ablation showed trace onset, call-graph and residual stages were
-net-negative on re2 (see benchmark_*.json), the pipeline was stripped to:
-metric evidence → service evidence → lag-1 correlation topology →
-probabilistic noisy-OR Banzhaf → rank by Banzhaf score.  These tests cover
-the surviving math core, the configuration, and the entry point.
+After ablation showed the old metric-derived trace lag to be mostly redundant,
+the pipeline now keeps metric evidence as anomaly weight and adds trace/topology
+signals as causal edges plus a conservative abnormal-frontier bonus. These tests
+cover the math core, configuration, diagnostics, and entry point.
 """
 import importlib.util
 import os
@@ -115,6 +114,12 @@ def test_exact_candidate_k_invalid_values_fall_back_to_default():
     for value in ["nan", np.nan, np.inf, "-2", 0, "0.5", 0.5]:
         cfg = _GabanzhafConfig.from_kwargs({"exact_candidate_k": value})
         assert cfg.exact_candidate_k == _GabanzhafConfig.exact_candidate_k
+
+
+def test_trace_topology_max_lag_allows_zero():
+    cfg = _GabanzhafConfig.from_kwargs({"trace_topology_max_lag": 0})
+
+    assert cfg.trace_topology_max_lag == 0
 
 
 def test_banzhaf_power_uses_probabilistic_game_single_flow():
@@ -272,6 +277,157 @@ def test_select_exact_candidates_deduplicates_before_limiting_slots():
     assert selected == ["svc-a", "svc-b", "svc-c"]
 
 
+def test_service_trace_series_aggregates_operation_columns_by_service():
+    df = pd.DataFrame({
+        "time": [0, 1, 2, 3],
+        "svc-a_GET": [0, 1, 3, 1],
+        "svc-a_POST": [0, 0, 2, 0],
+        "svc-b_GET": [0, 0, 1, 4],
+    })
+
+    series = gabanzhaf_mod._service_trace_series_from_frame(df)
+
+    assert set(series) == {"svc-a", "svc-b"}
+    assert np.allclose(series["svc-a"], np.array([0.0, 1.0, 5.0, 1.0]))
+    assert np.allclose(series["svc-b"], np.array([0.0, 0.0, 1.0, 4.0]))
+
+
+def test_service_trace_series_residual_isolates_fault_induced_delta():
+    # A service flat across inject (equally active pre and post) must reduce to
+    # ~0 residual; a service that only spikes post-inject must keep its bump.
+    df = pd.DataFrame({
+        "time": [0, 1, 2, 3, 4, 5],
+        "flat_GET": [5, 5, 5, 5, 5, 5],
+        "spike_GET": [0, 0, 0, 9, 8, 7],
+    })
+
+    series = gabanzhaf_mod._service_trace_series_from_frame(
+        df, inject_time=3, residual=True
+    )
+
+    assert np.allclose(series["flat"], np.zeros(3))
+    assert series["spike"].max() > 0.0
+    # discrimination property: perturbed service dominates the unperturbed one
+    assert series["spike"].max() > series["flat"].max()
+
+
+def test_service_trace_series_residual_noop_without_inject_time():
+    df = pd.DataFrame({"time": [0, 1], "svc_GET": [2, 4]})
+    full = gabanzhaf_mod._service_trace_series_from_frame(df)
+    no_inject = gabanzhaf_mod._service_trace_series_from_frame(df, residual=True)
+    assert np.allclose(full["svc"], no_inject["svc"])  # residual inert w/o inject
+
+
+def test_trace_min_energy_gate_drops_quiet_residual_service():
+    call_graph = {"caller": ["loud", "quiet"]}
+    trace_series = {
+        "caller": np.array([0.0, 0.0, 4.0, 0.0]),
+        "loud": np.array([0.0, 0.0, 5.0, 0.0]),
+        "quiet": np.array([0.0, 0.0, 0.2, 0.0]),  # < 10% of loudest peak
+    }
+    cfg = _GabanzhafConfig.from_kwargs({
+        "trace_residual": True,
+        "trace_min_energy": 0.1,
+        "trace_topology_max_lag": 0,
+        "trace_topology_min_conf": 0.1,
+    })
+
+    edges = gabanzhaf_mod._trace_multilag_edges(
+        call_graph, trace_series, cfg, source_kind="latency"
+    )
+
+    sources = {e[0] for e in edges}
+    assert "loud" in sources
+    assert "quiet" not in sources  # energy gate dropped it
+
+
+def test_rank_evidence_trace_lets_trace_move_the_order():
+    cols = ["svc-a_latency", "svc-b_latency"]
+    metric_ev = {"svc-a_latency": 0.5, "svc-b_latency": 0.5}
+    svc_anom = {"svc-a": 0.5, "svc-b": 0.5}  # metric tie
+    trace_sev = {"svc-b": 0.9, "svc-a": 0.1}  # trace prefers svc-b
+
+    ranks = gabanzhaf_mod._rank_evidence_metrics(
+        cols, metric_ev, svc_anom, "service_evidence_trace",
+        trace_service_evidence=trace_sev,
+    )
+    assert ranks[0] == "svc-b_latency"  # trace broke the metric tie
+
+
+def test_rank_evidence_trace_only_ignores_metric():
+    cols = ["svc-a_cpu", "svc-b_cpu"]
+    metric_ev = {"svc-a_cpu": 0.9, "svc-b_cpu": 0.1}  # metric prefers svc-a
+    svc_anom = {"svc-a": 0.9, "svc-b": 0.1}
+    trace_sev = {"svc-a": 0.1, "svc-b": 0.9}  # trace prefers svc-b
+
+    ranks = gabanzhaf_mod._rank_evidence_metrics(
+        cols, metric_ev, svc_anom, "trace_evidence", trace_service_evidence=trace_sev,
+    )
+    assert ranks[0] == "svc-b_cpu"  # metric ignored entirely
+
+
+def test_rank_evidence_trace_empty_trace_matches_metric_only():
+    cols = ["svc-a_cpu", "svc-b_cpu"]
+    metric_ev = {"svc-a_cpu": 0.3, "svc-b_cpu": 0.9}
+    svc_anom = {"svc-a": 0.3, "svc-b": 0.9}
+
+    combined = gabanzhaf_mod._rank_evidence_metrics(
+        cols, metric_ev, svc_anom, "service_evidence_trace", trace_service_evidence={}
+    )
+    metric_only = gabanzhaf_mod._rank_evidence_metrics(
+        cols, metric_ev, svc_anom, "service_evidence"
+    )
+    assert combined == metric_only  # degrades to metric-only without trace
+
+
+def test_build_call_graph_from_traces_span_hierarchy(tmp_path):
+    pd.DataFrame({
+        "spanID": ["root", "a", "b"],
+        "parentSpanID": ["", "root", "a"],
+        "serviceName": ["frontend", "checkout", "currency"],
+    }).to_csv(tmp_path / "traces.csv", index=False)
+
+    g = gabanzhaf_mod._build_call_graph_from_traces(
+        str(tmp_path), service_names={"frontend", "checkout", "currency"}
+    )
+    assert g == {"frontend": ["checkout"], "checkout": ["currency"]}
+
+
+def test_build_call_graph_missing_traces_returns_empty(tmp_path):
+    # No traces.csv (e.g. sock-shop) → empty graph → metric fallback.
+    assert gabanzhaf_mod._build_call_graph_from_traces(str(tmp_path)) == {}
+
+
+def test_match_service_maps_trace_name_to_metric_prefix():
+    names = {"frontend", "frontend-external", "checkoutservice"}
+    # "frontendservice" → longest metric prefix it starts with = "frontend"
+    assert gabanzhaf_mod._match_service("frontendservice", names) == "frontend"
+    assert gabanzhaf_mod._match_service("checkoutservice", names) == "checkoutservice"
+    assert gabanzhaf_mod._match_service("unknown", names) == "unknown"
+
+
+def test_trace_multilag_edges_detects_callee_leading_caller():
+    call_graph = {"caller": ["callee"]}
+    trace_series = {
+        "callee": np.array([0.0, 0.0, 5.0, 0.0, 0.0]),
+        "caller": np.array([0.0, 0.0, 0.0, 4.0, 0.0]),
+    }
+    cfg = _GabanzhafConfig.from_kwargs({
+        "trace_topology_max_lag": 2,
+        "trace_topology_min_conf": 0.1,
+        "trace_topology_conf": 0.7,
+    })
+
+    edges = gabanzhaf_mod._trace_multilag_edges(
+        call_graph,
+        trace_series,
+        cfg,
+        source_kind="latency",
+    )
+
+    assert edges == [("callee", "caller", pytest.approx(0.7), "latency", 1)]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Causal explanation matrix (diagonal base; coverage overlaid separately)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,6 +456,195 @@ def test_causal_explanation_matrix_rejects_duplicate_services():
 
     with pytest.raises(ValueError, match="Duplicate service"):
         _causal_explanation_matrix(["svc-a", "svc-b"], ["svc-a", "svc-b", "svc-b"])
+
+
+def test_apply_trace_topology_edges_overlays_off_diagonal_probability():
+    matrix = gabanzhaf_mod._causal_explanation_matrix(
+        ["callee", "other"],
+        ["callee", "caller", "other"],
+    )
+    edges = [("callee", "caller", 0.42, "latency", 1)]
+
+    out = gabanzhaf_mod._apply_trace_topology_edges(
+        matrix,
+        ["callee", "other"],
+        ["callee", "caller", "other"],
+        edges,
+    )
+
+    assert out[0, 1] == pytest.approx(0.42)
+    assert out[0, 0] == 1.0
+
+
+def test_frontier_bonus_rewards_abnormal_boundary_before_normal_upstream():
+    cfg = _GabanzhafConfig.from_kwargs({
+        "frontier_abnormal_threshold": 0.45,
+        "frontier_normal_threshold": 0.2,
+        "frontier_edge_threshold": 0.3,
+    })
+
+    bonus, diagnostics = gabanzhaf_mod._frontier_bonus(
+        causal_edges=[
+            ("svc-b", "svc-c", 0.6, "trace", 1),
+            ("svc-a", "svc-b", 0.6, "trace", 1),
+        ],
+        svc_anom_dict={"svc-a": 0.1, "svc-b": 0.8, "svc-c": 0.9},
+        config=cfg,
+    )
+
+    assert bonus["svc-b"] > 0.0
+    assert bonus.get("svc-c", 0.0) == 0.0
+    assert diagnostics["svc-b"]["upstream_state"] == "normal"
+
+
+def test_frontier_bonus_suppresses_candidate_when_upstream_is_abnormal():
+    cfg = _GabanzhafConfig.from_kwargs({
+        "frontier_abnormal_threshold": 0.45,
+        "frontier_edge_threshold": 0.3,
+    })
+
+    bonus, diagnostics = gabanzhaf_mod._frontier_bonus(
+        causal_edges=[
+            ("svc-b", "svc-c", 0.6, "trace", 1),
+            ("svc-a", "svc-b", 0.6, "trace", 1),
+        ],
+        svc_anom_dict={"svc-a": 0.7, "svc-b": 0.8, "svc-c": 0.9},
+        config=cfg,
+    )
+
+    assert bonus.get("svc-b", 0.0) == 0.0
+    assert diagnostics["svc-b"]["upstream_state"] == "abnormal"
+
+
+def test_frontier_bonus_ignores_weak_edges():
+    cfg = _GabanzhafConfig.from_kwargs({
+        "frontier_abnormal_threshold": 0.45,
+        "frontier_edge_threshold": 0.3,
+    })
+
+    bonus, diagnostics = gabanzhaf_mod._frontier_bonus(
+        causal_edges=[("svc-b", "svc-c", 0.2, "trace", 1)],
+        svc_anom_dict={"svc-b": 0.8, "svc-c": 0.9},
+        config=cfg,
+    )
+
+    assert bonus == {}
+    assert diagnostics == {}
+
+
+def test_apply_frontier_bonus_softly_adjusts_banzhaf_scores():
+    cfg = _GabanzhafConfig.from_kwargs({"frontier_alpha": 0.5})
+
+    adjusted = gabanzhaf_mod._apply_frontier_bonus(
+        svc_banzhaf={"svc-b": 0.4, "svc-c": 0.5},
+        frontier_bonus={"svc-b": 1.0},
+        config=cfg,
+    )
+
+    assert adjusted["svc-b"] > adjusted["svc-c"]
+    assert adjusted["svc-c"] == pytest.approx(0.5)
+
+
+def test_select_frontier_rescue_candidates_requires_high_confidence_boundary():
+    cfg = _GabanzhafConfig.from_kwargs({
+        "frontier_rescue_min_bonus": 0.25,
+        "frontier_rescue_min_child_count": 1,
+    })
+
+    rescued = gabanzhaf_mod._select_frontier_rescue_candidates(
+        frontier_bonus={"svc-b": 0.36, "svc-d": 0.20},
+        frontier_diagnostics={
+            "svc-b": {
+                "upstream_state": "normal",
+                "abnormal_children": [{"service": "svc-c"}],
+            },
+            "svc-d": {
+                "upstream_state": "normal",
+                "abnormal_children": [{"service": "svc-e"}],
+            },
+            "svc-x": {
+                "upstream_state": "abnormal",
+                "abnormal_children": [{"service": "svc-y"}],
+            },
+        },
+        svc_anom_dict={"svc-b": 0.7, "svc-d": 0.8, "svc-x": 0.9},
+        config=cfg,
+    )
+
+    assert rescued == ["svc-b"]
+
+
+def test_gabanzhaf_core_frontier_rescue_adds_high_confidence_candidate():
+    data = pd.DataFrame({
+        "time": np.arange(10),
+        "svc-a_cpu": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+        "svc-a_latency": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+        "svc-b_cpu": [1, 1, 1, 1, 1, 6, 6, 6, 6, 6],
+        "svc-b_latency": [1, 1, 1, 1, 1, 5, 5, 5, 5, 5],
+        "svc-c_cpu": [1, 1, 1, 1, 1, 7, 7, 7, 7, 7],
+        "svc-c_latency": [1, 1, 1, 1, 1, 8, 8, 8, 8, 8],
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=5,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "return_diagnostics": True,
+            "exact_candidate_k": 1,
+            "trace_topology_edges": [
+                ("svc-b", "svc-c", 0.6, "latency", 1),
+                ("svc-a", "svc-b", 0.6, "latency", 1),
+            ],
+            "frontier_alpha": 0.5,
+            "frontier_abnormal_threshold": 0.45,
+            "frontier_normal_threshold": 0.2,
+            "frontier_edge_threshold": 0.3,
+            "use_frontier_rescue": True,
+            "frontier_rescue_min_bonus": 0.25,
+        },
+    )
+
+    assert "svc-b" in result["game_candidates"]
+    assert result["frontier_candidate_added_count"] == 1
+    assert result["frontier_rescue_candidates"] == ["svc-b"]
+
+
+def test_gabanzhaf_core_does_not_rescue_frontier_candidate_when_disabled():
+    data = pd.DataFrame({
+        "time": np.arange(10),
+        "svc-a_cpu": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+        "svc-a_latency": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+        "svc-b_cpu": [1, 1, 1, 1, 1, 6, 6, 6, 6, 6],
+        "svc-b_latency": [1, 1, 1, 1, 1, 5, 5, 5, 5, 5],
+        "svc-c_cpu": [1, 1, 1, 1, 1, 7, 7, 7, 7, 7],
+        "svc-c_latency": [1, 1, 1, 1, 1, 8, 8, 8, 8, 8],
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=5,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "return_diagnostics": True,
+            "exact_candidate_k": 1,
+            "trace_topology_edges": [
+                ("svc-b", "svc-c", 0.6, "latency", 1),
+                ("svc-a", "svc-b", 0.6, "latency", 1),
+            ],
+            "frontier_alpha": 0.5,
+            "frontier_abnormal_threshold": 0.45,
+            "frontier_normal_threshold": 0.2,
+            "frontier_edge_threshold": 0.3,
+            "use_frontier_rescue": False,
+            "frontier_rescue_min_bonus": 0.25,
+        },
+    )
+
+    assert result["game_candidates"] == ["svc-c"]
+    assert result["frontier_candidate_added_count"] == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,6 +772,108 @@ def test_gabanzhaf_core_uses_identity_only_causal_matrix_without_coverage():
     for row, candidate in enumerate(candidates):
         expected[row, service_idx[candidate]] = 1.0
     assert np.array_equal(prob, expected)
+
+
+def test_gabanzhaf_core_overlays_trace_topology_edges_from_kwargs():
+    data = pd.DataFrame({
+        "time": np.arange(8),
+        "callee_cpu": [1, 1, 1, 1, 5, 5, 5, 5],
+        "caller_cpu": [1, 1, 1, 1, 4, 4, 4, 4],
+        "caller_latency": [1, 1, 1, 1, 6, 6, 6, 6],
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=4,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "return_diagnostics": True,
+            "trace_topology_conf": 0.7,
+            "trace_topology_edges": [("callee", "caller", 0.5, "latency", 1)],
+        },
+    )
+
+    matrix = np.asarray(result["causal_probability_matrix"], dtype=float)
+    candidates = result["game_candidates"]
+    services = result["game_services"]
+    assert matrix[candidates.index("callee"), services.index("caller")] == pytest.approx(0.5)
+    assert result["trace_edge_count"] == 1
+
+
+def test_gabanzhaf_core_applies_frontier_bonus_to_banzhaf_scores():
+    data = pd.DataFrame({
+        "time": np.arange(10),
+        "svc-a_cpu": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+        "svc-a_latency": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+        "svc-b_cpu": [1, 1, 1, 1, 1, 6, 6, 6, 6, 6],
+        "svc-b_latency": [1, 1, 1, 1, 1, 5, 5, 5, 5, 5],
+        "svc-c_cpu": [1, 1, 1, 1, 1, 7, 7, 7, 7, 7],
+        "svc-c_latency": [1, 1, 1, 1, 1, 8, 8, 8, 8, 8],
+    })
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=5,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "return_diagnostics": True,
+            "trace_topology_edges": [
+                ("svc-b", "svc-c", 0.6, "latency", 1),
+                ("svc-a", "svc-b", 0.6, "latency", 1),
+            ],
+            "frontier_alpha": 0.5,
+            "frontier_abnormal_threshold": 0.45,
+            "frontier_normal_threshold": 0.2,
+            "frontier_edge_threshold": 0.3,
+        },
+    )
+
+    assert result["frontier_bonus"]["svc-b"] > 0.0
+    assert result["frontier_diagnostics"]["svc-b"]["upstream_state"] == "normal"
+    assert result["service_banzhaf"]["svc-b"] > result["service_banzhaf_raw"]["svc-b"]
+
+
+def test_gabanzhaf_entry_loads_trace_multilag_topology_from_case_dir(tmp_path, monkeypatch):
+    case_dir = tmp_path / "svc-a_delay" / "1"
+    case_dir.mkdir(parents=True)
+    metric_path = case_dir / "simple_metrics.csv"
+    data = pd.DataFrame({
+        "time": np.arange(8),
+        "svc-a_cpu": [1, 1, 1, 1, 5, 5, 5, 5],
+        "svc-b_cpu": [1, 1, 1, 1, 4, 4, 4, 4],
+        "svc-b_latency": [1, 1, 1, 1, 6, 6, 6, 6],
+    })
+    data.to_csv(metric_path, index=False)
+    pd.DataFrame({
+        "time": np.arange(8),
+        "svc-a_GET": [0, 0, 5, 0, 0, 0, 0, 0],
+        "svc-b_GET": [0, 0, 0, 4, 0, 0, 0, 0],
+    }).to_csv(case_dir / "tracets_lat.csv", index=False)
+    # traces.csv encodes the call graph svc-b -> svc-a (parent span svc-b,
+    # child span svc-a); the pipeline builds the graph from it directly.
+    pd.DataFrame({
+        "spanID": ["p1", "c1"],
+        "parentSpanID": ["", "p1"],
+        "serviceName": ["svc-b", "svc-a"],
+    }).to_csv(case_dir / "traces.csv", index=False)
+
+    args = type("Args", (), {"data_path": str(metric_path)})()
+    result = gabanzhaf_mod.gabanzhaf(
+        data,
+        inject_time=4,
+        dataset="unit",
+        args=args,
+        return_diagnostics=True,
+        trace_topology_conf=0.7,
+    )
+
+    assert result["diagnostics"]["trace_edge_count"] == 1
+    assert result["diagnostics"]["trace_topology_edges"] == [
+        ("svc-a", "svc-b", pytest.approx(0.7), "latency", 1)
+    ]
+    assert "trace" in result["diagnostics"]["stage_timing"]
 
 
 @pytest.mark.parametrize("rank_mode", ["service_evidence", "metric_evidence"])

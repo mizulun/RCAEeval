@@ -11,6 +11,15 @@ from RCAEval.io.time_series import preprocess
 
 
 @dataclass(frozen=True)
+class _TraceTopologyFeatures:
+    edges: list
+    service_evidence: dict
+    latency_evidence: dict
+    error_evidence: dict
+    stage_timing: dict
+
+
+@dataclass(frozen=True)
 class _GabanzhafConfig:
     """Centralized runtime configuration for the GA-Banzhaf pipeline."""
 
@@ -29,6 +38,25 @@ class _GabanzhafConfig:
     coverage_loud_thr: float = 0.4
     coverage_lat_floor: float = 0.1
     coverage_min_loud: int = 2
+    use_trace_topology: bool = True
+    trace_topology_max_lag: int = 3
+    trace_topology_min_conf: float = 0.3
+    trace_topology_conf: float = 0.7
+    use_frontier: bool = True
+    frontier_abnormal_threshold: float = 0.45
+    frontier_normal_threshold: float = 0.20
+    frontier_edge_threshold: float = 0.30
+    frontier_uncertain_stop_factor: float = 0.50
+    frontier_alpha: float = 0.15
+    use_frontier_rescue: bool = True
+    frontier_rescue_min_bonus: float = 0.25
+    frontier_rescue_min_child_count: int = 1
+    frontier_rescue_max_candidates: int = 2
+    # Residual trace extraction: build edges from the inject pre/post delta
+    # instead of the full-window normalized series, so unperturbed services
+    # (which co-activate but are not the propagation path) drop out.
+    trace_residual: bool = False
+    trace_min_energy: float = 0.1
 
     @staticmethod
     def _positive_int_or_default(value, default):
@@ -42,6 +70,16 @@ class _GabanzhafConfig:
         if parsed_int <= 0:
             return int(default)
         return parsed_int
+
+    @staticmethod
+    def _nonnegative_int_or_default(value, default):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return int(default)
+        if not np.isfinite(parsed) or parsed < 0.0:
+            return int(default)
+        return int(parsed)
 
     @classmethod
     def from_kwargs(cls, kwargs):
@@ -66,6 +104,58 @@ class _GabanzhafConfig:
                 kwargs.get("coverage_min_loud", cls.coverage_min_loud),
                 cls.coverage_min_loud,
             ),
+            use_trace_topology=bool(
+                kwargs.get("use_trace_topology", cls.use_trace_topology)
+            ),
+            trace_topology_max_lag=cls._nonnegative_int_or_default(
+                kwargs.get("trace_topology_max_lag", cls.trace_topology_max_lag),
+                cls.trace_topology_max_lag,
+            ),
+            trace_topology_min_conf=float(
+                kwargs.get("trace_topology_min_conf", cls.trace_topology_min_conf)
+            ),
+            trace_topology_conf=float(
+                kwargs.get("trace_topology_conf", cls.trace_topology_conf)
+            ),
+            use_frontier=bool(kwargs.get("use_frontier", cls.use_frontier)),
+            frontier_abnormal_threshold=float(
+                kwargs.get("frontier_abnormal_threshold", cls.frontier_abnormal_threshold)
+            ),
+            frontier_normal_threshold=float(
+                kwargs.get("frontier_normal_threshold", cls.frontier_normal_threshold)
+            ),
+            frontier_edge_threshold=float(
+                kwargs.get("frontier_edge_threshold", cls.frontier_edge_threshold)
+            ),
+            frontier_uncertain_stop_factor=float(
+                kwargs.get(
+                    "frontier_uncertain_stop_factor",
+                    cls.frontier_uncertain_stop_factor,
+                )
+            ),
+            frontier_alpha=float(kwargs.get("frontier_alpha", cls.frontier_alpha)),
+            use_frontier_rescue=bool(
+                kwargs.get("use_frontier_rescue", cls.use_frontier_rescue)
+            ),
+            frontier_rescue_min_bonus=float(
+                kwargs.get("frontier_rescue_min_bonus", cls.frontier_rescue_min_bonus)
+            ),
+            frontier_rescue_min_child_count=cls._positive_int_or_default(
+                kwargs.get(
+                    "frontier_rescue_min_child_count",
+                    cls.frontier_rescue_min_child_count,
+                ),
+                cls.frontier_rescue_min_child_count,
+            ),
+            frontier_rescue_max_candidates=cls._positive_int_or_default(
+                kwargs.get(
+                    "frontier_rescue_max_candidates",
+                    cls.frontier_rescue_max_candidates,
+                ),
+                cls.frontier_rescue_max_candidates,
+            ),
+            trace_residual=bool(kwargs.get("trace_residual", cls.trace_residual)),
+            trace_min_energy=float(kwargs.get("trace_min_energy", cls.trace_min_energy)),
         )
 
 
@@ -319,23 +409,68 @@ def _banzhaf_power(prob_matrix, anomaly_weights, config):
     raise ValueError(f"Unsupported banzhaf_mode: {config.banzhaf_mode}")
 
 
-def _load_call_graph(dataset):
-    """Load the precomputed static service call graph for the dataset.
+_CALL_GRAPH_CACHE = {}
 
-    Returns {caller: [callees]}. The graph is system-static, so it is built
-    once offline (see tt_callgraph.json) and only loaded — no per-case trace
-    parsing. Returns {} when no graph ships for the dataset.
+
+def _match_service(trace_name, service_names):
+    """Map a trace serviceName to a metric service name.
+
+    Trace span service names occasionally differ from the metric column prefix
+    (e.g. "frontendservice" vs "frontend"). With no exact match, pick the
+    longest metric service name the trace name starts with; else keep it as-is.
+    Purely data-driven — no per-dataset hardcoding.
     """
-    import json
-    name = str(dataset or "").lower()
-    if "tt" not in name and "train-ticket" not in name:
+    if not service_names or trace_name in service_names:
+        return trace_name
+    best = None
+    for svc in service_names:
+        if trace_name.startswith(svc) and (best is None or len(svc) > len(best)):
+            best = svc
+    return best or trace_name
+
+
+def _build_call_graph_from_traces(case_dir, service_names=None, cache_key=None):
+    """Build {caller: [callees]} from a case's traces.csv span hierarchy.
+
+    A span's parent service is the caller, the span's own service is the callee
+    (the called downstream dependency). Same construction for every dataset; no
+    precomputed files, no dataset-name branching. Returns {} when no traces.csv
+    ships (e.g. sock-shop) so the pipeline degrades to pure metric ranking.
+
+    The service call graph is system-static, so the result is cached under
+    ``cache_key`` (the dataset) — only the first case of a run parses traces.csv;
+    the rest reuse it. Defaults to per-case (``case_dir``) when no key is given.
+    """
+    if not case_dir:
         return {}
-    path = os.path.join(os.path.dirname(__file__), "tt_callgraph.json")
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    key = (cache_key if cache_key is not None else case_dir,
+           tuple(sorted(service_names)) if service_names else None)
+    if key in _CALL_GRAPH_CACHE:
+        return _CALL_GRAPH_CACHE[key]
+
+    path = os.path.join(case_dir, "traces.csv")
+    graph = {}
+    if os.path.exists(path):
+        try:
+            df = pd.read_csv(
+                path, usecols=["spanID", "parentSpanID", "serviceName"], dtype=str
+            ).dropna(subset=["spanID", "serviceName"])
+            parent = df[["spanID", "serviceName"]].rename(
+                columns={"spanID": "parentSpanID", "serviceName": "callerSvc"}
+            )
+            joined = df.merge(parent, on="parentSpanID", how="inner")
+            edges = {}
+            for caller_raw, callee_raw in zip(joined["callerSvc"], joined["serviceName"]):
+                caller = _match_service(caller_raw, service_names)
+                callee = _match_service(callee_raw, service_names)
+                if caller != callee:
+                    edges.setdefault(caller, set()).add(callee)
+            graph = {k: sorted(v) for k, v in edges.items()}
+        except (OSError, ValueError, KeyError):
+            graph = {}
+
+    _CALL_GRAPH_CACHE[key] = graph
+    return graph
 
 
 def _service_latency_scores(cols, metric_ev):
@@ -351,6 +486,224 @@ def _service_latency_scores(cols, metric_ev):
         svc = _parse_svc(col)
         out[svc] = max(out.get(svc, 0.0), _finite_nonnegative(metric_ev.get(col, 0.0)))
     return out
+
+
+def _service_latency_family_scores(cols, metric_ev):
+    """Per-service score for latency and latency percentile metrics."""
+    out = {}
+    for col in cols:
+        metric_name = col.rsplit("_", 1)[-1]
+        if not metric_name.startswith("latency"):
+            continue
+        svc = _parse_svc(col)
+        out[svc] = max(out.get(svc, 0.0), _finite_nonnegative(metric_ev.get(col, 0.0)))
+    return out
+
+
+def _service_trace_series_from_frame(df, inject_time=None, residual=False):
+    """Aggregate trace operation time series to service-level trace series.
+
+    When ``residual`` and ``inject_time`` are set, each column is reduced to its
+    fault-induced delta: subtract the pre-inject baseline (mean of rows before
+    ``inject_time``) from the post-inject rows and clip negatives to zero. This
+    drops services that merely co-activate during the fault window but are not on
+    the propagation path, widening the signal-to-noise gap in edge scoring.
+    """
+    if df is None or df.empty:
+        return {}
+
+    use_residual = bool(residual) and inject_time is not None and "time" in df.columns
+    if use_residual:
+        times = pd.to_numeric(df["time"], errors="coerce").to_numpy(dtype=float)
+        pre_mask = times < float(inject_time)
+        post_mask = ~pre_mask
+
+    service_values = {}
+    for col in df.columns:
+        if col == "time":
+            continue
+        svc = str(col).rsplit("_", 1)[0]
+        values = pd.to_numeric(df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        if use_residual:
+            baseline = float(values[pre_mask].mean()) if pre_mask.any() else 0.0
+            values = np.clip(values[post_mask] - baseline, 0.0, None)
+        if svc in service_values:
+            service_values[svc] = service_values[svc] + values
+        else:
+            service_values[svc] = values
+    return service_values
+
+
+def _norm_trace_arr(values):
+    arr = np.nan_to_num(np.asarray(values, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if arr.size == 0:
+        return arr
+    lo = float(np.nanmin(arr))
+    hi = float(np.nanmax(arr))
+    if hi <= lo:
+        return np.zeros_like(arr, dtype=float)
+    return (arr - lo) / (hi - lo)
+
+
+def _lagged_cosine_score(source, target, lag):
+    source = np.asarray(source, dtype=float)
+    target = np.asarray(target, dtype=float)
+    lag = max(0, int(lag))
+    n = min(source.size, target.size)
+    if n == 0 or lag >= n:
+        return 0.0
+    if lag == 0:
+        a = source[:n]
+        b = target[:n]
+    else:
+        a = source[: n - lag]
+        b = target[lag:n]
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom <= 1e-12:
+        return 0.0
+    return max(0.0, min(float(np.dot(a, b) / denom), 1.0))
+
+
+def _trace_multilag_edges(call_graph, trace_series, config, source_kind):
+    """Build callee->caller propagation edges from trace time-series lag."""
+    if not call_graph or not trace_series:
+        return []
+
+    max_lag = max(0, int(config.trace_topology_max_lag))
+    base_conf = float(np.clip(config.trace_topology_conf, 0.0, 1.0))
+    min_conf = _finite_nonnegative(config.trace_topology_min_conf)
+    normalized = {
+        svc: _norm_trace_arr(values)
+        for svc, values in trace_series.items()
+    }
+
+    # Energy gate (residual mode only): drop services whose fault-induced bump is
+    # negligible relative to the loudest service, so unperturbed-but-co-active
+    # services never form edges. Measured on raw (pre-normalization) magnitude.
+    low_energy = set()
+    if config.trace_residual:
+        peaks = {
+            svc: float(np.max(values)) if np.asarray(values).size else 0.0
+            for svc, values in trace_series.items()
+        }
+        max_peak = max(peaks.values(), default=0.0)
+        min_energy = _finite_nonnegative(config.trace_min_energy)
+        if max_peak > 0.0:
+            low_energy = {
+                svc for svc, peak in peaks.items()
+                if peak / max_peak < min_energy
+            }
+
+    edges = []
+    for caller, callees in call_graph.items():
+        caller_values = normalized.get(caller)
+        if caller_values is None or caller in low_energy:
+            continue
+        for callee in callees:
+            callee_values = normalized.get(callee)
+            if callee_values is None or callee in low_energy:
+                continue
+            best_score = 0.0
+            best_lag = 0
+            for lag in range(max_lag + 1):
+                score = _lagged_cosine_score(callee_values, caller_values, lag)
+                if score > best_score:
+                    best_score = score
+                    best_lag = lag
+            confidence = base_conf * best_score
+            if confidence >= min_conf:
+                edges.append((callee, caller, float(confidence), source_kind, int(best_lag)))
+    return sorted(edges, key=lambda edge: (edge[0], edge[1], edge[3], edge[4]))
+
+
+def _merge_trace_topology_edges(edge_groups):
+    merged = {}
+    for edges in edge_groups:
+        for source, target, confidence, source_kind, lag in edges:
+            key = (source, target)
+            confidence = float(np.clip(confidence, 0.0, 1.0))
+            existing = merged.get(key)
+            if existing is None or confidence > existing[2]:
+                merged[key] = (source, target, confidence, source_kind, int(lag))
+    return sorted(merged.values(), key=lambda edge: (edge[0], edge[1], edge[3], edge[4]))
+
+
+def _trace_service_evidence(trace_series):
+    evidence = {}
+    for svc, values in (trace_series or {}).items():
+        normed = _norm_trace_arr(values)
+        evidence[svc] = float(np.max(normed)) if normed.size else 0.0
+    return evidence
+
+
+def _trace_topology_from_case_dir(case_dir, call_graph, config, inject_time=None):
+    stage_timing = {}
+    last_tick = perf_counter()
+
+    def _mark_stage(name):
+        nonlocal last_tick
+        now = perf_counter()
+        stage_timing[name] = float(now - last_tick)
+        last_tick = now
+
+    if not case_dir or not config.use_trace_topology:
+        return _TraceTopologyFeatures([], {}, {}, {}, stage_timing)
+
+    residual = bool(config.trace_residual)
+    latency_series = {}
+    error_series = {}
+    lat_path = os.path.join(case_dir, "tracets_lat.csv")
+    err_path = os.path.join(case_dir, "tracets_err.csv")
+
+    if os.path.exists(lat_path):
+        try:
+            latency_series = _service_trace_series_from_frame(
+                pd.read_csv(lat_path), inject_time=inject_time, residual=residual
+            )
+        except Exception:
+            latency_series = {}
+    _mark_stage("trace_latency")
+
+    if os.path.exists(err_path):
+        try:
+            error_series = _service_trace_series_from_frame(
+                pd.read_csv(err_path), inject_time=inject_time, residual=residual
+            )
+        except Exception:
+            error_series = {}
+    _mark_stage("trace_error")
+
+    latency_edges = _trace_multilag_edges(
+        call_graph,
+        latency_series,
+        config,
+        source_kind="latency",
+    )
+    error_edges = _trace_multilag_edges(
+        call_graph,
+        error_series,
+        config,
+        source_kind="error",
+    )
+    edges = _merge_trace_topology_edges([latency_edges, error_edges])
+    _mark_stage("trace_edges")
+
+    latency_evidence = _trace_service_evidence(latency_series)
+    error_evidence = _trace_service_evidence(error_series)
+    service_evidence = _norm_dict({
+        svc: max(latency_evidence.get(svc, 0.0), error_evidence.get(svc, 0.0))
+        for svc in set(latency_evidence) | set(error_evidence)
+    }) if (latency_evidence or error_evidence) else {}
+
+    return _TraceTopologyFeatures(
+        edges=edges,
+        service_evidence=service_evidence,
+        latency_evidence=latency_evidence,
+        error_evidence=error_evidence,
+        stage_timing=stage_timing,
+    )
 
 
 def _coverage_parents(call_graph, svc_anom_dict, svc_latency, config):
@@ -396,6 +749,193 @@ def _apply_coverage_edges(matrix, cand_list, service_list, coverage_parents, con
             if j is not None:
                 matrix[i, j] = max(matrix[i, j], conf)
     return matrix
+
+
+def _apply_trace_topology_edges(matrix, cand_list, service_list, trace_edges):
+    cand_idx = {svc: i for i, svc in enumerate(cand_list)}
+    svc_idx = {svc: j for j, svc in enumerate(service_list)}
+    for source, target, confidence, _source_kind, _lag in trace_edges:
+        i = cand_idx.get(source)
+        j = svc_idx.get(target)
+        if i is None or j is None:
+            continue
+        matrix[i, j] = max(matrix[i, j], float(np.clip(confidence, 0.0, 1.0)))
+    return matrix
+
+
+def _frontier_causal_edges(coverage_parents, trace_edges, coverage_conf):
+    """Return cause->effect edges used by the abnormal-frontier scorer."""
+    edges = []
+    conf = float(np.clip(coverage_conf, 0.0, 1.0))
+    for parent, children in (coverage_parents or {}).items():
+        for child in children:
+            edges.append((parent, child, conf, "coverage", 0))
+    for source, target, confidence, source_kind, lag in (trace_edges or []):
+        edges.append((
+            source,
+            target,
+            float(np.clip(confidence, 0.0, 1.0)),
+            source_kind,
+            int(lag),
+        ))
+    return edges
+
+
+def _frontier_bonus(causal_edges, svc_anom_dict, config):
+    """Softly reward the most-upstream abnormal service in a causal chain.
+
+    Edges must be in cause->effect direction. A service earns frontier bonus when
+    it is abnormal, explains at least one abnormal downstream service, and has no
+    abnormal causal predecessor. Uncertain predecessors dampen but do not erase
+    the bonus; abnormal predecessors suppress it.
+    """
+    if not config.use_frontier:
+        return {}, {}
+
+    abnormal_thr = _finite_nonnegative(config.frontier_abnormal_threshold)
+    normal_thr = min(
+        abnormal_thr,
+        _finite_nonnegative(config.frontier_normal_threshold),
+    )
+    edge_thr = _finite_nonnegative(config.frontier_edge_threshold)
+    uncertain_factor = float(np.clip(config.frontier_uncertain_stop_factor, 0.0, 1.0))
+
+    children = {}
+    predecessors = {}
+    for source, target, confidence, source_kind, lag in causal_edges or []:
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+        if confidence < edge_thr:
+            continue
+        source = str(source)
+        target = str(target)
+        edge = {
+            "source": source,
+            "target": target,
+            "confidence": confidence,
+            "source_kind": source_kind,
+            "lag": int(lag),
+        }
+        children.setdefault(source, []).append(edge)
+        predecessors.setdefault(target, []).append(edge)
+
+    bonus = {}
+    diagnostics = {}
+    for source, outgoing in sorted(children.items()):
+        source_score = _finite_nonnegative(svc_anom_dict.get(source, 0.0))
+        if source_score < abnormal_thr:
+            continue
+
+        abnormal_children = []
+        child_signal = 0.0
+        for edge in outgoing:
+            target = edge["target"]
+            target_score = _finite_nonnegative(svc_anom_dict.get(target, 0.0))
+            if target_score < abnormal_thr:
+                continue
+            abnormal_children.append({
+                "service": target,
+                "score": target_score,
+                "confidence": edge["confidence"],
+                "source_kind": edge["source_kind"],
+                "lag": edge["lag"],
+            })
+            child_signal += edge["confidence"] * target_score
+
+        if not abnormal_children:
+            continue
+
+        upstream_edges = predecessors.get(source, [])
+        upstream_scores = [
+            (
+                edge["source"],
+                _finite_nonnegative(svc_anom_dict.get(edge["source"], 0.0)),
+                edge["confidence"],
+            )
+            for edge in upstream_edges
+        ]
+        if any(score >= abnormal_thr for _svc, score, _conf in upstream_scores):
+            upstream_state = "abnormal"
+            stop_factor = 0.0
+        elif any(score > normal_thr for _svc, score, _conf in upstream_scores):
+            upstream_state = "uncertain"
+            stop_factor = uncertain_factor
+        elif upstream_scores:
+            upstream_state = "normal"
+            stop_factor = 1.0
+        else:
+            upstream_state = "none"
+            stop_factor = 1.0
+
+        raw_bonus = source_score * child_signal * stop_factor
+        clipped_bonus = float(np.clip(raw_bonus, 0.0, 1.0))
+        diagnostics[source] = {
+            "score": source_score,
+            "upstream_state": upstream_state,
+            "upstream_services": [
+                {"service": svc, "score": score, "confidence": conf}
+                for svc, score, conf in upstream_scores
+            ],
+            "abnormal_children": abnormal_children,
+            "raw_bonus": float(raw_bonus),
+            "bonus": clipped_bonus,
+        }
+        if clipped_bonus > 0.0:
+            bonus[source] = clipped_bonus
+
+    return bonus, diagnostics
+
+
+def _apply_frontier_bonus(svc_banzhaf, frontier_bonus, config):
+    if not config.use_frontier:
+        return dict(svc_banzhaf or {})
+
+    alpha = float(np.clip(config.frontier_alpha, 0.0, 1.0))
+    if alpha <= 0.0 or not frontier_bonus:
+        return dict(svc_banzhaf or {})
+
+    adjusted = dict(svc_banzhaf or {})
+    max_score = max(
+        [_finite_nonnegative(score) for score in adjusted.values()] + [1.0]
+    )
+    for svc, bonus in frontier_bonus.items():
+        if svc not in adjusted:
+            continue
+        adjusted[svc] = (
+            _finite_nonnegative(adjusted.get(svc, 0.0))
+            + alpha * float(np.clip(bonus, 0.0, 1.0)) * max_score
+        )
+    return adjusted
+
+
+def _select_frontier_rescue_candidates(
+    frontier_bonus,
+    frontier_diagnostics,
+    svc_anom_dict,
+    config,
+):
+    if not config.use_frontier or not config.use_frontier_rescue:
+        return []
+
+    min_bonus = _finite_nonnegative(config.frontier_rescue_min_bonus)
+    min_children = max(1, int(config.frontier_rescue_min_child_count))
+    max_candidates = max(1, int(config.frontier_rescue_max_candidates))
+    candidates = []
+    for svc, bonus in (frontier_bonus or {}).items():
+        if svc not in svc_anom_dict:
+            continue
+        bonus = float(np.clip(bonus, 0.0, 1.0))
+        if bonus < min_bonus:
+            continue
+        diag = (frontier_diagnostics or {}).get(svc, {})
+        if diag.get("upstream_state") == "abnormal":
+            continue
+        child_count = len(diag.get("abnormal_children", []) or [])
+        if child_count < min_children:
+            continue
+        candidates.append((svc, bonus, child_count, _finite_nonnegative(svc_anom_dict.get(svc, 0.0))))
+
+    candidates.sort(key=lambda item: (-item[1], -item[2], -item[3], item[0]))
+    return [svc for svc, _bonus, _child_count, _score in candidates[:max_candidates]]
 
 
 def _split_raw_windows(data, inject_time, anomalies):
@@ -484,13 +1024,44 @@ def _rank_metrics(all_cols, svc_banzhaf):
     return sorted(all_cols, key=lambda col: (-nb.get(_parse_svc(col), 0.0), col))
 
 
-def _rank_evidence_metrics(all_cols, metric_ev, svc_anom_dict, rank_mode):
+def _rank_evidence_metrics(
+    all_cols, metric_ev, svc_anom_dict, rank_mode, trace_service_evidence=None
+):
     """Rank metrics without the causal game or Banzhaf power calculation."""
+    if rank_mode == "trace_evidence":
+        # No-metric ablation: rank purely by per-service trace evidence. Within
+        # a service all columns tie (trace has no metric-type resolution), so
+        # the column name breaks ties — only the service order is meaningful.
+        norm_trace = _norm_dict(trace_service_evidence) if trace_service_evidence else {}
+        return sorted(
+            all_cols,
+            key=lambda col: (
+                -_finite_nonnegative(norm_trace.get(_parse_svc(col), 0.0)),
+                col,
+            ),
+        )
     if rank_mode == "service_evidence":
         return sorted(
             all_cols,
             key=lambda col: (
                 -_finite_nonnegative(svc_anom_dict.get(_parse_svc(col), 0.0)),
+                -_finite_nonnegative(metric_ev.get(col, 0.0)),
+                col,
+            ),
+        )
+    if rank_mode == "service_evidence_trace":
+        # Equal-weight normalized sum of metric and trace per-service evidence,
+        # bypassing the Banzhaf game. metric column evidence breaks ties.
+        norm_metric = _norm_dict(svc_anom_dict) if svc_anom_dict else {}
+        norm_trace = _norm_dict(trace_service_evidence) if trace_service_evidence else {}
+        combined = {
+            svc: norm_metric.get(svc, 0.0) + norm_trace.get(svc, 0.0)
+            for svc in set(norm_metric) | set(norm_trace)
+        }
+        return sorted(
+            all_cols,
+            key=lambda col: (
+                -_finite_nonnegative(combined.get(_parse_svc(col), 0.0)),
                 -_finite_nonnegative(metric_ev.get(col, 0.0)),
                 col,
             ),
@@ -517,6 +1088,15 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
               → call-graph coverage → Banzhaf → metric ranking
     """
     config = _GabanzhafConfig.from_kwargs(kwargs)
+    trace_topology_edges = (
+        list(kwargs.get("trace_topology_edges", []))
+        if config.use_trace_topology
+        else []
+    )
+    trace_service_evidence = kwargs.get("trace_service_evidence", {}) or {}
+    trace_latency_evidence = kwargs.get("trace_latency_evidence", {}) or {}
+    trace_error_evidence = kwargs.get("trace_error_evidence", {}) or {}
+    trace_stage_timing = kwargs.get("trace_stage_timing", {}) or {}
     return_stage_timing = bool(kwargs.get("return_stage_timing", False))
     stage_timing = {}
     last_tick = perf_counter()
@@ -547,7 +1127,10 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     svc_names = sorted(svc_anom_dict.keys())
     _mark_stage("metric_evidence")
 
-    if config.rank_mode not in {"banzhaf", "service_evidence", "metric_evidence"}:
+    if config.rank_mode not in {
+        "banzhaf", "service_evidence", "metric_evidence",
+        "service_evidence_trace", "trace_evidence",
+    }:
         raise ValueError(f"Unsupported rank_mode: {config.rank_mode}")
 
     # ── 4. Candidates = top services by anomaly score ────────────────────────
@@ -556,13 +1139,36 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     cand_list = sorted(seed_svcs)
     _mark_stage("candidates")
 
+    svc_latency = _service_latency_scores(cols, metric_ev)
+    svc_latency_family = _service_latency_family_scores(cols, metric_ev)
+    trace_topology_edges = [
+        edge
+        for edge in trace_topology_edges
+        if svc_latency_family.get(edge[1], 0.0) >= config.coverage_lat_floor
+    ]
+
     # ── 4b. Call-graph coverage: rescue quiet roots of multi-victim faults ────
     if bool(kwargs.get("use_coverage", True)):
-        call_graph = _load_call_graph(dataset)
-        svc_latency = _service_latency_scores(cols, metric_ev)
+        call_graph = kwargs.get("call_graph", {}) or {}
         coverage_parents = _coverage_parents(call_graph, svc_anom_dict, svc_latency, config)
     else:
         coverage_parents = {}
+    frontier_causal_edges = _frontier_causal_edges(
+        coverage_parents,
+        trace_topology_edges,
+        config.coverage_conf,
+    )
+    frontier_bonus, frontier_diagnostics = _frontier_bonus(
+        frontier_causal_edges,
+        svc_anom_dict,
+        config,
+    )
+    frontier_rescue_candidates = _select_frontier_rescue_candidates(
+        frontier_bonus,
+        frontier_diagnostics,
+        svc_anom_dict,
+        config,
+    )
 
     # ── 5. Probabilistic causal game ─────────────────────────────────────────
     game_candidates = _select_exact_candidates(cand_list, svc_anom_dict, config)
@@ -571,6 +1177,12 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
     for parent in coverage_parents:
         if parent in svc_anom_dict and parent not in game_candidates:
             game_candidates.append(parent)
+    trace_added_candidates = 0
+    frontier_candidate_added_count = 0
+    for svc in frontier_rescue_candidates:
+        if svc not in game_candidates:
+            game_candidates.append(svc)
+            frontier_candidate_added_count += 1
     game_services = sorted(svc_anom_dict.keys())
     if config.rank_mode == "banzhaf":
         prob_matrix = _causal_explanation_matrix(game_candidates, game_services)
@@ -580,6 +1192,12 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
             game_services,
             coverage_parents,
             config.coverage_conf,
+        )
+        prob_matrix = _apply_trace_topology_edges(
+            prob_matrix,
+            game_candidates,
+            game_services,
+            trace_topology_edges,
         )
         anomaly_weights = np.asarray(
             [svc_anom_dict.get(svc, 0.0) for svc in game_services],
@@ -591,12 +1209,18 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     # ── 6. Banzhaf power index ────────────────────────────────────────────────
     svc_banzhaf = {}
+    svc_banzhaf_raw = {}
     if config.rank_mode == "banzhaf":
         banzhaf_values = _banzhaf_power(prob_matrix, anomaly_weights, config)
-        svc_banzhaf = {
+        svc_banzhaf_raw = {
             game_candidates[i]: float(banzhaf_values[i])
             for i in range(len(game_candidates))
         }
+        svc_banzhaf = _apply_frontier_bonus(
+            svc_banzhaf_raw,
+            frontier_bonus,
+            config,
+        )
     _mark_stage("banzhaf")
 
     # ── 7. Final metric-level ranking by Banzhaf score ───────────────────────
@@ -608,6 +1232,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
             metric_ev,
             svc_anom_dict,
             config.rank_mode,
+            trace_service_evidence=trace_service_evidence,
         )
     _mark_stage("ranking")
 
@@ -622,6 +1247,20 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
             "metric_evidence": dict(metric_ev),
             "metric_service_evidence": dict(svc_anom_dict),
             "service_banzhaf": dict(svc_banzhaf),
+            "service_banzhaf_raw": dict(svc_banzhaf_raw),
+            "trace_topology_edges": list(trace_topology_edges),
+            "trace_edge_count": len(trace_topology_edges),
+            "trace_candidate_added_count": trace_added_candidates,
+            "trace_service_evidence": dict(trace_service_evidence),
+            "trace_latency_evidence": dict(trace_latency_evidence),
+            "trace_error_evidence": dict(trace_error_evidence),
+            "trace_stage_timing": dict(trace_stage_timing),
+            "frontier_causal_edges": list(frontier_causal_edges),
+            "frontier_edge_count": len(frontier_causal_edges),
+            "frontier_bonus": dict(frontier_bonus),
+            "frontier_diagnostics": dict(frontier_diagnostics),
+            "frontier_rescue_candidates": list(frontier_rescue_candidates),
+            "frontier_candidate_added_count": frontier_candidate_added_count,
             "root_service": kwargs.get("root_service"),
             "root_candidate_recall": (
                 kwargs.get("root_service") in set(game_candidates)
@@ -654,6 +1293,11 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
       GABANZHAF_BANZHAF_MODE   closed_form (default) | bruteforce
       GABANZHAF_EXACT_CANDIDATE_K   override the game candidate count
       GABANZHAF_DISABLE_COVERAGE=1  turn off call-graph coverage (ablation)
+      GABANZHAF_DISABLE_TRACE=1  drop all trace info (empty call graph → metric)
+      GABANZHAF_DISABLE_TRACE_TOPOLOGY=1  turn off trace-derived topology
+      GABANZHAF_DISABLE_FRONTIER=1  turn off abnormal-frontier bonus (ablation)
+      GABANZHAF_DISABLE_FRONTIER_RESCUE=1  turn off frontier candidate rescue
+      GABANZHAF_TRACE_RESIDUAL=1  build trace edges from inject pre/post residual
       GABANZHAF_PROFILE=1      print per-stage timing to stderr
                                (preprocess | metric_evidence | candidates |
                                 banzhaf | ranking)
@@ -671,23 +1315,63 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
         )
     if os.environ.get("GABANZHAF_DISABLE_COVERAGE") == "1":
         runtime_kwargs.setdefault("use_coverage", False)
+    if os.environ.get("GABANZHAF_DISABLE_TRACE_TOPOLOGY") == "1":
+        runtime_kwargs.setdefault("use_trace_topology", False)
+    if os.environ.get("GABANZHAF_DISABLE_FRONTIER") == "1":
+        runtime_kwargs.setdefault("use_frontier", False)
+    if os.environ.get("GABANZHAF_DISABLE_FRONTIER_RESCUE") == "1":
+        runtime_kwargs.setdefault("use_frontier_rescue", False)
+    if os.environ.get("GABANZHAF_TRACE_RESIDUAL") == "1":
+        runtime_kwargs.setdefault("trace_residual", True)
     if os.environ.get("GABANZHAF_RANK_MODE"):
         runtime_kwargs.setdefault("rank_mode", os.environ["GABANZHAF_RANK_MODE"])
     if os.environ.get("GABANZHAF_WRITE_DIAGNOSTICS") == "1":
         runtime_kwargs["return_diagnostics"] = True
         runtime_kwargs["return_stage_timing"] = True
+    disable_trace = os.environ.get("GABANZHAF_DISABLE_TRACE") == "1"
     args_ns = kwargs.get("args")
     if args_ns and hasattr(args_ns, "data_path"):
         case_dir = os.path.dirname(args_ns.data_path)
         fault_dir = os.path.basename(os.path.dirname(case_dir))
         runtime_kwargs["root_service"] = fault_dir.split("_", 1)[0]
+        trace_config = _GabanzhafConfig.from_kwargs(runtime_kwargs)
+        # Build the service call graph from this case's own traces.csv — same
+        # construction for every dataset, no precomputed files. Ablation knob
+        # GABANZHAF_DISABLE_TRACE forces it empty (no trace information at all).
+        service_names = {_parse_svc(c) for c in data.columns if c != "time"}
+        # Cache per dataset root (parent of the fault dirs), so only the first
+        # case of a run parses traces.csv — the call graph is system-static.
+        dataset_root = os.path.dirname(os.path.dirname(case_dir))
+        call_graph = (
+            {} if disable_trace
+            else _build_call_graph_from_traces(
+                case_dir, service_names, cache_key=dataset_root
+            )
+        )
+        runtime_kwargs["call_graph"] = call_graph
+        trace_features = _trace_topology_from_case_dir(
+            case_dir,
+            call_graph,
+            trace_config,
+            inject_time=inject_time,
+        )
+        runtime_kwargs.setdefault("trace_topology_edges", trace_features.edges)
+        runtime_kwargs.setdefault("trace_service_evidence", trace_features.service_evidence)
+        runtime_kwargs.setdefault("trace_latency_evidence", trace_features.latency_evidence)
+        runtime_kwargs.setdefault("trace_error_evidence", trace_features.error_evidence)
+        runtime_kwargs.setdefault("trace_stage_timing", trace_features.stage_timing)
     if _profile:
         runtime_kwargs["return_stage_timing"] = True
 
     result = _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
     if "diagnostics" in result:
+        trace_stage_timing = result["diagnostics"].get("trace_stage_timing", {})
+        merged_stage_timing = {}
+        if trace_stage_timing:
+            merged_stage_timing["trace"] = float(sum(trace_stage_timing.values()))
+        merged_stage_timing.update(result.get("stage_timing", {}))
         result["diagnostics"]["stage_timing"] = dict(
-            result.get("stage_timing", {})
+            merged_stage_timing
         )
 
     if _profile and "stage_timing" in result:
