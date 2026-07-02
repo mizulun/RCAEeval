@@ -72,3 +72,6 @@ for ds in $DATASETS; do
 done
 echo "DONE"
 echo "Saved: per-mode files in $OUTDIR/<dataset>__<mode>.txt ; combined log: $COMBINED"
+
+# Auto-tabulate into CSV (one per dataset+metric) next to the .txt files.
+"$PY" tabulate_ablation.py --dir "$OUTDIR" --metric all

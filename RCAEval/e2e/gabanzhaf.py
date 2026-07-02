@@ -41,7 +41,7 @@ class _GabanzhafConfig:
     use_trace_topology: bool = True
     trace_topology_max_lag: int = 3
     trace_topology_min_conf: float = 0.3
-    trace_topology_conf: float = 0.7
+    trace_topology_conf: float = 0.85
     use_frontier: bool = True
     frontier_abnormal_threshold: float = 0.45
     frontier_normal_threshold: float = 0.20
@@ -52,6 +52,11 @@ class _GabanzhafConfig:
     frontier_rescue_min_bonus: float = 0.25
     frontier_rescue_min_child_count: int = 1
     frontier_rescue_max_candidates: int = 2
+    # Victim demotion: when an abnormal service's causal upstream is also
+    # abnormal, it is a propagation victim, so shrink its self-coverage (the
+    # diagonal 1.0) toward victim_floor. Roots (normal/absent upstream) keep 1.0.
+    use_victim_demotion: bool = True
+    victim_floor: float = 0.5
     # Residual trace extraction: build edges from the inject pre/post delta
     # instead of the full-window normalized series, so unperturbed services
     # (which co-activate but are not the propagation path) drop out.
@@ -156,6 +161,10 @@ class _GabanzhafConfig:
             ),
             trace_residual=bool(kwargs.get("trace_residual", cls.trace_residual)),
             trace_min_energy=float(kwargs.get("trace_min_energy", cls.trace_min_energy)),
+            use_victim_demotion=bool(
+                kwargs.get("use_victim_demotion", cls.use_victim_demotion)
+            ),
+            victim_floor=float(kwargs.get("victim_floor", cls.victim_floor)),
         )
 
 
@@ -885,6 +894,48 @@ def _frontier_bonus(causal_edges, svc_anom_dict, config):
     return bonus, diagnostics
 
 
+def _victim_factors(causal_edges, svc_anom_dict, config, protected=None):
+    """Per-service self-coverage multiplier ∈ [victim_floor, 1].
+
+    Edges are cause->effect. A service is a propagation victim when one of its
+    causal predecessors is itself abnormal — then its own anomaly is credited
+    upstream, so its self-coverage (diagonal 1.0) is shrunk toward victim_floor.
+    A service whose predecessors are all normal/absent is a root and keeps 1.0.
+
+    `protected` services are immune to demotion: coverage already inferred them
+    to be roots that uniquely explain a cluster of loud victims, so the (opposite
+    -direction) trace evidence must not overrule that and demote them as victims.
+
+    ponytail: predecessor build + threshold states duplicate _frontier_bonus
+    (lines ~795-819, 856-867); factor into a shared _upstream_state helper if
+    victim demotion lands as a default.
+    """
+    protected = set(protected or ())
+    floor = float(np.clip(config.victim_floor, 0.0, 1.0))
+    abnormal_thr = _finite_nonnegative(config.frontier_abnormal_threshold)
+    normal_thr = min(abnormal_thr, _finite_nonnegative(config.frontier_normal_threshold))
+    edge_thr = _finite_nonnegative(config.frontier_edge_threshold)
+    uncertain_factor = float(np.clip(config.frontier_uncertain_stop_factor, 0.0, 1.0))
+
+    predecessors = {}
+    for source, target, confidence, _kind, _lag in causal_edges or []:
+        if float(np.clip(confidence, 0.0, 1.0)) < edge_thr:
+            continue
+        predecessors.setdefault(str(target), []).append(str(source))
+
+    factors = {}
+    for svc, upstreams in predecessors.items():
+        if svc in protected:
+            continue  # coverage-inferred root → keep self-coverage at 1.0
+        up_scores = [_finite_nonnegative(svc_anom_dict.get(u, 0.0)) for u in upstreams]
+        if any(s >= abnormal_thr for s in up_scores):
+            factors[svc] = floor
+        elif any(s > normal_thr for s in up_scores):
+            factors[svc] = floor + (1.0 - floor) * uncertain_factor
+        # all-normal predecessors → root → leave at default 1.0 (omit)
+    return factors
+
+
 def _apply_frontier_bonus(svc_banzhaf, frontier_bonus, config):
     if not config.use_frontier:
         return dict(svc_banzhaf or {})
@@ -1199,6 +1250,16 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
             game_services,
             trace_topology_edges,
         )
+        if config.use_victim_demotion:
+            victim_factor = _victim_factors(
+                frontier_causal_edges, svc_anom_dict, config,
+                protected=set(coverage_parents),
+            )
+            svc_col = {svc: j for j, svc in enumerate(game_services)}
+            for i, cand in enumerate(game_candidates):
+                f = victim_factor.get(cand)
+                if f is not None and cand in svc_col:
+                    prob_matrix[i, svc_col[cand]] *= f
         anomaly_weights = np.asarray(
             [svc_anom_dict.get(svc, 0.0) for svc in game_services],
             dtype=float,
@@ -1325,6 +1386,16 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
         runtime_kwargs.setdefault("trace_residual", True)
     if os.environ.get("GABANZHAF_RANK_MODE"):
         runtime_kwargs.setdefault("rank_mode", os.environ["GABANZHAF_RANK_MODE"])
+    if os.environ.get("GABANZHAF_FRONTIER_ALPHA"):
+        runtime_kwargs.setdefault("frontier_alpha", float(os.environ["GABANZHAF_FRONTIER_ALPHA"]))
+    if os.environ.get("GABANZHAF_TRACE_TOPOLOGY_CONF"):
+        runtime_kwargs.setdefault("trace_topology_conf", float(os.environ["GABANZHAF_TRACE_TOPOLOGY_CONF"]))
+    if os.environ.get("GABANZHAF_USE_VICTIM_DEMOTION") == "1":
+        runtime_kwargs.setdefault("use_victim_demotion", True)
+    if os.environ.get("GABANZHAF_DISABLE_VICTIM_DEMOTION") == "1":
+        runtime_kwargs.setdefault("use_victim_demotion", False)
+    if os.environ.get("GABANZHAF_VICTIM_FLOOR"):
+        runtime_kwargs.setdefault("victim_floor", float(os.environ["GABANZHAF_VICTIM_FLOOR"]))
     if os.environ.get("GABANZHAF_WRITE_DIAGNOSTICS") == "1":
         runtime_kwargs["return_diagnostics"] = True
         runtime_kwargs["return_stage_timing"] = True

@@ -87,6 +87,14 @@ METHOD_VARIANTS = {
             "ablation_role": "with_trace_no_residual",
         },
     },
+    "gabanzhaf_no_victim_demotion": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_VICTIM_DEMOTION": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "ablation_role": "no_victim_demotion",
+        },
+    },
     "gabanzhaf_no_lag_1": {
         "base_method": "gabanzhaf",
         "env": {"GABANZHAF_DISABLE_LAG_TOPOLOGY": "1"},
@@ -129,6 +137,64 @@ METHOD_VARIANTS = {
             "base_method": "gabanzhaf",
             "banzhaf_mode": "bruteforce",
             "ablation_role": "pure_banzhaf",
+        },
+    },
+    "gabanzhaf_full": {
+        "base_method": "gabanzhaf",
+        "env": {},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "trace_topology": "on",
+            "frontier": "on",
+            "frontier_rescue": "on",
+            "ablation_role": "trace_frontier_full",
+        },
+    },
+    "gabanzhaf_no_trace_topology": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_TRACE_TOPOLOGY": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "trace_topology": "off",
+            "frontier": "on",
+            "frontier_rescue": "on",
+            "ablation_role": "no_trace_topology",
+        },
+    },
+    "gabanzhaf_no_frontier": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_FRONTIER": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "trace_topology": "on",
+            "frontier": "off",
+            "frontier_rescue": "off",
+            "ablation_role": "no_frontier",
+        },
+    },
+    "gabanzhaf_no_frontier_rescue": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_FRONTIER_RESCUE": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "trace_topology": "on",
+            "frontier": "on",
+            "frontier_rescue": "off",
+            "ablation_role": "no_frontier_rescue",
+        },
+    },
+    "gabanzhaf_no_trace_no_frontier": {
+        "base_method": "gabanzhaf",
+        "env": {
+            "GABANZHAF_DISABLE_TRACE_TOPOLOGY": "1",
+            "GABANZHAF_DISABLE_FRONTIER": "1",
+        },
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "trace_topology": "off",
+            "frontier": "off",
+            "frontier_rescue": "off",
+            "ablation_role": "metric_coverage_only",
         },
     },
     "gabanzhaf_k1": {
@@ -220,6 +286,47 @@ METHOD_VARIANTS = {
             "exact_candidate_k": 16,
             "ablation_role": "exact_candidate_k=16",
         },
+    },
+    # Trace-vs-metric rebalance sweep: raise the frontier bonus cap
+    # (frontier_alpha, base 0.15) and the off-diagonal trace probability cap
+    # (trace_topology_conf, base 0.7) so trace can reorder the ranking.
+    **{
+        f"gabanzhaf_falpha_{tag}": {
+            "base_method": "gabanzhaf",
+            "env": {"GABANZHAF_FRONTIER_ALPHA": val},
+            "metadata": {
+                "base_method": "gabanzhaf",
+                "frontier_alpha": float(val),
+                "ablation_role": f"frontier_alpha={val}",
+            },
+        }
+        for tag, val in [("035", "0.35"), ("060", "0.60"), ("100", "1.0")]
+    },
+    **{
+        f"gabanzhaf_tconf_{tag}": {
+            "base_method": "gabanzhaf",
+            "env": {"GABANZHAF_TRACE_TOPOLOGY_CONF": val},
+            "metadata": {
+                "base_method": "gabanzhaf",
+                "trace_topology_conf": float(val),
+                "ablation_role": f"trace_topology_conf={val}",
+            },
+        }
+        for tag, val in [("085", "0.85"), ("095", "0.95")]
+    },
+    # Victim demotion sweep: shrink an abnormal service's self-coverage toward
+    # victim_floor when its causal upstream is also abnormal (propagation victim).
+    **{
+        f"gabanzhaf_victim_{tag}": {
+            "base_method": "gabanzhaf",
+            "env": {"GABANZHAF_USE_VICTIM_DEMOTION": "1", "GABANZHAF_VICTIM_FLOOR": val},
+            "metadata": {
+                "base_method": "gabanzhaf",
+                "victim_floor": float(val),
+                "ablation_role": f"victim_floor={val}",
+            },
+        }
+        for tag, val in [("03", "0.3"), ("05", "0.5"), ("07", "0.7")]
     },
 }
 
@@ -408,6 +515,9 @@ def save_csv(records, path):
             "banzhaf_mode",
             "rank_mode",
             "exact_candidate_k",
+            "trace_topology",
+            "frontier",
+            "frontier_rescue",
             "ablation_role",
         ]
         if any(key in record for record in records)
