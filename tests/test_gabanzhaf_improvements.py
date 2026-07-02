@@ -921,6 +921,22 @@ def test_gabanzhaf_entry_reads_banzhaf_mode_env(monkeypatch):
     assert captured_kwargs["banzhaf_mode"] == "bruteforce"
 
 
+def test_victim_factors_demotes_service_with_abnormal_upstream():
+    # Call chain A -> B -> C (cause->effect edges). B and C abnormal, A normal.
+    # C has an abnormal predecessor (B) => victim, self-coverage demoted to floor.
+    # B's only predecessor (A) is normal => root, keeps 1.0 (absent from dict).
+    _victim_factors = gabanzhaf_mod._victim_factors
+    edges = [("A", "B", 0.9, "trace", 1), ("B", "C", 0.9, "trace", 1)]
+    svc_anom = {"A": 0.05, "B": 0.8, "C": 0.7}
+    cfg = _GabanzhafConfig.from_kwargs({"use_victim_demotion": True, "victim_floor": 0.4})
+
+    factors = _victim_factors(edges, svc_anom, cfg)
+
+    assert factors.get("C") == pytest.approx(0.4)   # victim: demoted to floor
+    assert "B" not in factors                        # root: undemoted (implicit 1.0)
+    assert "A" not in factors
+
+
 def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
     source_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
