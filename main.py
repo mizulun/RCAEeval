@@ -70,6 +70,7 @@ if is_py310():
         banzhaf,
         gabanzhaf,
         gabanzhaf_with_trace,
+        merit,
         predict_banzhaf,
     )
 

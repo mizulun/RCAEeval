@@ -42,16 +42,12 @@ class _GabanzhafConfig:
     trace_topology_max_lag: int = 3
     trace_topology_min_conf: float = 0.3
     trace_topology_conf: float = 0.85
-    use_frontier: bool = True
+    # Causal-edge thresholds used by victim demotion (historically named
+    # frontier_*; names kept to preserve the kwargs API).
     frontier_abnormal_threshold: float = 0.45
     frontier_normal_threshold: float = 0.20
     frontier_edge_threshold: float = 0.30
     frontier_uncertain_stop_factor: float = 0.50
-    frontier_alpha: float = 0.15
-    use_frontier_rescue: bool = True
-    frontier_rescue_min_bonus: float = 0.25
-    frontier_rescue_min_child_count: int = 1
-    frontier_rescue_max_candidates: int = 2
     # Victim demotion: when an abnormal service's causal upstream is also
     # abnormal, it is a propagation victim, so shrink its self-coverage (the
     # diagonal 1.0) toward victim_floor. Roots (normal/absent upstream) keep 1.0.
@@ -122,7 +118,6 @@ class _GabanzhafConfig:
             trace_topology_conf=float(
                 kwargs.get("trace_topology_conf", cls.trace_topology_conf)
             ),
-            use_frontier=bool(kwargs.get("use_frontier", cls.use_frontier)),
             frontier_abnormal_threshold=float(
                 kwargs.get("frontier_abnormal_threshold", cls.frontier_abnormal_threshold)
             ),
@@ -137,27 +132,6 @@ class _GabanzhafConfig:
                     "frontier_uncertain_stop_factor",
                     cls.frontier_uncertain_stop_factor,
                 )
-            ),
-            frontier_alpha=float(kwargs.get("frontier_alpha", cls.frontier_alpha)),
-            use_frontier_rescue=bool(
-                kwargs.get("use_frontier_rescue", cls.use_frontier_rescue)
-            ),
-            frontier_rescue_min_bonus=float(
-                kwargs.get("frontier_rescue_min_bonus", cls.frontier_rescue_min_bonus)
-            ),
-            frontier_rescue_min_child_count=cls._positive_int_or_default(
-                kwargs.get(
-                    "frontier_rescue_min_child_count",
-                    cls.frontier_rescue_min_child_count,
-                ),
-                cls.frontier_rescue_min_child_count,
-            ),
-            frontier_rescue_max_candidates=cls._positive_int_or_default(
-                kwargs.get(
-                    "frontier_rescue_max_candidates",
-                    cls.frontier_rescue_max_candidates,
-                ),
-                cls.frontier_rescue_max_candidates,
             ),
             trace_residual=bool(kwargs.get("trace_residual", cls.trace_residual)),
             trace_min_energy=float(kwargs.get("trace_min_energy", cls.trace_min_energy)),
@@ -772,8 +746,8 @@ def _apply_trace_topology_edges(matrix, cand_list, service_list, trace_edges):
     return matrix
 
 
-def _frontier_causal_edges(coverage_parents, trace_edges, coverage_conf):
-    """Return cause->effect edges used by the abnormal-frontier scorer."""
+def _causal_edges(coverage_parents, trace_edges, coverage_conf):
+    """Merge coverage + trace edges (cause->effect); consumed by victim demotion."""
     edges = []
     conf = float(np.clip(coverage_conf, 0.0, 1.0))
     for parent, children in (coverage_parents or {}).items():
@@ -790,110 +764,6 @@ def _frontier_causal_edges(coverage_parents, trace_edges, coverage_conf):
     return edges
 
 
-def _frontier_bonus(causal_edges, svc_anom_dict, config):
-    """Softly reward the most-upstream abnormal service in a causal chain.
-
-    Edges must be in cause->effect direction. A service earns frontier bonus when
-    it is abnormal, explains at least one abnormal downstream service, and has no
-    abnormal causal predecessor. Uncertain predecessors dampen but do not erase
-    the bonus; abnormal predecessors suppress it.
-    """
-    if not config.use_frontier:
-        return {}, {}
-
-    abnormal_thr = _finite_nonnegative(config.frontier_abnormal_threshold)
-    normal_thr = min(
-        abnormal_thr,
-        _finite_nonnegative(config.frontier_normal_threshold),
-    )
-    edge_thr = _finite_nonnegative(config.frontier_edge_threshold)
-    uncertain_factor = float(np.clip(config.frontier_uncertain_stop_factor, 0.0, 1.0))
-
-    children = {}
-    predecessors = {}
-    for source, target, confidence, source_kind, lag in causal_edges or []:
-        confidence = float(np.clip(confidence, 0.0, 1.0))
-        if confidence < edge_thr:
-            continue
-        source = str(source)
-        target = str(target)
-        edge = {
-            "source": source,
-            "target": target,
-            "confidence": confidence,
-            "source_kind": source_kind,
-            "lag": int(lag),
-        }
-        children.setdefault(source, []).append(edge)
-        predecessors.setdefault(target, []).append(edge)
-
-    bonus = {}
-    diagnostics = {}
-    for source, outgoing in sorted(children.items()):
-        source_score = _finite_nonnegative(svc_anom_dict.get(source, 0.0))
-        if source_score < abnormal_thr:
-            continue
-
-        abnormal_children = []
-        child_signal = 0.0
-        for edge in outgoing:
-            target = edge["target"]
-            target_score = _finite_nonnegative(svc_anom_dict.get(target, 0.0))
-            if target_score < abnormal_thr:
-                continue
-            abnormal_children.append({
-                "service": target,
-                "score": target_score,
-                "confidence": edge["confidence"],
-                "source_kind": edge["source_kind"],
-                "lag": edge["lag"],
-            })
-            child_signal += edge["confidence"] * target_score
-
-        if not abnormal_children:
-            continue
-
-        upstream_edges = predecessors.get(source, [])
-        upstream_scores = [
-            (
-                edge["source"],
-                _finite_nonnegative(svc_anom_dict.get(edge["source"], 0.0)),
-                edge["confidence"],
-            )
-            for edge in upstream_edges
-        ]
-        if any(score >= abnormal_thr for _svc, score, _conf in upstream_scores):
-            upstream_state = "abnormal"
-            stop_factor = 0.0
-        elif any(score > normal_thr for _svc, score, _conf in upstream_scores):
-            upstream_state = "uncertain"
-            stop_factor = uncertain_factor
-        elif upstream_scores:
-            upstream_state = "normal"
-            stop_factor = 1.0
-        else:
-            upstream_state = "none"
-            stop_factor = 1.0
-
-        raw_bonus = source_score * child_signal * stop_factor
-        clipped_bonus = float(np.clip(raw_bonus, 0.0, 1.0))
-        diagnostics[source] = {
-            "score": source_score,
-            "upstream_state": upstream_state,
-            "upstream_services": [
-                {"service": svc, "score": score, "confidence": conf}
-                for svc, score, conf in upstream_scores
-            ],
-            "abnormal_children": abnormal_children,
-            "raw_bonus": float(raw_bonus),
-            "bonus": clipped_bonus,
-        }
-        if clipped_bonus > 0.0:
-            bonus[source] = clipped_bonus
-
-    return bonus, diagnostics
-
-
 def _victim_factors(causal_edges, svc_anom_dict, config, protected=None):
     """Per-service self-coverage multiplier ∈ [victim_floor, 1].
 
@@ -905,10 +775,6 @@ def _victim_factors(causal_edges, svc_anom_dict, config, protected=None):
     `protected` services are immune to demotion: coverage already inferred them
     to be roots that uniquely explain a cluster of loud victims, so the (opposite
     -direction) trace evidence must not overrule that and demote them as victims.
-
-    ponytail: predecessor build + threshold states duplicate _frontier_bonus
-    (lines ~795-819, 856-867); factor into a shared _upstream_state helper if
-    victim demotion lands as a default.
     """
     protected = set(protected or ())
     floor = float(np.clip(config.victim_floor, 0.0, 1.0))
@@ -934,59 +800,6 @@ def _victim_factors(causal_edges, svc_anom_dict, config, protected=None):
             factors[svc] = floor + (1.0 - floor) * uncertain_factor
         # all-normal predecessors → root → leave at default 1.0 (omit)
     return factors
-
-
-def _apply_frontier_bonus(svc_banzhaf, frontier_bonus, config):
-    if not config.use_frontier:
-        return dict(svc_banzhaf or {})
-
-    alpha = float(np.clip(config.frontier_alpha, 0.0, 1.0))
-    if alpha <= 0.0 or not frontier_bonus:
-        return dict(svc_banzhaf or {})
-
-    adjusted = dict(svc_banzhaf or {})
-    max_score = max(
-        [_finite_nonnegative(score) for score in adjusted.values()] + [1.0]
-    )
-    for svc, bonus in frontier_bonus.items():
-        if svc not in adjusted:
-            continue
-        adjusted[svc] = (
-            _finite_nonnegative(adjusted.get(svc, 0.0))
-            + alpha * float(np.clip(bonus, 0.0, 1.0)) * max_score
-        )
-    return adjusted
-
-
-def _select_frontier_rescue_candidates(
-    frontier_bonus,
-    frontier_diagnostics,
-    svc_anom_dict,
-    config,
-):
-    if not config.use_frontier or not config.use_frontier_rescue:
-        return []
-
-    min_bonus = _finite_nonnegative(config.frontier_rescue_min_bonus)
-    min_children = max(1, int(config.frontier_rescue_min_child_count))
-    max_candidates = max(1, int(config.frontier_rescue_max_candidates))
-    candidates = []
-    for svc, bonus in (frontier_bonus or {}).items():
-        if svc not in svc_anom_dict:
-            continue
-        bonus = float(np.clip(bonus, 0.0, 1.0))
-        if bonus < min_bonus:
-            continue
-        diag = (frontier_diagnostics or {}).get(svc, {})
-        if diag.get("upstream_state") == "abnormal":
-            continue
-        child_count = len(diag.get("abnormal_children", []) or [])
-        if child_count < min_children:
-            continue
-        candidates.append((svc, bonus, child_count, _finite_nonnegative(svc_anom_dict.get(svc, 0.0))))
-
-    candidates.sort(key=lambda item: (-item[1], -item[2], -item[3], item[0]))
-    return [svc for svc, _bonus, _child_count, _score in candidates[:max_candidates]]
 
 
 def _split_raw_windows(data, inject_time, anomalies):
@@ -1133,7 +946,7 @@ def _rank_evidence_metrics(
 # ==========================================
 
 
-def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
+def _merit_core(data, inject_time, dataset, anomalies, kwargs):
     """
     Pipeline: window split → metric evidence → service evidence
               → call-graph coverage → Banzhaf → metric ranking
@@ -1204,21 +1017,10 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         coverage_parents = _coverage_parents(call_graph, svc_anom_dict, svc_latency, config)
     else:
         coverage_parents = {}
-    frontier_causal_edges = _frontier_causal_edges(
+    causal_edges = _causal_edges(
         coverage_parents,
         trace_topology_edges,
         config.coverage_conf,
-    )
-    frontier_bonus, frontier_diagnostics = _frontier_bonus(
-        frontier_causal_edges,
-        svc_anom_dict,
-        config,
-    )
-    frontier_rescue_candidates = _select_frontier_rescue_candidates(
-        frontier_bonus,
-        frontier_diagnostics,
-        svc_anom_dict,
-        config,
     )
 
     # ── 5. Probabilistic causal game ─────────────────────────────────────────
@@ -1229,11 +1031,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         if parent in svc_anom_dict and parent not in game_candidates:
             game_candidates.append(parent)
     trace_added_candidates = 0
-    frontier_candidate_added_count = 0
-    for svc in frontier_rescue_candidates:
-        if svc not in game_candidates:
-            game_candidates.append(svc)
-            frontier_candidate_added_count += 1
     game_services = sorted(svc_anom_dict.keys())
     if config.rank_mode == "banzhaf":
         prob_matrix = _causal_explanation_matrix(game_candidates, game_services)
@@ -1252,7 +1049,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
         )
         if config.use_victim_demotion:
             victim_factor = _victim_factors(
-                frontier_causal_edges, svc_anom_dict, config,
+                causal_edges, svc_anom_dict, config,
                 protected=set(coverage_parents),
             )
             svc_col = {svc: j for j, svc in enumerate(game_services)}
@@ -1270,18 +1067,12 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 
     # ── 6. Banzhaf power index ────────────────────────────────────────────────
     svc_banzhaf = {}
-    svc_banzhaf_raw = {}
     if config.rank_mode == "banzhaf":
         banzhaf_values = _banzhaf_power(prob_matrix, anomaly_weights, config)
-        svc_banzhaf_raw = {
+        svc_banzhaf = {
             game_candidates[i]: float(banzhaf_values[i])
             for i in range(len(game_candidates))
         }
-        svc_banzhaf = _apply_frontier_bonus(
-            svc_banzhaf_raw,
-            frontier_bonus,
-            config,
-        )
     _mark_stage("banzhaf")
 
     # ── 7. Final metric-level ranking by Banzhaf score ───────────────────────
@@ -1308,7 +1099,6 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
             "metric_evidence": dict(metric_ev),
             "metric_service_evidence": dict(svc_anom_dict),
             "service_banzhaf": dict(svc_banzhaf),
-            "service_banzhaf_raw": dict(svc_banzhaf_raw),
             "trace_topology_edges": list(trace_topology_edges),
             "trace_edge_count": len(trace_topology_edges),
             "trace_candidate_added_count": trace_added_candidates,
@@ -1316,12 +1106,8 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
             "trace_latency_evidence": dict(trace_latency_evidence),
             "trace_error_evidence": dict(trace_error_evidence),
             "trace_stage_timing": dict(trace_stage_timing),
-            "frontier_causal_edges": list(frontier_causal_edges),
-            "frontier_edge_count": len(frontier_causal_edges),
-            "frontier_bonus": dict(frontier_bonus),
-            "frontier_diagnostics": dict(frontier_diagnostics),
-            "frontier_rescue_candidates": list(frontier_rescue_candidates),
-            "frontier_candidate_added_count": frontier_candidate_added_count,
+            "causal_edges": list(causal_edges),
+            "causal_edge_count": len(causal_edges),
             "root_service": kwargs.get("root_service"),
             "root_candidate_recall": (
                 kwargs.get("root_service") in set(game_candidates)
@@ -1340,7 +1126,7 @@ def _gabanzhaf_core(data, inject_time, dataset, anomalies, kwargs):
 # RCAEval entry point
 # ==========================================
 
-def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
+def merit(data, inject_time=None, dataset=None, num_loop=None,
               sli=None, anomalies=None, **kwargs):
     """Probabilistic causal Banzhaf RCA with call-graph coverage.
 
@@ -1356,8 +1142,6 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
       GABANZHAF_DISABLE_COVERAGE=1  turn off call-graph coverage (ablation)
       GABANZHAF_DISABLE_TRACE=1  drop all trace info (empty call graph → metric)
       GABANZHAF_DISABLE_TRACE_TOPOLOGY=1  turn off trace-derived topology
-      GABANZHAF_DISABLE_FRONTIER=1  turn off abnormal-frontier bonus (ablation)
-      GABANZHAF_DISABLE_FRONTIER_RESCUE=1  turn off frontier candidate rescue
       GABANZHAF_TRACE_RESIDUAL=1  build trace edges from inject pre/post residual
       GABANZHAF_PROFILE=1      print per-stage timing to stderr
                                (preprocess | metric_evidence | candidates |
@@ -1378,16 +1162,10 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
         runtime_kwargs.setdefault("use_coverage", False)
     if os.environ.get("GABANZHAF_DISABLE_TRACE_TOPOLOGY") == "1":
         runtime_kwargs.setdefault("use_trace_topology", False)
-    if os.environ.get("GABANZHAF_DISABLE_FRONTIER") == "1":
-        runtime_kwargs.setdefault("use_frontier", False)
-    if os.environ.get("GABANZHAF_DISABLE_FRONTIER_RESCUE") == "1":
-        runtime_kwargs.setdefault("use_frontier_rescue", False)
     if os.environ.get("GABANZHAF_TRACE_RESIDUAL") == "1":
         runtime_kwargs.setdefault("trace_residual", True)
     if os.environ.get("GABANZHAF_RANK_MODE"):
         runtime_kwargs.setdefault("rank_mode", os.environ["GABANZHAF_RANK_MODE"])
-    if os.environ.get("GABANZHAF_FRONTIER_ALPHA"):
-        runtime_kwargs.setdefault("frontier_alpha", float(os.environ["GABANZHAF_FRONTIER_ALPHA"]))
     if os.environ.get("GABANZHAF_TRACE_TOPOLOGY_CONF"):
         runtime_kwargs.setdefault("trace_topology_conf", float(os.environ["GABANZHAF_TRACE_TOPOLOGY_CONF"]))
     if os.environ.get("GABANZHAF_USE_VICTIM_DEMOTION") == "1":
@@ -1434,7 +1212,7 @@ def gabanzhaf(data, inject_time=None, dataset=None, num_loop=None,
     if _profile:
         runtime_kwargs["return_stage_timing"] = True
 
-    result = _gabanzhaf_core(data, inject_time, dataset, anomalies, runtime_kwargs)
+    result = _merit_core(data, inject_time, dataset, anomalies, runtime_kwargs)
     if "diagnostics" in result:
         trace_stage_timing = result["diagnostics"].get("trace_stage_timing", {})
         merged_stage_timing = {}

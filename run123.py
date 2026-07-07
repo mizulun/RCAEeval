@@ -145,8 +145,6 @@ METHOD_VARIANTS = {
         "metadata": {
             "base_method": "gabanzhaf",
             "trace_topology": "on",
-            "frontier": "on",
-            "frontier_rescue": "on",
             "ablation_role": "trace_frontier_full",
         },
     },
@@ -156,45 +154,7 @@ METHOD_VARIANTS = {
         "metadata": {
             "base_method": "gabanzhaf",
             "trace_topology": "off",
-            "frontier": "on",
-            "frontier_rescue": "on",
             "ablation_role": "no_trace_topology",
-        },
-    },
-    "gabanzhaf_no_frontier": {
-        "base_method": "gabanzhaf",
-        "env": {"GABANZHAF_DISABLE_FRONTIER": "1"},
-        "metadata": {
-            "base_method": "gabanzhaf",
-            "trace_topology": "on",
-            "frontier": "off",
-            "frontier_rescue": "off",
-            "ablation_role": "no_frontier",
-        },
-    },
-    "gabanzhaf_no_frontier_rescue": {
-        "base_method": "gabanzhaf",
-        "env": {"GABANZHAF_DISABLE_FRONTIER_RESCUE": "1"},
-        "metadata": {
-            "base_method": "gabanzhaf",
-            "trace_topology": "on",
-            "frontier": "on",
-            "frontier_rescue": "off",
-            "ablation_role": "no_frontier_rescue",
-        },
-    },
-    "gabanzhaf_no_trace_no_frontier": {
-        "base_method": "gabanzhaf",
-        "env": {
-            "GABANZHAF_DISABLE_TRACE_TOPOLOGY": "1",
-            "GABANZHAF_DISABLE_FRONTIER": "1",
-        },
-        "metadata": {
-            "base_method": "gabanzhaf",
-            "trace_topology": "off",
-            "frontier": "off",
-            "frontier_rescue": "off",
-            "ablation_role": "metric_coverage_only",
         },
     },
     "gabanzhaf_k1": {
@@ -287,21 +247,9 @@ METHOD_VARIANTS = {
             "ablation_role": "exact_candidate_k=16",
         },
     },
-    # Trace-vs-metric rebalance sweep: raise the frontier bonus cap
-    # (frontier_alpha, base 0.15) and the off-diagonal trace probability cap
-    # (trace_topology_conf, base 0.7) so trace can reorder the ranking.
-    **{
-        f"gabanzhaf_falpha_{tag}": {
-            "base_method": "gabanzhaf",
-            "env": {"GABANZHAF_FRONTIER_ALPHA": val},
-            "metadata": {
-                "base_method": "gabanzhaf",
-                "frontier_alpha": float(val),
-                "ablation_role": f"frontier_alpha={val}",
-            },
-        }
-        for tag, val in [("035", "0.35"), ("060", "0.60"), ("100", "1.0")]
-    },
+    # Trace-vs-metric rebalance sweep: raise the off-diagonal trace
+    # probability cap (trace_topology_conf, base 0.7) so trace can
+    # reorder the ranking.
     **{
         f"gabanzhaf_tconf_{tag}": {
             "base_method": "gabanzhaf",
@@ -516,8 +464,6 @@ def save_csv(records, path):
             "rank_mode",
             "exact_candidate_k",
             "trace_topology",
-            "frontier",
-            "frontier_rescue",
             "ablation_role",
         ]
         if any(key in record for record in records)

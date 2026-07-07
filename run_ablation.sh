@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ablation study runner for the gabanzhaf method.
+# Ablation study runner for the merit method.
 #
 # Runs each ablation mode on each dataset and prints AC@1/AC@3/AC@5/Avg@5 per
 # fault type. Clears output/results before every run (the evaluator globs the
@@ -17,6 +17,7 @@ cd "$(dirname "$0")"
 PY=./py310/bin/python
 DATASETS="${DATASETS:-re2-tt re2-ob re2-ss}"
 # Modes: full | no-trace | no-metric | metric-only | metric+trace | no-coverage
+#        | no-victim-demotion | no-trace-topology
 MODES="${MODES:-full no-trace no-metric}"
 
 # Where summaries are saved: one file per dataset+mode, plus a combined log
@@ -44,6 +45,8 @@ mode_env() {
     metric-only)  echo "GABANZHAF_RANK_MODE=service_evidence" ;;
     metric+trace) echo "GABANZHAF_RANK_MODE=service_evidence_trace" ;;
     no-coverage)  echo "GABANZHAF_DISABLE_COVERAGE=1" ;;
+    no-victim-demotion) echo "GABANZHAF_DISABLE_VICTIM_DEMOTION=1" ;;
+    no-trace-topology)  echo "GABANZHAF_DISABLE_TRACE_TOPOLOGY=1" ;;
     *) echo "BADMODE" ;;
   esac
 }
@@ -62,7 +65,7 @@ for ds in $DATASETS; do
     header="----- dataset: $ds   mode: $mode   [${env_vars:-default}]   ($STAMP) -----"
     echo "$header" | tee "$per_file" | tee -a "$COMBINED"
     t0=$(date +%s)
-    env $env_vars "$PY" main.py --method gabanzhaf --dataset "$ds" \
+    env $env_vars "$PY" main.py --method merit --dataset "$ds" \
         --result-dir output/results 2>/dev/null \
       | grep -E "AC@1-|AC@3-|AC@5-|Avg@5-" | sed 's/^/   /' \
       | tee -a "$per_file" | tee -a "$COMBINED"

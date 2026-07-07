@@ -58,7 +58,8 @@ if is_py310() or is_py312():
     from .mscred import mscred
     from .tracerca import tracerca
     from .banzhaf import local_banzhaf as banzhaf
-    from .gabanzhaf import gabanzhaf
+    from .merit import merit
+    gabanzhaf = merit  # backward-compat alias (old scripts / result comparisons)
     from .banzhaf_with_trace import gabanzhaf as gabanzhaf_with_trace
     from .predict_banzhaf import predict_banzhaf
 else:

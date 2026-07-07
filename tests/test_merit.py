@@ -1,9 +1,9 @@
-"""Tests for the pure-Banzhaf gabanzhaf pipeline.
+"""Tests for the MERIT (formerly gabanzhaf) pipeline.
 
 After ablation showed the old metric-derived trace lag to be mostly redundant,
 the pipeline now keeps metric evidence as anomaly weight and adds trace/topology
-signals as causal edges plus a conservative abnormal-frontier bonus. These tests
-cover the math core, configuration, diagnostics, and entry point.
+signals as causal edges. These tests cover the math core, configuration,
+diagnostics, and entry point.
 """
 import importlib.util
 import os
@@ -14,23 +14,23 @@ import pandas as pd
 import pytest
 
 # Load the module directly from its file so the tests do not drag in the
-# torch-dependent RCAEval.e2e package __init__ (gabanzhaf itself needs none of it).
+# torch-dependent RCAEval.e2e package __init__ (merit itself needs none of it).
 _spec = importlib.util.spec_from_file_location(
-    "gabanzhaf_under_test",
-    pathlib.Path(__file__).resolve().parent.parent / "RCAEval" / "e2e" / "gabanzhaf.py",
+    "merit_under_test",
+    pathlib.Path(__file__).resolve().parent.parent / "RCAEval" / "e2e" / "merit.py",
 )
-gabanzhaf_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(gabanzhaf_mod)
+merit_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(merit_mod)
 
-_GabanzhafConfig = gabanzhaf_mod._GabanzhafConfig
-_gabanzhaf_core = gabanzhaf_mod._gabanzhaf_core
-_metric_evidence = gabanzhaf_mod._metric_evidence
-_banzhaf_power = gabanzhaf_mod._banzhaf_power
-_noisy_or_coverage = gabanzhaf_mod._noisy_or_coverage
-_probabilistic_banzhaf = gabanzhaf_mod._probabilistic_banzhaf
-_select_exact_candidates = gabanzhaf_mod._select_exact_candidates
-_causal_explanation_matrix = gabanzhaf_mod._causal_explanation_matrix
-_rank_metrics = gabanzhaf_mod._rank_metrics
+_GabanzhafConfig = merit_mod._GabanzhafConfig
+_gabanzhaf_core = merit_mod._merit_core
+_metric_evidence = merit_mod._metric_evidence
+_banzhaf_power = merit_mod._banzhaf_power
+_noisy_or_coverage = merit_mod._noisy_or_coverage
+_probabilistic_banzhaf = merit_mod._probabilistic_banzhaf
+_select_exact_candidates = merit_mod._select_exact_candidates
+_causal_explanation_matrix = merit_mod._causal_explanation_matrix
+_rank_metrics = merit_mod._rank_metrics
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ def test_service_trace_series_aggregates_operation_columns_by_service():
         "svc-b_GET": [0, 0, 1, 4],
     })
 
-    series = gabanzhaf_mod._service_trace_series_from_frame(df)
+    series = merit_mod._service_trace_series_from_frame(df)
 
     assert set(series) == {"svc-a", "svc-b"}
     assert np.allclose(series["svc-a"], np.array([0.0, 1.0, 5.0, 1.0]))
@@ -301,7 +301,7 @@ def test_service_trace_series_residual_isolates_fault_induced_delta():
         "spike_GET": [0, 0, 0, 9, 8, 7],
     })
 
-    series = gabanzhaf_mod._service_trace_series_from_frame(
+    series = merit_mod._service_trace_series_from_frame(
         df, inject_time=3, residual=True
     )
 
@@ -313,8 +313,8 @@ def test_service_trace_series_residual_isolates_fault_induced_delta():
 
 def test_service_trace_series_residual_noop_without_inject_time():
     df = pd.DataFrame({"time": [0, 1], "svc_GET": [2, 4]})
-    full = gabanzhaf_mod._service_trace_series_from_frame(df)
-    no_inject = gabanzhaf_mod._service_trace_series_from_frame(df, residual=True)
+    full = merit_mod._service_trace_series_from_frame(df)
+    no_inject = merit_mod._service_trace_series_from_frame(df, residual=True)
     assert np.allclose(full["svc"], no_inject["svc"])  # residual inert w/o inject
 
 
@@ -332,7 +332,7 @@ def test_trace_min_energy_gate_drops_quiet_residual_service():
         "trace_topology_min_conf": 0.1,
     })
 
-    edges = gabanzhaf_mod._trace_multilag_edges(
+    edges = merit_mod._trace_multilag_edges(
         call_graph, trace_series, cfg, source_kind="latency"
     )
 
@@ -347,7 +347,7 @@ def test_rank_evidence_trace_lets_trace_move_the_order():
     svc_anom = {"svc-a": 0.5, "svc-b": 0.5}  # metric tie
     trace_sev = {"svc-b": 0.9, "svc-a": 0.1}  # trace prefers svc-b
 
-    ranks = gabanzhaf_mod._rank_evidence_metrics(
+    ranks = merit_mod._rank_evidence_metrics(
         cols, metric_ev, svc_anom, "service_evidence_trace",
         trace_service_evidence=trace_sev,
     )
@@ -360,7 +360,7 @@ def test_rank_evidence_trace_only_ignores_metric():
     svc_anom = {"svc-a": 0.9, "svc-b": 0.1}
     trace_sev = {"svc-a": 0.1, "svc-b": 0.9}  # trace prefers svc-b
 
-    ranks = gabanzhaf_mod._rank_evidence_metrics(
+    ranks = merit_mod._rank_evidence_metrics(
         cols, metric_ev, svc_anom, "trace_evidence", trace_service_evidence=trace_sev,
     )
     assert ranks[0] == "svc-b_cpu"  # metric ignored entirely
@@ -371,10 +371,10 @@ def test_rank_evidence_trace_empty_trace_matches_metric_only():
     metric_ev = {"svc-a_cpu": 0.3, "svc-b_cpu": 0.9}
     svc_anom = {"svc-a": 0.3, "svc-b": 0.9}
 
-    combined = gabanzhaf_mod._rank_evidence_metrics(
+    combined = merit_mod._rank_evidence_metrics(
         cols, metric_ev, svc_anom, "service_evidence_trace", trace_service_evidence={}
     )
-    metric_only = gabanzhaf_mod._rank_evidence_metrics(
+    metric_only = merit_mod._rank_evidence_metrics(
         cols, metric_ev, svc_anom, "service_evidence"
     )
     assert combined == metric_only  # degrades to metric-only without trace
@@ -387,7 +387,7 @@ def test_build_call_graph_from_traces_span_hierarchy(tmp_path):
         "serviceName": ["frontend", "checkout", "currency"],
     }).to_csv(tmp_path / "traces.csv", index=False)
 
-    g = gabanzhaf_mod._build_call_graph_from_traces(
+    g = merit_mod._build_call_graph_from_traces(
         str(tmp_path), service_names={"frontend", "checkout", "currency"}
     )
     assert g == {"frontend": ["checkout"], "checkout": ["currency"]}
@@ -395,15 +395,15 @@ def test_build_call_graph_from_traces_span_hierarchy(tmp_path):
 
 def test_build_call_graph_missing_traces_returns_empty(tmp_path):
     # No traces.csv (e.g. sock-shop) → empty graph → metric fallback.
-    assert gabanzhaf_mod._build_call_graph_from_traces(str(tmp_path)) == {}
+    assert merit_mod._build_call_graph_from_traces(str(tmp_path)) == {}
 
 
 def test_match_service_maps_trace_name_to_metric_prefix():
     names = {"frontend", "frontend-external", "checkoutservice"}
     # "frontendservice" → longest metric prefix it starts with = "frontend"
-    assert gabanzhaf_mod._match_service("frontendservice", names) == "frontend"
-    assert gabanzhaf_mod._match_service("checkoutservice", names) == "checkoutservice"
-    assert gabanzhaf_mod._match_service("unknown", names) == "unknown"
+    assert merit_mod._match_service("frontendservice", names) == "frontend"
+    assert merit_mod._match_service("checkoutservice", names) == "checkoutservice"
+    assert merit_mod._match_service("unknown", names) == "unknown"
 
 
 def test_trace_multilag_edges_detects_callee_leading_caller():
@@ -418,7 +418,7 @@ def test_trace_multilag_edges_detects_callee_leading_caller():
         "trace_topology_conf": 0.7,
     })
 
-    edges = gabanzhaf_mod._trace_multilag_edges(
+    edges = merit_mod._trace_multilag_edges(
         call_graph,
         trace_series,
         cfg,
@@ -459,13 +459,13 @@ def test_causal_explanation_matrix_rejects_duplicate_services():
 
 
 def test_apply_trace_topology_edges_overlays_off_diagonal_probability():
-    matrix = gabanzhaf_mod._causal_explanation_matrix(
+    matrix = merit_mod._causal_explanation_matrix(
         ["callee", "other"],
         ["callee", "caller", "other"],
     )
     edges = [("callee", "caller", 0.42, "latency", 1)]
 
-    out = gabanzhaf_mod._apply_trace_topology_edges(
+    out = merit_mod._apply_trace_topology_edges(
         matrix,
         ["callee", "other"],
         ["callee", "caller", "other"],
@@ -474,177 +474,6 @@ def test_apply_trace_topology_edges_overlays_off_diagonal_probability():
 
     assert out[0, 1] == pytest.approx(0.42)
     assert out[0, 0] == 1.0
-
-
-def test_frontier_bonus_rewards_abnormal_boundary_before_normal_upstream():
-    cfg = _GabanzhafConfig.from_kwargs({
-        "frontier_abnormal_threshold": 0.45,
-        "frontier_normal_threshold": 0.2,
-        "frontier_edge_threshold": 0.3,
-    })
-
-    bonus, diagnostics = gabanzhaf_mod._frontier_bonus(
-        causal_edges=[
-            ("svc-b", "svc-c", 0.6, "trace", 1),
-            ("svc-a", "svc-b", 0.6, "trace", 1),
-        ],
-        svc_anom_dict={"svc-a": 0.1, "svc-b": 0.8, "svc-c": 0.9},
-        config=cfg,
-    )
-
-    assert bonus["svc-b"] > 0.0
-    assert bonus.get("svc-c", 0.0) == 0.0
-    assert diagnostics["svc-b"]["upstream_state"] == "normal"
-
-
-def test_frontier_bonus_suppresses_candidate_when_upstream_is_abnormal():
-    cfg = _GabanzhafConfig.from_kwargs({
-        "frontier_abnormal_threshold": 0.45,
-        "frontier_edge_threshold": 0.3,
-    })
-
-    bonus, diagnostics = gabanzhaf_mod._frontier_bonus(
-        causal_edges=[
-            ("svc-b", "svc-c", 0.6, "trace", 1),
-            ("svc-a", "svc-b", 0.6, "trace", 1),
-        ],
-        svc_anom_dict={"svc-a": 0.7, "svc-b": 0.8, "svc-c": 0.9},
-        config=cfg,
-    )
-
-    assert bonus.get("svc-b", 0.0) == 0.0
-    assert diagnostics["svc-b"]["upstream_state"] == "abnormal"
-
-
-def test_frontier_bonus_ignores_weak_edges():
-    cfg = _GabanzhafConfig.from_kwargs({
-        "frontier_abnormal_threshold": 0.45,
-        "frontier_edge_threshold": 0.3,
-    })
-
-    bonus, diagnostics = gabanzhaf_mod._frontier_bonus(
-        causal_edges=[("svc-b", "svc-c", 0.2, "trace", 1)],
-        svc_anom_dict={"svc-b": 0.8, "svc-c": 0.9},
-        config=cfg,
-    )
-
-    assert bonus == {}
-    assert diagnostics == {}
-
-
-def test_apply_frontier_bonus_softly_adjusts_banzhaf_scores():
-    cfg = _GabanzhafConfig.from_kwargs({"frontier_alpha": 0.5})
-
-    adjusted = gabanzhaf_mod._apply_frontier_bonus(
-        svc_banzhaf={"svc-b": 0.4, "svc-c": 0.5},
-        frontier_bonus={"svc-b": 1.0},
-        config=cfg,
-    )
-
-    assert adjusted["svc-b"] > adjusted["svc-c"]
-    assert adjusted["svc-c"] == pytest.approx(0.5)
-
-
-def test_select_frontier_rescue_candidates_requires_high_confidence_boundary():
-    cfg = _GabanzhafConfig.from_kwargs({
-        "frontier_rescue_min_bonus": 0.25,
-        "frontier_rescue_min_child_count": 1,
-    })
-
-    rescued = gabanzhaf_mod._select_frontier_rescue_candidates(
-        frontier_bonus={"svc-b": 0.36, "svc-d": 0.20},
-        frontier_diagnostics={
-            "svc-b": {
-                "upstream_state": "normal",
-                "abnormal_children": [{"service": "svc-c"}],
-            },
-            "svc-d": {
-                "upstream_state": "normal",
-                "abnormal_children": [{"service": "svc-e"}],
-            },
-            "svc-x": {
-                "upstream_state": "abnormal",
-                "abnormal_children": [{"service": "svc-y"}],
-            },
-        },
-        svc_anom_dict={"svc-b": 0.7, "svc-d": 0.8, "svc-x": 0.9},
-        config=cfg,
-    )
-
-    assert rescued == ["svc-b"]
-
-
-def test_gabanzhaf_core_frontier_rescue_adds_high_confidence_candidate():
-    data = pd.DataFrame({
-        "time": np.arange(10),
-        "svc-a_cpu": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        "svc-a_latency": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        "svc-b_cpu": [1, 1, 1, 1, 1, 6, 6, 6, 6, 6],
-        "svc-b_latency": [1, 1, 1, 1, 1, 5, 5, 5, 5, 5],
-        "svc-c_cpu": [1, 1, 1, 1, 1, 7, 7, 7, 7, 7],
-        "svc-c_latency": [1, 1, 1, 1, 1, 8, 8, 8, 8, 8],
-    })
-
-    result = _gabanzhaf_core(
-        data,
-        inject_time=5,
-        dataset="unit",
-        anomalies=None,
-        kwargs={
-            "return_diagnostics": True,
-            "exact_candidate_k": 1,
-            "trace_topology_edges": [
-                ("svc-b", "svc-c", 0.6, "latency", 1),
-                ("svc-a", "svc-b", 0.6, "latency", 1),
-            ],
-            "frontier_alpha": 0.5,
-            "frontier_abnormal_threshold": 0.45,
-            "frontier_normal_threshold": 0.2,
-            "frontier_edge_threshold": 0.3,
-            "use_frontier_rescue": True,
-            "frontier_rescue_min_bonus": 0.25,
-        },
-    )
-
-    assert "svc-b" in result["game_candidates"]
-    assert result["frontier_candidate_added_count"] == 1
-    assert result["frontier_rescue_candidates"] == ["svc-b"]
-
-
-def test_gabanzhaf_core_does_not_rescue_frontier_candidate_when_disabled():
-    data = pd.DataFrame({
-        "time": np.arange(10),
-        "svc-a_cpu": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        "svc-a_latency": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        "svc-b_cpu": [1, 1, 1, 1, 1, 6, 6, 6, 6, 6],
-        "svc-b_latency": [1, 1, 1, 1, 1, 5, 5, 5, 5, 5],
-        "svc-c_cpu": [1, 1, 1, 1, 1, 7, 7, 7, 7, 7],
-        "svc-c_latency": [1, 1, 1, 1, 1, 8, 8, 8, 8, 8],
-    })
-
-    result = _gabanzhaf_core(
-        data,
-        inject_time=5,
-        dataset="unit",
-        anomalies=None,
-        kwargs={
-            "return_diagnostics": True,
-            "exact_candidate_k": 1,
-            "trace_topology_edges": [
-                ("svc-b", "svc-c", 0.6, "latency", 1),
-                ("svc-a", "svc-b", 0.6, "latency", 1),
-            ],
-            "frontier_alpha": 0.5,
-            "frontier_abnormal_threshold": 0.45,
-            "frontier_normal_threshold": 0.2,
-            "frontier_edge_threshold": 0.3,
-            "use_frontier_rescue": False,
-            "frontier_rescue_min_bonus": 0.25,
-        },
-    )
-
-    assert result["game_candidates"] == ["svc-c"]
-    assert result["frontier_candidate_added_count"] == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -679,7 +508,7 @@ def test_rank_metrics_single_positive_candidate_does_not_degenerate_to_name_orde
 
 
 def test_service_evidence_ranking_orders_services_then_metrics():
-    ranks = gabanzhaf_mod._rank_evidence_metrics(
+    ranks = merit_mod._rank_evidence_metrics(
         ["svc-b_mem", "svc-a_z", "svc-a_a"],
         metric_ev={"svc-b_mem": 1.0, "svc-a_z": 0.1, "svc-a_a": 0.9},
         svc_anom_dict={"svc-a": 1.0, "svc-b": 0.2},
@@ -690,7 +519,7 @@ def test_service_evidence_ranking_orders_services_then_metrics():
 
 
 def test_metric_evidence_ranking_uses_metric_score_and_stable_name_tie_break():
-    ranks = gabanzhaf_mod._rank_evidence_metrics(
+    ranks = merit_mod._rank_evidence_metrics(
         ["svc-b_mem", "svc-a_z", "svc-a_a"],
         metric_ev={"svc-b_mem": 1.0, "svc-a_z": 0.5, "svc-a_a": 0.5},
         svc_anom_dict={"svc-a": 1.0, "svc-b": 0.2},
@@ -801,40 +630,6 @@ def test_gabanzhaf_core_overlays_trace_topology_edges_from_kwargs():
     assert result["trace_edge_count"] == 1
 
 
-def test_gabanzhaf_core_applies_frontier_bonus_to_banzhaf_scores():
-    data = pd.DataFrame({
-        "time": np.arange(10),
-        "svc-a_cpu": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        "svc-a_latency": [1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        "svc-b_cpu": [1, 1, 1, 1, 1, 6, 6, 6, 6, 6],
-        "svc-b_latency": [1, 1, 1, 1, 1, 5, 5, 5, 5, 5],
-        "svc-c_cpu": [1, 1, 1, 1, 1, 7, 7, 7, 7, 7],
-        "svc-c_latency": [1, 1, 1, 1, 1, 8, 8, 8, 8, 8],
-    })
-
-    result = _gabanzhaf_core(
-        data,
-        inject_time=5,
-        dataset="unit",
-        anomalies=None,
-        kwargs={
-            "return_diagnostics": True,
-            "trace_topology_edges": [
-                ("svc-b", "svc-c", 0.6, "latency", 1),
-                ("svc-a", "svc-b", 0.6, "latency", 1),
-            ],
-            "frontier_alpha": 0.5,
-            "frontier_abnormal_threshold": 0.45,
-            "frontier_normal_threshold": 0.2,
-            "frontier_edge_threshold": 0.3,
-        },
-    )
-
-    assert result["frontier_bonus"]["svc-b"] > 0.0
-    assert result["frontier_diagnostics"]["svc-b"]["upstream_state"] == "normal"
-    assert result["service_banzhaf"]["svc-b"] > result["service_banzhaf_raw"]["svc-b"]
-
-
 def test_gabanzhaf_entry_loads_trace_multilag_topology_from_case_dir(tmp_path, monkeypatch):
     case_dir = tmp_path / "svc-a_delay" / "1"
     case_dir.mkdir(parents=True)
@@ -860,7 +655,7 @@ def test_gabanzhaf_entry_loads_trace_multilag_topology_from_case_dir(tmp_path, m
     }).to_csv(case_dir / "traces.csv", index=False)
 
     args = type("Args", (), {"data_path": str(metric_path)})()
-    result = gabanzhaf_mod.gabanzhaf(
+    result = merit_mod.merit(
         data,
         inject_time=4,
         dataset="unit",
@@ -881,9 +676,9 @@ def test_gabanzhaf_core_evidence_modes_skip_banzhaf(monkeypatch, rank_mode):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("causal game must not run in evidence-only modes")
 
-    monkeypatch.setattr(gabanzhaf_mod, "_banzhaf_power", fail_if_called)
+    monkeypatch.setattr(merit_mod, "_banzhaf_power", fail_if_called)
     monkeypatch.setattr(
-        gabanzhaf_mod,
+        merit_mod,
         "_causal_explanation_matrix",
         fail_if_called,
     )
@@ -911,9 +706,9 @@ def test_gabanzhaf_entry_reads_banzhaf_mode_env(monkeypatch):
         return {"ranks": []}
 
     monkeypatch.setenv("GABANZHAF_BANZHAF_MODE", "bruteforce")
-    monkeypatch.setattr(gabanzhaf_mod, "_gabanzhaf_core", fake_core)
+    monkeypatch.setattr(merit_mod, "_merit_core", fake_core)
 
-    gabanzhaf_mod.gabanzhaf(
+    merit_mod.merit(
         pd.DataFrame({"time": [0, 1], "svc_cpu": [0.0, 1.0]}),
         inject_time=1,
     )
@@ -925,7 +720,7 @@ def test_victim_factors_demotes_service_with_abnormal_upstream():
     # Call chain A -> B -> C (cause->effect edges). B and C abnormal, A normal.
     # C has an abnormal predecessor (B) => victim, self-coverage demoted to floor.
     # B's only predecessor (A) is normal => root, keeps 1.0 (absent from dict).
-    _victim_factors = gabanzhaf_mod._victim_factors
+    _victim_factors = merit_mod._victim_factors
     edges = [("A", "B", 0.9, "trace", 1), ("B", "C", 0.9, "trace", 1)]
     svc_anom = {"A": 0.05, "B": 0.8, "C": 0.7}
     cfg = _GabanzhafConfig.from_kwargs({"use_victim_demotion": True, "victim_floor": 0.4})
@@ -940,7 +735,7 @@ def test_victim_factors_demotes_service_with_abnormal_upstream():
 def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
     source_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
-        "RCAEval", "e2e", "gabanzhaf.py",
+        "RCAEval", "e2e", "merit.py",
     )
     with open(source_path, "r", encoding="utf-8") as f:
         source = f.read()
