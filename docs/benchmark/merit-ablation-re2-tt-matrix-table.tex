@@ -1,0 +1,18 @@
+\begin{table}[t]
+\centering
+\small
+\caption{Per-fault MERIT ablation on re2-tt. Each fault type reports AC@1 and Avg@5.}
+\label{tab:merit-ablation-re2tt-matrix}
+\begin{tabular}{lrrrrrrrrrrrr}
+\toprule
+Method & \multicolumn{2}{c}{CPU} & \multicolumn{2}{c}{MEM} & \multicolumn{2}{c}{DISK} & \multicolumn{2}{c}{SOCKET} & \multicolumn{2}{c}{DELAY} & \multicolumn{2}{c}{LOSS} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13}
+  & AC@1 & Avg@5 & AC@1 & Avg@5 & AC@1 & Avg@5 & AC@1 & Avg@5 & AC@1 & Avg@5 & AC@1 & Avg@5 \\
+\midrule
+full & 0.800 & 0.960 & 1.000 & 1.000 & 1.000 & 1.000 & 0.930 & 0.950 & 0.800 & 0.800 & 0.600 & 0.750 \\
+no-metric & 0.000 & 0.030 & 0.000 & 0.000 & 0.000 & 0.030 & 0.000 & 0.000 & 0.000 & 0.040 & 0.000 & 0.000 \\
+no-trace & 0.800 & 0.960 & 1.000 & 1.000 & 1.000 & 1.000 & 0.870 & 0.970 & 0.600 & 0.710 & 0.530 & 0.650 \\
+metric+trace & 0.800 & 0.960 & 1.000 & 1.000 & 1.000 & 1.000 & 0.870 & 0.970 & 0.530 & 0.650 & 0.530 & 0.650 \\
+\bottomrule
+\end{tabular}
+\end{table}

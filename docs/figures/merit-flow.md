@@ -1,30 +1,48 @@
-# GaBanzhaf 流程圖
+# MERIT 流程圖
 
-論文用的整體流程概覽（精簡版）。可在 mermaid.live 或支援 Mermaid 的 markdown 檢視器渲染，匯出 SVG/PNG。
+論文用的整體流程概覽。正式英文稿採用 repository-native TikZ 版本
+`paper/merit_pipeline.tex`；下列 Mermaid 保持相同語義，供文件快速檢視。
 
 ```mermaid
-flowchart TD
-    IN["① 輸入<br/>Metrics 時序 + Traces 呼叫紀錄"]
+flowchart LR
+    IN["① 稽核後的 case 輸入<br/>完整 metric 紀錄<br/>可選 raw spans + 注入時間"]
+    EV["② 證據抽取<br/>完整 pre/post metric 證據<br/>本 case pre-fault call graph<br/>可選 lagged trace signal"]
+    CAN["③ 候選建構<br/>異常排序 base set<br/>coverage parent rescue<br/>記錄實際 K/N"]
+    GAME["④ directed coverage game<br/>coverage-strength matrix A<br/>victim factor<br/>noisy-OR-inspired utility"]
+    OUT["⑤ 可稽核排名<br/>player→target local contribution<br/>edge-removal utility drop<br/>service ranking"]
+    BOUND["Boundary artifact<br/>時間、長度、筆數、modality availability"]
+    FAITH["Faithfulness artifact<br/>移除非零 edge 後的 full-coalition utility drop"]
 
-    EV["② 異常證據<br/>切窗(注入前/後)，算每個服務的異常程度"]
-
-    TOPO["③ 因果拓樸<br/>用時序相關 + 呼叫關係<br/>建立「誰影響誰」的有向圖"]
-
-    GAME["④ 機率因果賽局<br/>挑出候選根因，用 noisy-OR + Banzhaf<br/>衡量每個服務「解釋全系統異常」的貢獻度"]
-
-    RANK["⑤ 根因排名<br/>Banzhaf 貢獻度 × metric 異常分數"]
-
-    OUT(["根因排名清單"])
-
-    IN --> EV --> TOPO --> GAME --> RANK --> OUT
+    IN --> EV --> CAN --> GAME --> OUT
+    EV -.-> BOUND
+    GAME -.-> FAITH
 ```
 
 ## 對應程式碼
 
-| 步驟 | 主要函式 (`RCAEval/e2e/gabanzhaf.py`) |
+| 步驟 | 主要函式 (`RCAEval/e2e/merit.py`) |
 |---|---|
-| ① 輸入 + Trace 特徵 | `_extract_trace_features` / `_extract_call_graph` |
-| ② 異常證據 | `_split_raw_windows` → `_metric_evidence` → `_service_evidence` |
-| ③ 因果拓樸 | `_build_topology` + `_call_graph_topology_edges` → `_upstream_maps` |
-| ④ 機率因果賽局 | `_residual_scores` → `_select_exact_candidates` → `_causal_explanation_matrix` → `_probabilistic_banzhaf` |
+| ① 輸入 + Trace 特徵 | `_build_call_graph_from_traces` → `_trace_topology_from_case_dir`（內含 `_trace_multilag_edges`） |
+| ② 異常證據 | `_split_raw_windows` → `_preprocess_windows` → `_metric_evidence` → `_service_evidence` |
+| ③ 候選與 directed edges | `_coverage_parents` + trace edges → `_causal_edges` → `_select_exact_candidates` |
+| ④ coverage game | `_causal_explanation_matrix` → `_apply_coverage_edges` / `_apply_trace_topology_edges` → `_victim_factors` → `_banzhaf_power` |
 | ⑤ 根因排名 | `_rank_metrics` |
+
+## Controlled variants
+
+- `no_trace` 在第二步 evidence extraction 只保留 metric evidence：入口即跳過
+  call graph、trace time-series 與所有 trace-derived evidence，也會清除呼叫端誤傳的
+  trace inputs。後續仍執行相同的候選建構、coverage-strength matrix、
+  victim demotion、coverage game、Banzhaf 與排序步驟，但這些步驟不會收到
+  call graph、trace edge、trace score 或其他 trace-derived 資訊。
+- `no_trace_topology` 保留由 `traces.csv` 建立的 call-graph coverage，但不讀取
+  `tracets_lat.csv`／`tracets_err.csv`，因此沒有動態 trace edge。
+- `trace_only` 先以注入前後 residual 計算各服務的 trace 幅度，再跨服務正規化；
+  不再對每條序列各自 min-max 後取最大值。
+- `individual attribution` 保留相同 players、targets、anomaly weights、coverage-
+  strength matrix、coverage 與 victim factors，只把 coalition Banzhaf 邊際貢獻
+  換成 singleton weighted coverage。
+- primary graph 只使用每個 case 自己的 pre-fault spans；first-case、union、
+  per-case-full 與 case-order 皆為 sensitivity condition。
+- 每個 nonzero player→target edge 均輸出 local contribution 與 edge-removal
+  utility drop；不宣稱 calibrated probability 或 structural causal explanation。
