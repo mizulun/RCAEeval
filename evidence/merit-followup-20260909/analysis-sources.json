@@ -1,0 +1,7 @@
+{
+  "script/summarize_merit_followup.py": "abb10eaeeacc882de81d9059ce0fd9b2386ec827c4686d51451289df2cbc64fa",
+  "script/build_merit_followup_page.py": "cad95af68a5af479ee7e0dfb6ebc9df9509a6dfbf142961c7d6402e250582219",
+  "script/audit_merit_followup.py": "111952358ae181c7985efbf573dcf2ac5cedd12d133c156fedf9c34d3ce24136",
+  "script/verify_merit_followup_page.mjs": "731356ca4e905cf8db2c3d9e89f0fd01551b62bd9dfd97f554bfdbb825420302",
+  "tests/test_merit_followup.py": "7c360556463d1746546fdf380b2bb6de4af765cfc35a8a33b7b6a0290f64e2a3"
+}

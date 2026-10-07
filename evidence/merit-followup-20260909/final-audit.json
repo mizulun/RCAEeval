@@ -1,0 +1,13 @@
+{
+  "status": "verified",
+  "cases": 645,
+  "real_records": 10950,
+  "backend_checks": 1080,
+  "prior_baseline_checks": 540,
+  "input_files_checked": 1830,
+  "errors": 0,
+  "unsupported": 6,
+  "production_unchanged": true,
+  "tests": "see test-verification.json",
+  "browser": "verify separately before completion"
+}

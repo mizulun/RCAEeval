@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "protocol_version": "2026-07-28.14",
+  "methods": [
+    "merit_full"
+  ],
+  "datasets": [
+    "re2-ss"
+  ],
+  "checksum_mode": "full",
+  "allow_dirty": true,
+  "length": null,
+  "tdelta": 0,
+  "evaluation_mode": "full_record_retrospective",
+  "graph_source": "per_case_pre_fault",
+  "seed": 20260713,
+  "limit": null,
+  "manifest_template": null
+}

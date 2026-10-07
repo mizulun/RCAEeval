@@ -1,0 +1,5 @@
+{
+  "passed": 21,
+  "command": "PYTHONPATH=. py310/bin/python -m pytest tests/test_merit_followup.py tests/test_merit_training_free.py tests/test_merit_design_audit.py -q",
+  "exit_code": 0
+}

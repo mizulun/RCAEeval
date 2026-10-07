@@ -1,0 +1,18 @@
+{
+  "smoke": false,
+  "datasets": {
+    "re2-ss": 90,
+    "re2-ob": 90,
+    "re2-tt": 90,
+    "re1-ob": 125,
+    "re1-ss": 125,
+    "re1-tt": 125
+  },
+  "real_records": 10950,
+  "errors": 0,
+  "unsupported": 6,
+  "duplicate_metric_files": [],
+  "production_sha256": "2e8e6267b133c88d23c2df604eeb13e804533a5e197c3039553b00d68916d3d2",
+  "prior_re1_exposure": "benchmark_re1_merit_baro.json exists; not an untouched test set",
+  "ci": "5000 fault-stratified root-service×fault cluster bootstrap, seed20260909, unadjusted descriptive"
+}

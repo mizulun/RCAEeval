@@ -1,0 +1,15 @@
+{
+  "completed": "2026-09-09",
+  "tests_passed": 9,
+  "production_source_unchanged": true,
+  "records": 6210,
+  "execution_errors": 0,
+  "no_evidence": 90,
+  "latex_build": "passed",
+  "analysis_sha256": {
+    "script/summarize_merit_design_audit.py": "9e9ca08aea93320376c6e8347e19db6d4d43da743071946791fc9d8769004790",
+    "script/write_merit_design_findings.py": "1d91769c898dd76f305cc3b16dfa1191e47973ed1491de4e7753c354812ff4bb",
+    "script/finalize_merit_design_audit.py": "c0deeb9d7da2f9eeb528072390e1ed5a1817e61403738b4424f3a4abe0b3daf6",
+    "tests/test_merit_design_audit.py": "9eccde7d6a77c15fc171b4bb812531c9e8dbf1fee28cebebca79343787f83129"
+  }
+}

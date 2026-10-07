@@ -1,0 +1,7 @@
+{
+  "source_sha256": "2e8e6267b133c88d23c2df604eeb13e804533a5e197c3039553b00d68916d3d2",
+  "runner_sha256": "8f1514e72fc67f30c58b29bde28f22ed1aa4cb402f5aabab0c0688298658662e",
+  "python": "3.10.18",
+  "numpy": "1.26.4",
+  "protocol": "full_record_retrospective; prepare_case from paper harness; current defaults except swept param"
+}

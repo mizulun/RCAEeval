@@ -1,0 +1,13 @@
+{
+  "ready": true,
+  "datasets": 6,
+  "scenarioViews": 51,
+  "caseFilters": true,
+  "faultFilter": true,
+  "armFilter": true,
+  "metricCharts": true,
+  "search": true,
+  "csv": true,
+  "mobileNoPageOverflow": true,
+  "browserErrors": []
+}

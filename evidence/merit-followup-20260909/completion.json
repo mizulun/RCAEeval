@@ -1,0 +1,20 @@
+{
+  "status": "complete",
+  "cases": 645,
+  "real_records": 10950,
+  "unsupported_records": 6,
+  "errors": 0,
+  "tests_passed": 21,
+  "browser_scenario_views": 51,
+  "visual_results_review": "passed",
+  "production_unchanged": true,
+  "evidence_sha256": {
+    "final-audit.json": "2afa618cb8a9768288b62a8e9cb416f05ba44adc8db7a7ddab965e223f772e9d",
+    "browser-verification.json": "6a6398f280191e29e12555fa0670510076b2afbb72d2a6a2133ce6808ce6d91d",
+    "test-verification.json": "7e0b0a38950bbc5da3d4fd65ec9aa9a877dcb3841569c07758bfe1f0d53036cd",
+    "analysis.json": "aeeeb91a30cb59bb7746ca645c79150b02a6bd58d7def1b0f8f23f09ae90c09e",
+    "index.html": "b1dc1534329af93931c159d4449cf1908b72e49d3298a1147b0c9313ef55638a",
+    "explanation-zh.md": "b6a51eba21f4bcfca03d37d6c5dd36ababd78d533256014f35c813ee03d766d2",
+    "analysis-sources.json": "6d53f237558248732372ed1515416796dffbedf85f6a0e595ffd469b41b98580"
+  }
+}

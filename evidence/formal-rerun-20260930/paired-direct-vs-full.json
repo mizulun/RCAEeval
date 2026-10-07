@@ -1,0 +1,134 @@
+{
+  "re2-ss": {
+    "mcnemar": {
+      "n": 90,
+      "a_only": 0,
+      "b_only": 0,
+      "discordant": 0,
+      "p_value": 1.0,
+      "effect_pp_b_minus_a": 0.0
+    },
+    "bootstrap": {
+      "metric": "AC@1",
+      "n": 90,
+      "n_clusters": 30,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 0.0,
+      "ci95_pp": [
+        0.0,
+        0.0
+      ],
+      "resamples": 10000,
+      "seed": 20260713
+    },
+    "permutation": {
+      "metric": "AC@1",
+      "n": 90,
+      "n_clusters": 30,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 0.0,
+      "p_value": 1.0,
+      "resamples": 10000,
+      "seed": 20260713
+    }
+  },
+  "re2-ob": {
+    "mcnemar": {
+      "n": 90,
+      "a_only": 5,
+      "b_only": 37,
+      "discordant": 42,
+      "p_value": 4.4337048166198656e-07,
+      "effect_pp_b_minus_a": 35.55555555555556
+    },
+    "bootstrap": {
+      "metric": "AC@1",
+      "n": 90,
+      "n_clusters": 30,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 35.55555555555556,
+      "ci95_pp": [
+        17.77777777777778,
+        53.333333333333336
+      ],
+      "resamples": 10000,
+      "seed": 20260713
+    },
+    "permutation": {
+      "metric": "AC@1",
+      "n": 90,
+      "n_clusters": 30,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 35.55555555555556,
+      "p_value": 0.0011998800119988001,
+      "resamples": 10000,
+      "seed": 20260713
+    }
+  },
+  "re2-tt": {
+    "mcnemar": {
+      "n": 90,
+      "a_only": 7,
+      "b_only": 7,
+      "discordant": 14,
+      "p_value": 1.0,
+      "effect_pp_b_minus_a": 0.0
+    },
+    "bootstrap": {
+      "metric": "AC@1",
+      "n": 90,
+      "n_clusters": 30,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 0.0,
+      "ci95_pp": [
+        -10.0,
+        10.0
+      ],
+      "resamples": 10000,
+      "seed": 20260713
+    },
+    "permutation": {
+      "metric": "AC@1",
+      "n": 90,
+      "n_clusters": 30,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 0.0,
+      "p_value": 1.0,
+      "resamples": 10000,
+      "seed": 20260713
+    }
+  },
+  "pooled": {
+    "mcnemar": {
+      "n": 270,
+      "a_only": 12,
+      "b_only": 44,
+      "discordant": 56,
+      "p_value": 2.0876568218419767e-05,
+      "effect_pp_b_minus_a": 11.851851851851853
+    },
+    "bootstrap": {
+      "metric": "AC@1",
+      "n": 270,
+      "n_clusters": 90,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 11.851851851851853,
+      "ci95_pp": [
+        4.444444444444445,
+        19.62962962962963
+      ],
+      "resamples": 10000,
+      "seed": 20260713
+    },
+    "permutation": {
+      "metric": "AC@1",
+      "n": 270,
+      "n_clusters": 90,
+      "cluster_definition": "dataset x root_service x fault_type",
+      "effect_pp_b_minus_a": 11.851851851851853,
+      "p_value": 0.0037996200379962005,
+      "resamples": 10000,
+      "seed": 20260713
+    }
+  }
+}

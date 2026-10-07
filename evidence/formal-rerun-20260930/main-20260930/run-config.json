@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "protocol_version": "2026-07-28.14",
+  "methods": [
+    "merit_full",
+    "merit_no_trace",
+    "merit_no_metric",
+    "merit_direct_service_trace_evidence",
+    "merit_individual_attribution"
+  ],
+  "datasets": [
+    "re2-ss",
+    "re2-ob",
+    "re2-tt"
+  ],
+  "checksum_mode": "full",
+  "allow_dirty": true,
+  "length": null,
+  "tdelta": 0,
+  "evaluation_mode": "full_record_retrospective",
+  "graph_source": "per_case_pre_fault",
+  "seed": 20260713,
+  "limit": null,
+  "manifest_template": null
+}

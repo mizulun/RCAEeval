@@ -1,0 +1,13 @@
+{
+  "cases": 270,
+  "new_records": 1890,
+  "reused_records": 1080,
+  "errors": 0,
+  "same_matrix_checks": 540,
+  "source_sha256": "2e8e6267b133c88d23c2df604eeb13e804533a5e197c3039553b00d68916d3d2",
+  "reuse_source_checks": {
+    "script/merit_design_audit.py": "b15bf1f370f8ccab5f4ccca30332dc77deb7ca03dca8169cc0a5e6f8eb53a27e",
+    "script/run_paper_dataset.py": "6cc5b384ab07e0d2f68c43ce27160b47c925935a0cd83bb25fd9b9d56064d8ba",
+    "RCAEval/benchmark/input_boundaries.py": "9240463437de06d8b637f6d04fe96186171f26fddc6239910cbfc7a061d96fc3"
+  }
+}
