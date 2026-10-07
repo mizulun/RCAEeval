@@ -16,13 +16,15 @@ cd "$(dirname "$0")"
 
 PY=./py310/bin/python
 DATASETS="${DATASETS:-re2-tt re2-ob re2-ss}"
-# Modes: full | no-trace | no-metric | metric-only | metric+trace | no-coverage
-#        | no-victim-demotion | no-trace-topology
+# Modes: full | no-trace | no-metric | trace-evidence | metric-evidence | metric-only
+#        | metric+trace | no-coverage | no-victim-demotion
+#        | no-trace-topology | pure-banzhaf | residual
 MODES="${MODES:-full no-trace no-metric}"
+TEST_ARGS="${TEST_ARGS:-}"
 
 # Where summaries are saved: one file per dataset+mode, plus a combined log
 # stamped with the run time so old runs are not overwritten.
-OUTDIR="${OUTDIR:-ablation_results}"
+OUTDIR="${OUTDIR:-output/ablation-runs}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 COMBINED="$OUTDIR/ablation_$STAMP.txt"
 mkdir -p "$OUTDIR"
@@ -41,12 +43,16 @@ mode_env() {
   case "$1" in
     full)         echo "" ;;
     no-trace)     echo "GABANZHAF_DISABLE_TRACE=1" ;;
-    no-metric)    echo "GABANZHAF_RANK_MODE=trace_evidence" ;;
+    no-metric)    echo "GABANZHAF_DISABLE_METRICS=1" ;;
+    trace-evidence) echo "GABANZHAF_RANK_MODE=trace_evidence" ;;
+    metric-evidence) echo "GABANZHAF_RANK_MODE=metric_evidence" ;;
     metric-only)  echo "GABANZHAF_RANK_MODE=service_evidence" ;;
     metric+trace) echo "GABANZHAF_RANK_MODE=service_evidence_trace" ;;
     no-coverage)  echo "GABANZHAF_DISABLE_COVERAGE=1" ;;
     no-victim-demotion) echo "GABANZHAF_DISABLE_VICTIM_DEMOTION=1" ;;
     no-trace-topology)  echo "GABANZHAF_DISABLE_TRACE_TOPOLOGY=1" ;;
+    pure-banzhaf) echo "GABANZHAF_BANZHAF_MODE=bruteforce" ;;
+    residual)     echo "GABANZHAF_TRACE_RESIDUAL=1" ;;
     *) echo "BADMODE" ;;
   esac
 }
@@ -66,7 +72,7 @@ for ds in $DATASETS; do
     echo "$header" | tee "$per_file" | tee -a "$COMBINED"
     t0=$(date +%s)
     env $env_vars "$PY" main.py --method merit --dataset "$ds" \
-        --result-dir output/results 2>/dev/null \
+        --result-dir output/results $TEST_ARGS 2>/dev/null \
       | grep -E "AC@1-|AC@3-|AC@5-|Avg@5-" | sed 's/^/   /' \
       | tee -a "$per_file" | tee -a "$COMBINED"
     t1=$(date +%s)

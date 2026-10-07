@@ -221,17 +221,17 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("benchmark_results.json"),
+        default=Path("evidence/data/baro-re2.json"),
     )
     parser.add_argument(
         "--markdown-output",
         type=Path,
-        default=Path("docs/benchmark/gabanzhaf-vs-baro.md"),
+        default=Path("output/generated-docs/gabanzhaf-vs-baro.md"),
     )
     parser.add_argument(
         "--csv-output",
         type=Path,
-        default=Path("docs/benchmark/gabanzhaf-vs-baro.csv"),
+        default=Path("output/generated-docs/gabanzhaf-vs-baro.csv"),
     )
     args = parser.parse_args()
 

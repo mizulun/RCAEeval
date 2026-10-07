@@ -29,6 +29,12 @@ from RCAEval.utility import (
 )
 
 
+pytestmark = pytest.mark.skipif(
+    os.getenv("RCAEVAL_RUN_NETWORK_TESTS") != "1",
+    reason="dataset download tests require explicit network opt-in",
+)
+
+
 @pytest.mark.parametrize("func", [
     download_re1ob_dataset,
     download_re1ss_dataset,

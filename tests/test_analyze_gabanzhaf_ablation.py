@@ -183,6 +183,12 @@ def test_render_report_distinguishes_low_k_from_stable_k_plateau(tmp_path):
     assert "Candidate K=6 produced identical paired top-1 and ordered top-5" in report
 
 
+def test_k_variant_number_accepts_merit_renamed_variants():
+    assert analysis_mod._k_variant_number("merit_k6") == 6
+    assert analysis_mod._k_variant_number("gabanzhaf_k6") == 6
+    assert analysis_mod._k_variant_number("merit_evidence_metric") is None
+
+
 def test_render_report_uses_benchmark_metrics_for_k_stability(tmp_path):
     _write_case(
         tmp_path,
@@ -231,3 +237,73 @@ def test_render_report_uses_benchmark_metrics_for_k_stability(tmp_path):
     )
 
     assert "Candidate K=2 changed at least one benchmark metric" in report
+
+
+def test_render_report_lag_conclusion_accepts_merit_variant_name(tmp_path):
+    _write_case(
+        tmp_path,
+        "merit",
+        "re2-ob",
+        "svc-a_cpu_1.json",
+        ["svc-b_cpu", "svc-a_cpu"],
+    )
+    _write_case(
+        tmp_path,
+        "merit_no_lag_1",
+        "re2-ob",
+        "svc-a_cpu_1.json",
+        ["svc-a_cpu", "svc-b_cpu"],
+    )
+
+    report = analysis_mod.render_report(
+        tmp_path,
+        benchmark_path=None,
+        baseline="merit",
+        trace_baseline="with_trace_full",
+        variants=["merit_no_lag_1"],
+        datasets=["re2-ob"],
+    )
+
+    assert "Removing lag-1 produced 1 wins and 0 losses across 1 paired cases." in report
+
+
+def test_render_report_includes_delta_vs_baseline_table(tmp_path):
+    benchmark = tmp_path / "benchmark.json"
+    benchmark.write_text(
+        json.dumps([
+            {
+                "method": "gabanzhaf",
+                "dataset": "re2-ob",
+                "wall_time_sec": 10.0,
+                "AC@1-CPU": 0.5,
+                "AC@1-MEM": 1.0,
+                "Avg@5-CPU": 0.8,
+                "Avg@5-MEM": 1.0,
+            },
+            {
+                "method": "variant",
+                "dataset": "re2-ob",
+                "wall_time_sec": 7.5,
+                "AC@1-CPU": 0.25,
+                "AC@1-MEM": 1.0,
+                "Avg@5-CPU": 0.7,
+                "Avg@5-MEM": 1.0,
+            },
+        ]),
+        encoding="utf-8",
+    )
+
+    report = analysis_mod.render_report(
+        tmp_path,
+        benchmark_path=benchmark,
+        baseline="gabanzhaf",
+        trace_baseline="with_trace_full",
+        variants=["variant"],
+        datasets=["re2-ob"],
+    )
+
+    assert "## Delta vs Baseline" in report
+    assert (
+        "| variant | re2-ob | 0.625 | -0.125 | 0.850 | -0.050 | "
+        "7.50 | -2.50 |"
+    ) in report

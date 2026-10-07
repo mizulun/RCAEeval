@@ -1,0 +1,326 @@
+{
+  "protocol_version": "2026-07-28.14",
+  "primary_venue": "SANER 2027 Research Track",
+  "backup_venue": "ICSA 2027 Research Papers",
+  "submission_contract": {
+    "authoritative_build": "paper/main.tex",
+    "language": "English",
+    "format": "IEEE double-column",
+    "main_pages": 10,
+    "references_pages": 2,
+    "double_blind": true,
+    "artifact": "anonymous companion artifact",
+    "working_drafts": [
+      "paper/main_zh.tex",
+      "paper/thesis_expanded_zh.tex"
+    ]
+  },
+  "evaluation_mode": "full_record_retrospective",
+  "estimand": {
+    "name": "retrospective_fixed_defaults",
+    "headline_parameters": "current_defaults frozen before protocol-v14 reruns",
+    "parameter_sweeps": "descriptive sensitivity only; never refit headline predictions",
+    "claim_boundary": "offline diagnosis from each case's complete benchmark-defined telemetry record"
+  },
+  "artifact_roles": {
+    "main": "retrospective_evaluation",
+    "parameter_sweeps": "descriptive_sensitivity",
+    "window_and_delay": "supplementary_sensitivity",
+    "pre_v14": "exploratory"
+  },
+  "datasets": ["re2-ob", "re2-ss", "re2-tt"],
+  "expected_cases_per_dataset": 90,
+  "dataset_release": {
+    "source": "https://zenodo.org/records/14590730",
+    "doi": "10.5281/zenodo.14590730",
+    "version": "v2",
+    "archive_md5": {
+      "re2-ob": "b9e23f8842c404b396ffd2becff15de4",
+      "re2-ss": "bd747a8fc7c5be00c613e13fbf9dd74b",
+      "re2-tt": "a7fbcd1ada406067dcc50771ae398408"
+    }
+  },
+  "headline_metric": "macro_mean_per_system_service_AC@1",
+  "secondary_metrics": ["AC@3", "AC@5", "Avg@5", "execution_success_rate", "runtime"],
+  "workers": 1,
+  "python_environment": {
+    "version": "3.10.18",
+    "lock_file": "requirements_py310.lock",
+    "validation": "exact Python patch version and every exact package pin; extra packages are recorded but allowed"
+  },
+  "fixed_sli": {
+    "re2-ob": "frontend_latency",
+    "re2-ss": "front-end_latency",
+    "re2-tt": "ts-ui-dashboard_latency"
+  },
+  "method_environments": {
+    "merit": "./py310/bin/python",
+    "baro": "./py310/bin/python",
+    "microrank": "./py310/bin/python",
+    "tracerca": "./py310/bin/python",
+    "causalrca": "./py310/bin/python",
+    "pc_pagerank": "./py310/bin/python",
+    "circa": "./py310/bin/python",
+    "rcd": "./py310/bin/python"
+  },
+  "method_inputs": {
+    "merit": "metrics",
+    "baro": "metrics",
+    "microrank": "traces",
+    "tracerca": "traces",
+    "causalrca": "metrics",
+    "pc_pagerank": "metrics",
+    "circa": "metrics",
+    "rcd": "metrics"
+  },
+  "method_input_contracts": {
+    "merit": {"required": ["metrics"], "optional": ["raw_traces", "trace_latency", "trace_error"]},
+    "baro": {"required": ["metrics"], "optional": []},
+    "microrank": {"required": ["raw_traces"], "optional": []},
+    "tracerca": {"required": ["raw_traces"], "optional": []},
+    "causalrca": {"required": ["metrics"], "optional": []},
+    "pc_pagerank": {"required": ["metrics"], "optional": []},
+    "circa": {"required": ["metrics"], "optional": []},
+    "rcd": {"required": ["metrics"], "optional": []}
+  },
+  "strict_baseline_failures": true,
+  "baseline_provenance": {
+    "baro": {
+      "implementation": "RCAEval adaptation",
+      "source_files": ["RCAEval/e2e/baro.py"],
+      "publication": "https://doi.org/10.1145/3660805",
+      "upstream": "https://github.com/phamquiluan/baro",
+      "license": "MIT (LICENSES/LICENSE-BARO)"
+    },
+    "microrank": {
+      "implementation": "RCAEval adaptation",
+      "source_files": ["RCAEval/e2e/microrank.py"],
+      "publication": "https://doi.org/10.1145/3442381.3449905",
+      "upstream": "https://github.com/IntelligentDDS/MicroRank",
+      "license": "MIT (upstream repository)"
+    },
+    "tracerca": {
+      "implementation": "RCAEval adaptation",
+      "source_files": ["RCAEval/e2e/tracerca.py"],
+      "publication": "https://doi.org/10.1109/IWQOS52092.2021.9521340",
+      "upstream": "https://github.com/NetManAIOps/TraceRCA",
+      "license": "no license file identified; do not redistribute upstream code in anonymous artifact"
+    },
+    "rcd": {
+      "implementation": "RCAEval adaptation plus Python 3.10 API compatibility port",
+      "source_files": ["RCAEval/e2e/rcd.py", "RCAEval/e2e/_rcd_causal_learn.py"],
+      "publication": "https://proceedings.neurips.cc/paper_files/paper/2022/hash/c9fcd02e6445c7dfbad6986abee53d0d-Abstract-Conference.html",
+      "upstream": "https://github.com/azamikram/rcd",
+      "license": "MIT (LICENSES/LICENSE-RCD)"
+    },
+    "causalrca": {
+      "implementation": "RCAEval adaptation",
+      "source_files": ["RCAEval/e2e/causalrca.py"],
+      "publication": "https://doi.org/10.1016/j.jss.2023.111724",
+      "upstream": "https://github.com/AXinx/CausalRCA_code",
+      "license": "no upstream license; do not redistribute in anonymous artifact"
+    },
+    "pc_pagerank": {
+      "implementation": "RCAEval benchmark composition with documented numerical/API integration fixes",
+      "source_files": [
+        "RCAEval/e2e/pc_pagerank.py",
+        "RCAEval/graph_construction/pc.py",
+        "RCAEval/graph_heads/page_rank.py"
+      ],
+      "integration_fixes": [
+        "Fisher-Z falls back to a Moore-Penrose inverse for singular or numerically invalid correlation submatrices and clips partial correlation by one floating-point ULP to the open interval (-1, 1)",
+        "A degenerate conditional-independence test with zero conditional variance conservatively returns p=0, retaining the edge rather than declaring independence or selecting a ridge constant",
+        "PageRank uses the scikit-network 0.33 fit_predict API and retains isolated telemetry nodes"
+      ],
+      "publication": null,
+      "upstream": null,
+      "license": "MIT (repository LICENSE)"
+    },
+    "circa": {
+      "implementation": "RCAEval adaptation",
+      "source_files": ["RCAEval/e2e/circa.py"],
+      "publication": "https://doi.org/10.1145/3534678.3539041",
+      "upstream": "https://github.com/NetManAIOps/CIRCA",
+      "upstream_result_revision": "1522ddd7efd16db55e9f351fd70324501ce9134e",
+      "license": "BSD-3-Clause (LICENSES/LICENSE-CIRCA)"
+    }
+  },
+  "external_crosschecks": {
+    "baro_re2_tt_fault_avg5": {
+      "source": "RCAEval README Table 6 reproducibility output",
+      "source_url": "https://github.com/phamquiluan/RCAEval#reproduce-rcaeval-paper-results",
+      "method": "baro",
+      "dataset": "re2-tt",
+      "metric": "Avg@5",
+      "absolute_tolerance": 0.0051,
+      "fault_values": {
+        "cpu": 0.72,
+        "mem": 0.99,
+        "disk": 1.0,
+        "socket": 0.83,
+        "delay": 0.63,
+        "loss": 0.64
+      }
+    }
+  },
+  "threads": {
+    "OMP_NUM_THREADS": 1,
+    "OPENBLAS_NUM_THREADS": 1,
+    "MKL_NUM_THREADS": 1,
+    "NUMEXPR_NUM_THREADS": 1
+  },
+  "seeds": [20260713, 20260714, 20260715],
+  "stochastic_methods": ["rcd", "causalrca"],
+  "runtime_repetitions": 5,
+  "per_case_timeout_seconds": 900,
+  "per_case_timeout_scope": "whole_case_hard_subprocess_deadline",
+  "dataset_worker_policy": "one persistent subprocess; terminate on timeout and restart before next case",
+  "dataset_budget_seconds": 86400,
+  "dataset_budget_policy": "at least expected_cases_per_dataset multiplied by per_case_timeout_seconds; the outer task budget may not truncate case-level failure artifacts",
+  "infeasible": {
+    "circa:re2-tt": {
+      "status": "N/A",
+      "basis": "12-case probe measured 12.3h; projected full run >79h",
+      "projection_only": true
+    }
+  },
+  "modality_inapplicable": {
+    "microrank:re2-ss": {
+      "status": "N/A",
+      "reason": "required modality absent",
+      "required_modality": "raw_traces"
+    },
+    "tracerca:re2-ss": {
+      "status": "N/A",
+      "reason": "required modality absent",
+      "required_modality": "raw_traces"
+    },
+    "merit_trace_only:re2-ss": {
+      "status": "N/A",
+      "reason": "required modality absent",
+      "required_modality": "trace-derived evidence"
+    },
+    "merit_no_metric:re2-ss": {
+      "status": "N/A",
+      "reason": "required modality absent",
+      "required_modality": "trace-derived evidence"
+    }
+  },
+  "graph_policy": {
+    "primary_source": "per_case_pre_fault",
+    "primary_scope": "each case uses only its own pre-injection raw spans",
+    "boundary_version": "paper-full-record-v1",
+    "cache_key_fields": ["source", "source_path", "boundary_version", "service_names"],
+    "cache_empty_graph": false,
+    "sensitivity_sources": [
+      "per_case_full",
+      "first_case_pre_fault",
+      "union_pre_fault"
+    ]
+  },
+  "fixed_defaults_provenance": "RE2-TT development-period adjustment",
+  "current_defaults": {
+    "victim_floor": 0.5,
+    "trace_topology_conf": 0.85,
+    "coverage_conf": 0.7,
+    "exact_candidate_k": 12
+  },
+  "sweeps": {
+    "victim_floor": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    "trace_topology_conf": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    "coverage_conf": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    "exact_candidate_k": [3, 6, 9, 12, 15],
+    "tdelta_seconds": [0, 60, 120, 300],
+    "observation_window_total_minutes": [5, 10, 20, 30]
+  },
+  "flat_region_ac1_tolerance": 0.011111111111111112,
+  "global_selection_rule": {
+    "joint": "intersection of per-system values within tolerance of each system maximum",
+    "loso_training": "maximize equal-weight macro AC@1 on two training systems; apply tolerance and least-intervention tie-break",
+    "loso_final": "numeric median of the three fold-selected grid values; held-out scores do not select the final value",
+    "tie_break": {
+      "victim_floor": "largest",
+      "trace_topology_conf": "smallest",
+      "coverage_conf": "smallest",
+      "exact_candidate_k": "smallest"
+    }
+  },
+  "bootstrap_resamples": 10000,
+  "bootstrap_seed": 20260713,
+  "paired_inference": {
+    "scopes": ["per_system", "compatible_pooled"],
+    "sampling_unit": "case",
+    "cluster": "system x root_service x fault_type",
+    "continuous_effect_interval": "paired cluster bootstrap",
+    "binary_test": "cluster-aware paired sign-flip permutation",
+    "stochastic_estimand": "compute case metrics within each seed, average effects across the three frozen seeds, then resample case clusters while retaining the seed block",
+    "holm_families": ["rq1_baselines", "rq2_ablations", "rq4_robustness"],
+    "pooled_na_policy": "include only datasets on which both methods have a complete case set; report the included datasets and exact n",
+    "excluded_from_inference": ["runtime_repetitions", "parameter_sweeps", "delay_sweep", "window_sweep"]
+  },
+  "reporting_gates": {
+    "manifest_output_path_required": true,
+    "missing_trace_exact_rank_comparison": "merit_full versus merit_no_trace on all 90 re2-ss cases; execution status, metric-rank sequence, and service-rank sequence must be exactly equal",
+    "efficiency_cache_conditions": [
+      "cold_independent_process",
+      "warm_after_same_case_call"
+    ],
+    "timeout_observed_duration_required": true
+  },
+  "banzhaf_equivalence": {
+    "max_k": 15,
+    "absolute_tolerance": 1e-9,
+    "k_values": [3, 6, 9, 12, 15],
+    "target_count": 50,
+    "repetitions": 5,
+    "seed": 20260713
+  },
+  "controlled_variants": [
+    "full",
+    "no_trace",
+    "no_metric",
+    "no_trace_topology",
+    "no_coverage",
+    "no_victim_demotion",
+    "no_coverage_no_victim",
+    "no_coverage_parent_protection",
+    "no_metric_type_dominance",
+    "no_early_full_fusion",
+    "trace_latency_only",
+    "trace_error_only",
+    "trace_lag0",
+    "trace_time_shuffle",
+    "trace_random_edges",
+    "trace_only",
+    "direct_service_evidence",
+    "direct_service_trace_evidence",
+    "alternative_attribution",
+    "graph_per_case_full",
+    "graph_first_case_pre_fault",
+    "graph_union_pre_fault",
+    "graph_first_case_order1",
+    "graph_first_case_order2",
+    "graph_first_case_order3",
+    "trace_dropout_10",
+    "trace_dropout_30",
+    "trace_dropout_50",
+    "trace_dropout_70",
+    "trace_dropout_100",
+    "trace_noise_10",
+    "trace_noise_30",
+    "trace_noise_50",
+    "trace_edge_noise_10",
+    "trace_edge_noise_30",
+    "trace_edge_noise_50",
+    "bruteforce"
+  ],
+  "baselines": [
+    "baro",
+    "microrank",
+    "tracerca",
+    "rcd",
+    "causalrca",
+    "pc_pagerank",
+    "circa"
+  ]
+}

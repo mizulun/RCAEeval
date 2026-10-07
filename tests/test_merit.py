@@ -91,6 +91,67 @@ def test_metric_evidence_rewards_early_onset():
     assert ev["root_latency"] > ev["victim_latency"]
 
 
+def test_metric_evidence_default_scorer_matches_robust_z_unchanged():
+    """Default config.scorer ("robust_z") must produce byte-identical output
+    to the pre-CUSUM implementation -- i.e. explicitly requesting robust_z
+    must match the config=None / default path."""
+    rng = np.random.default_rng(1)
+    normal = rng.normal(10.0, 2.0, (50, 4))
+    anomal = rng.normal(10.0, 2.0, (30, 4))
+    anomal[:, 1] += 20.0
+    cols = [f"svc{i}_latency" for i in range(4)]
+
+    ev_default = _metric_evidence(normal, anomal, cols)
+    ev_explicit = _metric_evidence(
+        normal, anomal, cols, config=_GabanzhafConfig.from_kwargs({"scorer": "robust_z"})
+    )
+    for c in cols:
+        assert ev_default[c] == ev_explicit[c]
+
+
+def test_cusum_metric_evidence_vectorized_matches_naive_loop():
+    """The vectorized CUSUM peak (per column) must equal the naive per-step
+    accumulator acc = max(0, acc + dev[t]) tracked to its running maximum."""
+    rng = np.random.default_rng(42)
+    n_rows, n_cols = 60, 5
+    normal = rng.normal(5.0, 1.5, (n_rows, n_cols))
+    anomal = rng.normal(5.0, 1.5, (40, n_cols))
+    anomal[:, 2] += 3.0  # small persistent shift on one column
+    cols = [f"svc{i}_metric" for i in range(n_cols)]
+    config = _GabanzhafConfig.from_kwargs({"scorer": "cusum"})
+
+    normal_mat = np.asarray(normal, dtype=float)
+    anomal_mat = np.asarray(anomal, dtype=float)
+
+    med = np.nanmedian(normal_mat, axis=0)
+    q75, q25 = np.nanpercentile(normal_mat, [75, 25], axis=0)
+    sigma = np.where((q75 - q25) > 0, (q75 - q25) / 1.349, 1.0)
+    k = config.cusum_slack * sigma
+    dev = np.abs(anomal_mat - med) - k
+    dev = np.nan_to_num(dev, nan=0.0)
+
+    naive_peak = np.zeros(n_cols)
+    for j in range(n_cols):
+        acc = 0.0
+        peak_j = 0.0
+        for t in range(dev.shape[0]):
+            acc = max(0.0, acc + dev[t, j])
+            peak_j = max(peak_j, acc)
+        naive_peak[j] = peak_j / sigma[j]
+    naive_log = np.log1p(naive_peak)
+    naive_ref = np.percentile(naive_log, 99)
+    naive_score = (
+        np.clip(naive_log / naive_ref, 0.0, 1.0)
+        if naive_ref > 0
+        else np.zeros_like(naive_log)
+    )
+
+    ev = merit_mod._cusum_metric_evidence(normal_mat, anomal_mat, cols, config)
+    vectorized_score = np.array([ev[c] for c in cols])
+
+    assert np.allclose(vectorized_score, naive_score)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Banzhaf power index
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +238,19 @@ def test_banzhaf_power_rejects_unknown_mode():
             np.array([0.5], dtype=float),
             _GabanzhafConfig.from_kwargs({"banzhaf_mode": "invalid"}),
         )
+
+
+def test_individual_attribution_keeps_probability_matrix_and_weights():
+    prob = np.array([[1.0, 0.4], [0.2, 1.0]], dtype=float)
+    weights = np.array([0.7, 0.5], dtype=float)
+
+    values = _banzhaf_power(
+        prob,
+        weights,
+        _GabanzhafConfig.from_kwargs({"banzhaf_mode": "individual"}),
+    )
+
+    assert np.allclose(values, prob @ weights)
 
 
 def test_noisy_or_coverage_is_monotone_and_bounded():
@@ -318,6 +392,16 @@ def test_service_trace_series_residual_noop_without_inject_time():
     assert np.allclose(full["svc"], no_inject["svc"])  # residual inert w/o inject
 
 
+def test_trace_service_evidence_preserves_cross_service_amplitude():
+    evidence = merit_mod._trace_service_evidence({
+        "loud": np.array([0.0, 1.0, 9.0, 8.0]),
+        "quiet": np.array([0.0, 0.2, 0.5, 0.4]),
+    })
+
+    assert evidence["loud"] == pytest.approx(1.0)
+    assert evidence["quiet"] == pytest.approx(0.0)
+
+
 def test_trace_min_energy_gate_drops_quiet_residual_service():
     call_graph = {"caller": ["loud", "quiet"]}
     trace_series = {
@@ -352,6 +436,25 @@ def test_rank_evidence_trace_lets_trace_move_the_order():
         trace_service_evidence=trace_sev,
     )
     assert ranks[0] == "svc-b_latency"  # trace broke the metric tie
+
+
+def test_direct_metric_trace_mode_ranks_by_normalized_score_sum():
+    cols = ["svc-a_cpu", "svc-b_cpu", "svc-c_cpu"]
+    metric_ev = {"svc-a_cpu": 10.0, "svc-b_cpu": 6.0, "svc-c_cpu": 0.0}
+    metric_service = {"svc-a": 10.0, "svc-b": 6.0, "svc-c": 0.0}
+    trace_service = {"svc-a": 0.0, "svc-b": 5.0, "svc-c": 10.0}
+
+    ranks = merit_mod._rank_evidence_metrics(
+        cols,
+        metric_ev,
+        metric_service,
+        "service_evidence_trace",
+        trace_service_evidence=trace_service,
+    )
+
+    # svc-b wins only after adding normalized metric (0.6) and trace (0.5)
+    # scores; the single-source winners are svc-a and svc-c.
+    assert ranks[0] == "svc-b_cpu"
 
 
 def test_rank_evidence_trace_only_ignores_metric():
@@ -578,6 +681,63 @@ def test_gabanzhaf_core_returns_game_candidates_when_requested():
     assert "stage_timing" in result
     assert "game_candidates" in result
     assert len(result["game_candidates"]) > 0
+    assert "root_service" not in result["diagnostics"]
+    assert "root_candidate_recall" not in result["diagnostics"]
+
+
+def test_no_metric_modality_uses_trace_for_candidates_and_banzhaf():
+    trace_evidence = {"svc-a": 0.2, "svc-b": 0.9}
+    first = _gabanzhaf_core(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "use_metrics": False,
+            "trace_service_evidence": trace_evidence,
+            "return_diagnostics": True,
+        },
+    )
+    metric_values_swapped = _simple_core_frame().copy()
+    metric_values_swapped[["svc-a_cpu", "svc-b_cpu"]] = (
+        metric_values_swapped[["svc-b_cpu", "svc-a_cpu"]].to_numpy()
+    )
+    second = _gabanzhaf_core(
+        metric_values_swapped,
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "use_metrics": False,
+            "trace_service_evidence": trace_evidence,
+            "return_diagnostics": True,
+        },
+    )
+
+    assert first["ranks"] == second["ranks"]
+    assert first["ranks"][0].startswith("svc-b_")
+    assert first["diagnostics"]["configuration"]["use_metrics"] is False
+    assert set(first["diagnostics"]["metric_evidence"].values()) == {0.0}
+    assert first["diagnostics"]["service_banzhaf"]
+
+
+def test_no_metric_modality_keeps_constant_columns_as_schema_only():
+    data = _simple_core_frame().assign(svc_c_mem=7.0)
+
+    result = _gabanzhaf_core(
+        data,
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "use_metrics": False,
+            "trace_service_evidence": {"svc-a": 0.2, "svc-b": 0.9},
+            "return_diagnostics": True,
+        },
+    )
+
+    assert "svc_c_mem" in result["node_names"]
+    assert result["diagnostics"]["metric_evidence"]["svc_c_mem"] == 0.0
 
 
 def test_gabanzhaf_core_uses_identity_only_causal_matrix_without_coverage():
@@ -671,17 +831,29 @@ def test_gabanzhaf_entry_loads_trace_multilag_topology_from_case_dir(tmp_path, m
     assert "trace" in result["diagnostics"]["stage_timing"]
 
 
-@pytest.mark.parametrize("rank_mode", ["service_evidence", "metric_evidence"])
+@pytest.mark.parametrize(
+    "rank_mode",
+    [
+        "service_evidence",
+        "metric_evidence",
+        "trace_evidence",
+        "service_evidence_trace",
+    ],
+)
 def test_gabanzhaf_core_evidence_modes_skip_banzhaf(monkeypatch, rank_mode):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("causal game must not run in evidence-only modes")
 
-    monkeypatch.setattr(merit_mod, "_banzhaf_power", fail_if_called)
-    monkeypatch.setattr(
-        merit_mod,
+    for helper in [
+        "_service_latency_scores",
+        "_service_latency_family_scores",
+        "_coverage_parents",
+        "_causal_edges",
+        "_select_exact_candidates",
         "_causal_explanation_matrix",
-        fail_if_called,
-    )
+        "_banzhaf_power",
+    ]:
+        monkeypatch.setattr(merit_mod, helper, fail_if_called)
     result = _gabanzhaf_core(
         _simple_core_frame(),
         inject_time=6,
@@ -696,6 +868,41 @@ def test_gabanzhaf_core_evidence_modes_skip_banzhaf(monkeypatch, rank_mode):
     assert result["rank_mode"] == rank_mode
     assert result["service_banzhaf"] == {}
     assert result["causal_probability_matrix"] == []
+    assert result["candidate_pool"] == []
+    assert result["causal_edges"] == []
+
+
+def test_direct_metric_trace_core_reports_service_score_sum_and_ranking():
+    result = _gabanzhaf_core(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={
+            "rank_mode": "service_evidence_trace",
+            "trace_service_evidence": {"svc-a": 0.0, "svc-b": 1.0},
+            "return_diagnostics": True,
+            "return_stage_timing": True,
+        },
+    )
+
+    metric_scores = result["direct_metric_service_evidence"]
+    trace_scores = result["direct_trace_service_evidence"]
+    combined_scores = result["direct_service_scores"]
+    for service in combined_scores:
+        assert combined_scores[service] == pytest.approx(
+            metric_scores.get(service, 0.0) + trace_scores.get(service, 0.0)
+        )
+
+    assert result["service_ranks"] == sorted(
+        result["service_ranks"],
+        key=lambda service: -combined_scores[service],
+    )
+    assert set(result["stage_timing"]) == {
+        "preprocess",
+        "metric_evidence",
+        "ranking",
+    }
 
 
 def test_gabanzhaf_entry_reads_banzhaf_mode_env(monkeypatch):
@@ -714,6 +921,91 @@ def test_gabanzhaf_entry_reads_banzhaf_mode_env(monkeypatch):
     )
 
     assert captured_kwargs["banzhaf_mode"] == "bruteforce"
+
+
+def test_merit_entry_reads_disable_metrics_env(monkeypatch):
+    captured_kwargs = {}
+
+    def fake_core(data, inject_time, dataset, anomalies, kwargs):
+        captured_kwargs.update(kwargs)
+        return {"ranks": []}
+
+    monkeypatch.setenv("GABANZHAF_DISABLE_METRICS", "1")
+    monkeypatch.setattr(merit_mod, "_merit_core", fake_core)
+
+    merit_mod.merit(
+        pd.DataFrame({"time": [0, 1], "svc_cpu": [0.0, 1.0]}),
+        inject_time=1,
+    )
+
+    assert captured_kwargs["use_metrics"] is False
+
+
+def test_merit_no_trace_skips_all_trace_file_reads(tmp_path, monkeypatch):
+    case_dir = tmp_path / "opaque" / "1"
+    case_dir.mkdir(parents=True)
+    metric_path = case_dir / "simple_metrics.csv"
+    data = _simple_core_frame()
+    data.to_csv(metric_path, index=False)
+    args = type("Args", (), {"data_path": str(metric_path)})()
+
+    def fail_if_trace_read(*_args, **_kwargs):
+        raise AssertionError("no-trace variant must not inspect trace files")
+
+    monkeypatch.setenv("GABANZHAF_DISABLE_TRACE", "1")
+    monkeypatch.setattr(merit_mod, "_build_call_graph_from_traces", fail_if_trace_read)
+    monkeypatch.setattr(merit_mod, "_trace_topology_from_case_dir", fail_if_trace_read)
+
+    result = merit_mod.merit(
+        data,
+        inject_time=6,
+        dataset="unit",
+        args=args,
+        return_diagnostics=True,
+    )
+
+    diagnostics = result["diagnostics"]
+    assert diagnostics["configuration"]["use_trace"] is False
+    assert diagnostics["trace_topology_edges"] == []
+    assert diagnostics["trace_service_evidence"] == {}
+    assert diagnostics["call_graph_edges"] == []
+    assert diagnostics["graph_provenance"]["source"] == "disabled_no_trace"
+    assert diagnostics["game_candidates"]
+    assert diagnostics["service_banzhaf"]
+    assert result["ranks"]
+
+
+def test_merit_no_trace_scrubs_caller_supplied_trace_evidence(monkeypatch):
+    monkeypatch.setenv("GABANZHAF_DISABLE_TRACE", "1")
+
+    result = merit_mod.merit(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        call_graph={"svc-a": ["svc-b"]},
+        trace_topology_edges=[("svc-a", "svc-b", 1.0, "latency", 0)],
+        trace_service_evidence={"svc-b": 1.0},
+        trace_latency_evidence={"svc-b": 1.0},
+        trace_error_evidence={"svc-b": 1.0},
+        trace_stage_timing={"trace_latency": 1.0},
+        return_diagnostics=True,
+        return_stage_timing=True,
+    )
+
+    diagnostics = result["diagnostics"]
+    assert diagnostics["configuration"]["use_trace"] is False
+    assert diagnostics["trace_topology_edges"] == []
+    assert diagnostics["trace_service_evidence"] == {}
+    assert diagnostics["trace_latency_evidence"] == {}
+    assert diagnostics["trace_error_evidence"] == {}
+    assert diagnostics["trace_stage_timing"] == {}
+    assert diagnostics["call_graph_edges"] == []
+    assert diagnostics["causal_edges"] == []
+    assert diagnostics["game_candidates"]
+    assert diagnostics["coverage_strength_matrix"]
+    assert diagnostics["service_banzhaf"]
+    assert result["ranks"]
+    assert {"candidates", "banzhaf", "ranking"}.issubset(result["stage_timing"])
 
 
 def test_victim_factors_demotes_service_with_abnormal_upstream():
@@ -741,8 +1033,230 @@ def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
         source = f.read()
 
     forbidden = [
-        "ground_truth", "root_cause", "case_id", "if dataset",
+        "ground_truth", "root_cause", "root_service", "case_id", "if dataset",
         "re2-ob", "re2-ss", "re2-tt", "DELAY", "LOSS",
     ]
     for token in forbidden:
         assert token not in source
+
+
+def test_pre_fault_graph_excludes_post_fault_span_edges(tmp_path):
+    pd.DataFrame(
+        {
+            "spanID": ["pre-p", "pre-c", "post-p", "post-c"],
+            "parentSpanID": ["", "pre-p", "", "post-p"],
+            "serviceName": ["caller", "pre-callee", "caller", "post-callee"],
+            "startTime": [1_000_000, 2_000_000, 7_000_000, 8_000_000],
+            "duration": [0, 0, 0, 0],
+        }
+    ).to_csv(tmp_path / "traces.csv", index=False)
+    boundary = {
+        "start": 0,
+        "end": 10,
+        "inject_time": 5,
+        "mode": "full_record_retrospective",
+        "version": "paper-full-record-v1",
+    }
+
+    graph = merit_mod._build_call_graph_from_traces(
+        str(tmp_path),
+        {"caller", "pre-callee", "post-callee"},
+        cache_key=("per-case", str(tmp_path), "paper-full-record-v1"),
+        boundary=boundary,
+        pre_fault=True,
+    )
+
+    assert graph == {"caller": ["pre-callee"]}
+
+
+def test_empty_call_graph_is_not_cached(tmp_path):
+    cache_key = ("unit-empty", str(tmp_path), "paper-full-record-v1")
+    assert merit_mod._build_call_graph_from_traces(
+        str(tmp_path), cache_key=cache_key
+    ) == {}
+    pd.DataFrame(
+        {
+            "spanID": ["p", "c"],
+            "parentSpanID": ["", "p"],
+            "serviceName": ["caller", "callee"],
+        }
+    ).to_csv(tmp_path / "traces.csv", index=False)
+
+    assert merit_mod._build_call_graph_from_traces(
+        str(tmp_path), cache_key=cache_key
+    ) == {"caller": ["callee"]}
+
+
+def test_local_contributions_sum_to_each_closed_form_banzhaf_score():
+    result = _gabanzhaf_core(
+        _simple_core_frame(),
+        inject_time=6,
+        dataset="unit",
+        anomalies=None,
+        kwargs={"return_diagnostics": True},
+    )
+
+    diagnostics = result["diagnostics"]
+    for candidate, targets in diagnostics["player_target_contributions"].items():
+        assert sum(targets.values()) == pytest.approx(
+            diagnostics["service_banzhaf"][candidate]
+        )
+    assert diagnostics["coverage_strength_matrix"] == diagnostics[
+        "causal_probability_matrix"
+    ]
+    assert any(
+        value > 0
+        for targets in diagnostics["edge_removal_utility_drop"].values()
+        for value in targets.values()
+    )
+
+
+def test_trace_negative_controls_are_deterministic_and_degree_matched():
+    series = {
+        "a": np.asarray([0.0, 1.0, 2.0, 3.0]),
+        "b": np.asarray([3.0, 2.0, 1.0, 0.0]),
+    }
+    first = merit_mod._time_shuffle_trace_series(series, "unit")
+    second = merit_mod._time_shuffle_trace_series(series, "unit")
+    assert all(np.array_equal(first[key], second[key]) for key in series)
+    assert any(not np.array_equal(first[key], series[key]) for key in series)
+
+    edges = [
+        ("a", "c", 0.7, "latency", 1),
+        ("a", "d", 0.6, "latency", 2),
+        ("b", "d", 0.8, "error", 0),
+        ("b", "e", 0.5, "error", 1),
+    ]
+    randomized = merit_mod._degree_matched_random_edges(edges)
+
+    def degrees(items):
+        outgoing = {}
+        incoming = {}
+        for source, target, *_ in items:
+            outgoing[source] = outgoing.get(source, 0) + 1
+            incoming[target] = incoming.get(target, 0) + 1
+        return outgoing, incoming
+
+    assert degrees(randomized) == degrees(edges)
+    assert randomized == merit_mod._degree_matched_random_edges(edges)
+
+    frame = pd.DataFrame({"time": range(20), "value": range(20)})
+    dropped = merit_mod._deterministic_row_dropout(frame, 0.5, "unit")
+    assert dropped.equals(
+        merit_mod._deterministic_row_dropout(frame, 0.5, "unit")
+    )
+    assert merit_mod._deterministic_row_dropout(
+        frame, 1.0, "unit"
+    ).empty
+
+    noisy = merit_mod._add_trace_series_noise(series, 0.3, "unit")
+    assert all(
+        np.array_equal(noisy[key], merit_mod._add_trace_series_noise(
+            series, 0.3, "unit"
+        )[key])
+        for key in series
+    )
+
+
+def test_metric_component_controls_change_only_the_targeted_evidence_stage():
+    normal = np.asarray([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+    anomalous = np.asarray([[10.0, 0.0], [0.0, 10.0], [0.0, 10.0]])
+    cols = ["a_cpu", "b_cpu"]
+    fusion = _GabanzhafConfig.from_kwargs(
+        {"use_early_full_fusion": True, "early_window_min_len": 1}
+    )
+    full_only = _GabanzhafConfig.from_kwargs({"use_early_full_fusion": False})
+
+    fused_scores = merit_mod._metric_evidence(
+        normal, anomalous, cols, config=fusion
+    )
+    full_scores = merit_mod._metric_evidence(
+        normal, anomalous, cols, config=full_only
+    )
+
+    assert fused_scores != full_scores
+    dominance_cols = [
+        f"{service}_{metric}"
+        for service in ("a", "b", "c", "d")
+        for metric in ("cpu", "mem", "disk")
+    ]
+    dominance_scores = {
+        "a_cpu": 1.0, "a_mem": 0.0, "a_disk": 0.0,
+        "b_cpu": 0.8, "b_mem": 0.8, "b_disk": 0.8,
+        "c_cpu": 0.0, "c_mem": 0.9, "c_disk": 0.0,
+        "d_cpu": 0.0, "d_mem": 0.0, "d_disk": 0.9,
+    }
+    with_dominance = merit_mod._service_evidence(
+        dominance_cols,
+        dominance_scores,
+        use_metric_type_dominance=True,
+    )
+    without_dominance = merit_mod._service_evidence(
+        dominance_cols,
+        dominance_scores,
+        use_metric_type_dominance=False,
+    )
+    assert with_dominance != without_dominance
+
+
+def test_blend_weights_default_to_the_previously_hardcoded_values():
+    """Parameterising the evidence blends must not change default behaviour.
+
+    Before 2026-08-31 these weights were literals inside _metric_evidence and
+    _service_evidence. This pins the default path to the same arithmetic.
+    """
+    import importlib
+
+    import numpy as np
+
+    merit = importlib.import_module("RCAEval.e2e.merit")
+    cfg = merit._GabanzhafConfig.from_kwargs({})
+
+    assert (cfg.ev_w_mag, cfg.ev_w_persistence, cfg.ev_w_peak) == (0.55, 0.30, 0.15)
+    assert (cfg.early_w_mag, cfg.early_w_peak) == (0.70, 0.30)
+    assert (cfg.fusion_w_early, cfg.fusion_w_full) == (0.60, 0.40)
+    assert (cfg.agg_w_p95, cfg.agg_w_top3, cfg.agg_w_max) == (0.50, 0.30, 0.20)
+    assert (cfg.svc_w_agg, cfg.svc_w_dominance) == (0.70, 0.30)
+
+    # a weight group already summing to 1 must pass through untouched
+    np.testing.assert_allclose(
+        merit._norm_weights((0.55, 0.30, 0.15), (1.0, 0.0, 0.0)), [0.55, 0.30, 0.15]
+    )
+    # an arbitrary group is renormalised, so any non-negative sweep value is legal
+    np.testing.assert_allclose(
+        merit._norm_weights((0.75, 0.30, 0.15), (1.0, 0.0, 0.0)), [0.625, 0.25, 0.125]
+    )
+    # degenerate input falls back instead of dividing by zero
+    np.testing.assert_allclose(
+        merit._norm_weights((0.0, 0.0, 0.0), (0.55, 0.30, 0.15)), [0.55, 0.30, 0.15]
+    )
+    np.testing.assert_allclose(
+        merit._norm_weights((float("nan"), -1.0), (0.7, 0.3)), [0.7, 0.3]
+    )
+
+
+def test_service_evidence_weights_are_configurable():
+    """svc_w_dominance actually moves the aggregate/dominance balance."""
+    import importlib
+
+    merit = importlib.import_module("RCAEval.e2e.merit")
+    # three services: with only two, _norm_dict collapses the result to
+    # {top: 1.0, other: 0.0} and any weighting looks identical.
+    cols = [
+        "svc-a_cpu", "svc-a_mem",
+        "svc-b_cpu", "svc-b_mem",
+        "svc-c_cpu", "svc-c_mem",
+    ]
+    metric_ev = {
+        "svc-a_cpu": 0.9, "svc-a_mem": 0.1,
+        "svc-b_cpu": 0.2, "svc-b_mem": 0.8,
+        "svc-c_cpu": 0.5, "svc-c_mem": 0.45,
+    }
+
+    base = merit._service_evidence(
+        cols, metric_ev, config=merit._GabanzhafConfig.from_kwargs({})
+    )
+    shifted = merit._service_evidence(
+        cols, metric_ev, config=merit._GabanzhafConfig.from_kwargs({"svc_w_dominance": 0.9})
+    )
+    assert base != shifted, "svc_w_dominance had no effect on service evidence"

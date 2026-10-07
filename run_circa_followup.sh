@@ -5,11 +5,13 @@
 set -u
 cd "$(dirname "$0")"
 PY=./py310/bin/python
+OUT=output/baseline-summaries
+mkdir -p "$OUT"
 
 while pgrep -f "bash run_baselines.sh" > /dev/null; do sleep 60; done
 
 for ds in re2-ss re2-tt; do
-  log="baseline_results/circa_${ds}.txt"
+  log="$OUT/circa_${ds}.txt"
   if [ -f "$log" ] && grep -q "wall_sec" "$log"; then
     echo "=== circa $ds already done, skip ==="
     continue

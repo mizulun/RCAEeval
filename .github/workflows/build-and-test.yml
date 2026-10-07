@@ -2,9 +2,9 @@ name: Build and test
 
 on:
   push:
-    branches: [ "main", "dev", "v2"]
+    branches: [ "main", "dev", "v2", "lag-*"]
   pull_request:
-    branches: [ "main", "dev", "v2"]
+    branches: [ "main", "dev", "v2", "lag-*"]
 
 jobs:
   build-and-test-default:
@@ -27,7 +27,7 @@ jobs:
         python -m pip install .[default]
 
     - name: Test
-      run: python -m pytest tests/test.py tests/test_parser*
+      run: python -m pytest tests/test.py tests/test_parser* tests/test_merit.py
       
 
   build-and-test-rcd:

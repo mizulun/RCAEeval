@@ -13,11 +13,11 @@ RCAEval 自動化測試腳本
     python run123.py --output results.csv         # 指定輸出摘要檔案
     python run123.py --workers 3                  # 同時執行 3 個任務（預設 3）
     python run123.py --workers 1                  # 關閉平行，循序執行
-    python run123.py --methods gabanzhaf_closed_form gabanzhaf_bruteforce \
+    python run123.py --methods merit_full merit_pure_banzhaf \
         --datasets re2-ob re2-ss re2-tt --workers 1 \
-        --output benchmark_banzhaf_ablation.csv   # 比較 closed-form 與純枚舉 Banzhaf
-    python run123.py --methods gabanzhaf_approx_banzhaf gabanzhaf_pure_banzhaf \
-        --re2 --workers 1 --output benchmark_banzhaf_ablation.csv
+        --output benchmark_merit_ablation.csv     # 比較 closed-form(=full) 與純枚舉 Banzhaf
+    python run123.py --methods merit_full merit_no_trace merit_no_coverage \
+        --re2 --workers 1 --output benchmark_merit_ablation.csv
 """
 
 import argparse
@@ -47,46 +47,6 @@ DEFAULT_METHODS = [
 ]
 
 METHOD_VARIANTS = {
-    "with_trace_full": {
-        "base_method": "gabanzhaf_with_trace",
-        "env": {},
-        "metadata": {
-            "base_method": "gabanzhaf_with_trace",
-            "ablation_role": "with_trace_full",
-        },
-    },
-    "with_trace_no_scores": {
-        "base_method": "gabanzhaf_with_trace",
-        "env": {"GABANZHAF_TRACE_DISABLE_SCORES": "1"},
-        "metadata": {
-            "base_method": "gabanzhaf_with_trace",
-            "ablation_role": "with_trace_no_scores",
-        },
-    },
-    "with_trace_no_call_graph": {
-        "base_method": "gabanzhaf_with_trace",
-        "env": {"GABANZHAF_TRACE_DISABLE_CALL_GRAPH": "1"},
-        "metadata": {
-            "base_method": "gabanzhaf_with_trace",
-            "ablation_role": "with_trace_no_call_graph",
-        },
-    },
-    "with_trace_no_trace": {
-        "base_method": "gabanzhaf_with_trace",
-        "env": {"GABANZHAF_TRACE_DISABLE_TRACE": "1"},
-        "metadata": {
-            "base_method": "gabanzhaf_with_trace",
-            "ablation_role": "with_trace_no_trace",
-        },
-    },
-    "with_trace_no_residual": {
-        "base_method": "gabanzhaf_with_trace",
-        "env": {"GABANZHAF_TRACE_DISABLE_RESIDUAL": "1"},
-        "metadata": {
-            "base_method": "gabanzhaf_with_trace",
-            "ablation_role": "with_trace_no_residual",
-        },
-    },
     "gabanzhaf_no_victim_demotion": {
         "base_method": "gabanzhaf",
         "env": {"GABANZHAF_DISABLE_VICTIM_DEMOTION": "1"},
@@ -95,12 +55,36 @@ METHOD_VARIANTS = {
             "ablation_role": "no_victim_demotion",
         },
     },
-    "gabanzhaf_no_lag_1": {
+    "gabanzhaf_no_coverage": {
         "base_method": "gabanzhaf",
-        "env": {"GABANZHAF_DISABLE_LAG_TOPOLOGY": "1"},
+        "env": {"GABANZHAF_DISABLE_COVERAGE": "1"},
         "metadata": {
             "base_method": "gabanzhaf",
-            "ablation_role": "no_lag_1",
+            "ablation_role": "no_coverage",
+        },
+    },
+    "gabanzhaf_no_trace": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_TRACE": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "ablation_role": "no_trace",
+        },
+    },
+    "gabanzhaf_no_metric": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_METRICS": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "ablation_role": "no_metric",
+        },
+    },
+    "gabanzhaf_residual": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_TRACE_RESIDUAL": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "ablation_role": "trace_residual",
         },
     },
     "gabanzhaf_evidence_service": {
@@ -121,13 +105,22 @@ METHOD_VARIANTS = {
             "ablation_role": "evidence_metric",
         },
     },
-    "gabanzhaf_approx_banzhaf": {
+    "gabanzhaf_evidence_trace": {
         "base_method": "gabanzhaf",
-        "env": {"GABANZHAF_BANZHAF_MODE": "closed_form"},
+        "env": {"GABANZHAF_RANK_MODE": "trace_evidence"},
         "metadata": {
             "base_method": "gabanzhaf",
-            "banzhaf_mode": "closed_form",
-            "ablation_role": "approx_banzhaf",
+            "rank_mode": "trace_evidence",
+            "ablation_role": "evidence_trace",
+        },
+    },
+    "gabanzhaf_evidence_service_trace": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_RANK_MODE": "service_evidence_trace"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "rank_mode": "service_evidence_trace",
+            "ablation_role": "evidence_service_trace",
         },
     },
     "gabanzhaf_pure_banzhaf": {
@@ -247,8 +240,8 @@ METHOD_VARIANTS = {
             "ablation_role": "exact_candidate_k=16",
         },
     },
-    # Trace-vs-metric rebalance sweep: raise the off-diagonal trace
-    # probability cap (trace_topology_conf, base 0.7) so trace can
+    # Trace-vs-metric rebalance sweep: adjust the off-diagonal trace
+    # probability cap (trace_topology_conf, base 0.85) so trace can
     # reorder the ranking.
     **{
         f"gabanzhaf_tconf_{tag}": {
@@ -260,7 +253,7 @@ METHOD_VARIANTS = {
                 "ablation_role": f"trace_topology_conf={val}",
             },
         }
-        for tag, val in [("085", "0.85"), ("095", "0.95")]
+        for tag, val in [("07", "0.7"), ("085", "0.85"), ("095", "0.95")]
     },
     # Victim demotion sweep: shrink an abnormal service's self-coverage toward
     # victim_floor when its causal upstream is also abnormal (propagation victim).
@@ -276,7 +269,88 @@ METHOD_VARIANTS = {
         }
         for tag, val in [("03", "0.3"), ("05", "0.5"), ("07", "0.7")]
     },
+    # Factorial ablation: multi-flag cells that leave-one-out variants cannot
+    # reach. Factor levels are M(etric)/T(race)/C(overage)/V(ictim)/B(anzhaf);
+    # "-" marks a factor that is a structural no-op in that cell.
+    # Historical aggregate inputs live under evidence/history/legacy-benchmarks/.
+    **{
+        f"gabanzhaf_fx_{tag}": {
+            "base_method": "gabanzhaf",
+            "env": {f"GABANZHAF_DISABLE_{flag}": "1" for flag in flags},
+            "metadata": {
+                "base_method": "gabanzhaf",
+                "ablation_role": "factorial",
+                "factor_levels": levels,
+            },
+        }
+        for tag, flags, levels in [
+            ("noC_noV", ["COVERAGE", "VICTIM_DEMOTION"], "M1/Tfull/C0/V0/B1"),
+            ("noTT_noV", ["TRACE_TOPOLOGY", "VICTIM_DEMOTION"], "M1/Tevid/C1/V0/B1"),
+            ("noTT_noC", ["TRACE_TOPOLOGY", "COVERAGE"], "M1/Tevid/C0/V1/B1"),
+            ("noTT_noC_noV", ["TRACE_TOPOLOGY", "COVERAGE", "VICTIM_DEMOTION"],
+             "M1/Tevid/C0/V0/B1"),
+            ("noM_noTT", ["METRICS", "TRACE_TOPOLOGY"], "M0/Tevid/C-/V-/B1"),
+            ("noM_noV", ["METRICS", "VICTIM_DEMOTION"], "M0/Tfull/C-/V0/B1"),
+        ]
+    },
+    # Evidence-blend weight sweep. These weights sat hard-coded inside the
+    # metric evidence stage until 2026-08-31; the factorial ablation showed that
+    # stage dominates, so they need the same sensitivity treatment as the other
+    # knobs. Each axis is swept low/high around its default (the default point
+    # is merit_full, not repeated here).
+    **{
+        f"gabanzhaf_w_{axis}_{tag}": {
+            "base_method": "gabanzhaf",
+            "env": {f"GABANZHAF_{axis.upper()}": val},
+            "metadata": {
+                "base_method": "gabanzhaf",
+                "ablation_role": f"{axis}={val}",
+            },
+        }
+        for axis, values in [
+            ("ev_w_mag", [("035", "0.35"), ("075", "0.75")]),
+            ("ev_w_persistence", [("015", "0.15"), ("045", "0.45")]),
+            ("early_w_mag", [("05", "0.5"), ("09", "0.9")]),
+            ("fusion_w_early", [("04", "0.4"), ("08", "0.8")]),
+            ("agg_w_p95", [("03", "0.3"), ("07", "0.7")]),
+            ("svc_w_dominance", [("015", "0.15"), ("050", "0.50")]),
+        ]
+        for tag, val in values
+    },
+    # Victim demotion minus its coverage-parent exemption. Isolates how much of
+    # victim demotion's value comes from the demotion itself versus from the
+    # exemption that stops trace edges demoting a coverage-inferred root.
+    "gabanzhaf_no_coverage_parent_protection": {
+        "base_method": "gabanzhaf",
+        "env": {"GABANZHAF_DISABLE_COVERAGE_PARENT_PROTECTION": "1"},
+        "metadata": {
+            "base_method": "gabanzhaf",
+            "ablation_role": "victim_demotion_without_exemption",
+        },
+    },
 }
+
+
+def _register_merit_variants():
+    """Expose merit_* names while keeping gabanzhaf_* aliases reproducible."""
+    for name, variant in list(METHOD_VARIANTS.items()):
+        prefix = "gabanzhaf_"
+        if not name.startswith(prefix):
+            continue
+        merit_name = "merit_" + name[len(prefix):]
+        metadata = dict(variant.get("metadata", {}))
+        metadata["base_method"] = "merit"
+        METHOD_VARIANTS.setdefault(
+            merit_name,
+            {
+                "base_method": "merit",
+                "env": dict(variant.get("env", {})),
+                "metadata": metadata,
+            },
+        )
+
+
+_register_merit_variants()
 
 # 保存每個 (method, dataset) 的詳細結果（用於後續 print）
 _results_store = {}
@@ -298,6 +372,10 @@ def parse_output(stdout):
     m = re.search(r"Avg speed:\s+([\d.]+)", stdout)
     if m:
         results["Avg speed"] = float(m.group(1))
+    # 純演算法均速（每 case 秒數，已扣除 pandas 讀檔時間；由 algo_timer.py 印出）
+    m = re.search(r"Algo speed:\s+([\d.]+)", stdout)
+    if m:
+        results["Algo speed"] = float(m.group(1))
     return results
 
 
@@ -346,7 +424,7 @@ def run_single(
     # 刪除上一次同資料集的結果
     clear_result_dir(method, dataset)
 
-    cmd = [sys.executable, "main.py",
+    cmd = [sys.executable, "algo_timer.py",
            "--method", base_method, "--dataset", dataset,
            "--length", str(length), "--tdelta", str(tdelta),
            "--result-dir", rdir]
@@ -416,7 +494,7 @@ def aggregate_repetitions(records):
         for record in records
         for key, value in record.items()
         if (
-            key == "Avg speed"
+            key in ("Avg speed", "Algo speed")
             or any(key.startswith(f"{metric}-") for metric in METRICS)
         )
         and isinstance(value, (int, float))
@@ -454,6 +532,9 @@ def run_repeated(
 
 
 def save_csv(records, path):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     if not records:
         return
     metadata_keys = [
@@ -464,6 +545,8 @@ def save_csv(records, path):
             "rank_mode",
             "exact_candidate_k",
             "trace_topology",
+            "trace_topology_conf",
+            "victim_floor",
             "ablation_role",
         ]
         if any(key in record for record in records)
@@ -478,7 +561,7 @@ def save_csv(records, path):
     ]
     metric_keys = sorted({
         k for r in records for k in r
-        if any(k.startswith(f"{m}-") for m in METRICS) or k == "Avg speed"
+        if any(k.startswith(f"{m}-") for m in METRICS) or k in ("Avg speed", "Algo speed")
     })
     keys += metric_keys + ["Avg speed min", "Avg speed max", "returncode"]
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -543,7 +626,9 @@ def print_block(method, dataset, rec, label=None):
     print(f"  {sep}")
     status = rec.get("status", "?")
     elapsed = rec.get("wall_time_sec", "-")
-    print(f"  狀態: {status}  耗時: {elapsed}s")
+    algo = rec.get("Algo speed")
+    algo_note = f"  純演算法均速: {algo}s/case" if algo is not None else ""
+    print(f"  狀態: {status}  耗時: {elapsed}s{algo_note}")
 
 
 def print_table(records):
@@ -595,7 +680,7 @@ def main():
     parser.add_argument("--tdelta", type=int, default=0, help="異常偵測延遲秒數")
     parser.add_argument("--test", action="store_true",
                         help="Smoke test：每個資料集只跑前 2 筆")
-    parser.add_argument("--output", default="benchmark_results.csv",
+    parser.add_argument("--output", default="output/benchmarks/benchmark_results.csv",
                         help="輸出 CSV 路徑")
     parser.add_argument("--skip-failed", action="store_true",
                         help="遇到失敗時繼續執行")

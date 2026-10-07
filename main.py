@@ -72,10 +72,11 @@ if is_py310():
         gabanzhaf_with_trace,
         merit,
         predict_banzhaf,
+        rcd,
     )
 
 elif is_py312():
-    from RCAEval.e2e import dummy, e_diagnosis, ht, rcd, mmrcd
+    from RCAEval.e2e import dummy, e_diagnosis, ht, mmrcd
 else:
     print("Please use Python 3.10 or 3.12")
     exit(1)

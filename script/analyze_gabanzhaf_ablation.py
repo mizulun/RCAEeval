@@ -115,14 +115,10 @@ def compare_method_results(runs_root, baseline, variant, dataset, k=1):
                 if union
                 else 1.0
             )
-            if baseline_diag.get("root_candidate_recall") is not None:
-                baseline_recalls.append(
-                    bool(baseline_diag["root_candidate_recall"])
-                )
-            if variant_diag.get("root_candidate_recall") is not None:
-                variant_recalls.append(
-                    bool(variant_diag["root_candidate_recall"])
-                )
+            # Ground truth is derived only here, in the offline evaluator.  The
+            # method diagnostics deliberately contain candidates but no answer.
+            baseline_recalls.append(root in baseline_candidates)
+            variant_recalls.append(root in variant_candidates)
 
     count = len(common)
     divisor = count or 1
@@ -166,36 +162,36 @@ def summarize_diagnostics(runs_root, method, dataset):
             except (OSError, json.JSONDecodeError):
                 continue
             if isinstance(record, dict):
-                records.append(record)
+                records.append((path.name, record))
 
     summary = {"method": method, "dataset": dataset, "cases": len(records)}
     summary["has_trace_fields"] = any(
         any(field in record for field in DIAGNOSTIC_FIELDS)
-        for record in records
+        for _name, record in records
     )
     for field in DIAGNOSTIC_FIELDS:
         values = [
             float(record[field])
-            for record in records
+            for _name, record in records
             if isinstance(record.get(field), (int, float))
         ]
         if values:
             summary[field] = mean(values)
     recalls = [
-        bool(record["root_candidate_recall"])
-        for record in records
-        if record.get("root_candidate_recall") is not None
+        _root_service(name) in set(record.get("game_candidates", []))
+        for name, record in records
+        if isinstance(record.get("game_candidates"), list)
     ]
     if recalls:
         summary["root_candidate_recall_rate"] = sum(recalls) / len(recalls)
     candidate_pool_sizes = [
         len(record["candidate_pool"])
-        for record in records
+        for _name, record in records
         if isinstance(record.get("candidate_pool"), list)
     ]
     game_candidate_sizes = [
         len(record["game_candidates"])
-        for record in records
+        for _name, record in records
         if isinstance(record.get("game_candidates"), list)
     ]
     if candidate_pool_sizes:
@@ -240,11 +236,11 @@ def _benchmark_rows(paths):
 
 
 def _k_variant_number(variant):
-    prefix = "gabanzhaf_k"
-    if not str(variant).startswith(prefix):
-        return None
-    suffix = str(variant)[len(prefix):]
-    return int(suffix) if suffix.isdigit() else None
+    for prefix in ("merit_k", "gabanzhaf_k"):
+        if str(variant).startswith(prefix):
+            suffix = str(variant)[len(prefix):]
+            return int(suffix) if suffix.isdigit() else None
+    return None
 
 
 def _format_k_values(values):
@@ -275,6 +271,23 @@ def _same_benchmark_metrics(baseline_row, variant_row):
         if baseline_row.get(key) is not None and variant_row.get(key) is not None:
             compared.append(abs(baseline_row[key] - variant_row[key]) <= 1e-12)
     return all(compared) if compared else None
+
+
+def _delta_value(row, baseline_row, key):
+    if row is None or baseline_row is None:
+        return None
+    value = row.get(key)
+    baseline = baseline_row.get(key)
+    if not isinstance(value, (int, float)) or not isinstance(baseline, (int, float)):
+        return None
+    return float(value) - float(baseline)
+
+
+def _format_optional(value, digits=3, signed=False):
+    if not isinstance(value, (int, float)):
+        return "-"
+    sign = "+" if signed else ""
+    return f"{value:{sign}.{digits}f}"
 
 
 def render_report(
@@ -327,6 +340,50 @@ def render_report(
                 wall_range=wall_range,
             )
         )
+
+    lines.extend([
+        "",
+        "## Delta vs Baseline",
+        "",
+        "| Method | Dataset | AC@1 macro | ΔAC@1 | Avg@5 macro | ΔAvg@5 | Wall median (s) | ΔWall (s) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ])
+    delta_methods = list(dict.fromkeys(variants))
+    for method in delta_methods:
+        for dataset in datasets:
+            row = benchmark_index.get((method, dataset))
+            if row is None:
+                continue
+            comparison_baseline = (
+                trace_baseline
+                if method.startswith("with_trace_") and method != trace_baseline
+                else baseline
+            )
+            baseline_row = benchmark_index.get((comparison_baseline, dataset))
+            lines.append(
+                "| {method} | {dataset} | {ac1} | {dac1} | {avg5} | {davg5} | {wall} | {dwall} |".format(
+                    method=method,
+                    dataset=dataset,
+                    ac1=_format_optional(row.get("AC@1 macro"), digits=3),
+                    dac1=_format_optional(
+                        _delta_value(row, baseline_row, "AC@1 macro"),
+                        digits=3,
+                        signed=True,
+                    ),
+                    avg5=_format_optional(row.get("Avg@5 macro"), digits=3),
+                    davg5=_format_optional(
+                        _delta_value(row, baseline_row, "Avg@5 macro"),
+                        digits=3,
+                        signed=True,
+                    ),
+                    wall=_format_optional(row.get("wall_time_sec"), digits=2),
+                    dwall=_format_optional(
+                        _delta_value(row, baseline_row, "wall_time_sec"),
+                        digits=2,
+                        signed=True,
+                    ),
+                )
+            )
 
     lines.extend([
         "",
@@ -461,8 +518,12 @@ def render_report(
             "- Candidate K variants were not available in this report run."
         )
 
-    def _paired_totals(variant):
-        results = by_variant.get(variant, [])
+    def _paired_totals(*variants):
+        results = [
+            result
+            for variant in variants
+            for result in by_variant.get(variant, [])
+        ]
         return (
             sum(result["variant_wins"] for result in results),
             sum(result["variant_losses"] for result in results),
@@ -470,7 +531,8 @@ def render_report(
         )
 
     no_lag_wins, no_lag_losses, no_lag_cases = _paired_totals(
-        "gabanzhaf_no_lag_1"
+        "merit_no_lag_1",
+        "gabanzhaf_no_lag_1",
     )
     no_score_wins, no_score_losses, no_score_cases = _paired_totals(
         "with_trace_no_scores"
@@ -566,7 +628,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-root", default="output/runs")
     parser.add_argument("--benchmark", nargs="*", default=None)
-    parser.add_argument("--baseline", default="gabanzhaf")
+    parser.add_argument("--baseline", default="merit")
     parser.add_argument("--trace-baseline", default="with_trace_full")
     parser.add_argument("--variants", nargs="+", required=True)
     parser.add_argument(
@@ -576,7 +638,7 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default="docs/benchmark/gabanzhaf-ablation-and-trace.md",
+        default="output/generated-docs/gabanzhaf-ablation-and-trace.md",
     )
     args = parser.parse_args()
     report = render_report(

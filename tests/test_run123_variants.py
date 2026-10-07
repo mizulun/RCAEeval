@@ -43,21 +43,45 @@ def test_gabanzhaf_pure_banzhaf_variant_runs_base_method_with_env(monkeypatch):
     assert record["Avg speed"] == 0.12
 
 
-def test_gabanzhaf_ablation_aliases_are_available():
-    approx_base, approx_env, approx_meta = run123.resolve_method_variant(
-        "gabanzhaf_approx_banzhaf"
-    )
+def test_removed_ablation_variants_are_not_registered():
+    removed = [
+        "gabanzhaf_approx_banzhaf",
+        "merit_approx_banzhaf",
+        "gabanzhaf_no_lag_1",
+        "merit_no_lag_1",
+        "with_trace_full",
+        "with_trace_no_scores",
+        "with_trace_no_call_graph",
+        "with_trace_no_trace",
+        "with_trace_no_residual",
+    ]
+
+    for method in removed:
+        base, env, meta = run123.resolve_method_variant(method)
+        assert base == method
+        assert env == {}
+        assert meta == {}
+
+
+def test_gabanzhaf_pure_banzhaf_variant_is_available():
     pure_base, pure_env, pure_meta = run123.resolve_method_variant(
         "gabanzhaf_pure_banzhaf"
     )
 
-    assert approx_base == "gabanzhaf"
-    assert approx_env["GABANZHAF_BANZHAF_MODE"] == "closed_form"
-    assert approx_meta["banzhaf_mode"] == "closed_form"
-    assert approx_meta["ablation_role"] == "approx_banzhaf"
-
     assert pure_base == "gabanzhaf"
     assert pure_env["GABANZHAF_BANZHAF_MODE"] == "bruteforce"
+    assert pure_meta["banzhaf_mode"] == "bruteforce"
+    assert pure_meta["ablation_role"] == "pure_banzhaf"
+
+
+def test_merit_pure_banzhaf_variant_uses_renamed_base_method():
+    pure_base, pure_env, pure_meta = run123.resolve_method_variant(
+        "merit_pure_banzhaf"
+    )
+
+    assert pure_base == "merit"
+    assert pure_env["GABANZHAF_BANZHAF_MODE"] == "bruteforce"
+    assert pure_meta["base_method"] == "merit"
     assert pure_meta["banzhaf_mode"] == "bruteforce"
     assert pure_meta["ablation_role"] == "pure_banzhaf"
 
@@ -73,11 +97,32 @@ def test_gabanzhaf_exact_candidate_k_variants_are_available():
         assert meta["ablation_role"] == f"exact_candidate_k={k}"
 
 
+def test_merit_exact_candidate_k_variants_are_available():
+    for k in [1, 2, 3, 4, 5, 6, 8, 10, 12, 16]:
+        base, env, meta = run123.resolve_method_variant(f"merit_k{k}")
+
+        assert base == "merit"
+        assert env == {"GABANZHAF_EXACT_CANDIDATE_K": str(k)}
+        assert meta["base_method"] == "merit"
+        assert meta["exact_candidate_k"] == k
+        assert meta["ablation_role"] == f"exact_candidate_k={k}"
+
+
 def test_gabanzhaf_component_ablation_variants_are_available():
     expected = {
-        "gabanzhaf_no_lag_1": (
-            {"GABANZHAF_DISABLE_LAG_TOPOLOGY": "1"},
-            "no_lag_1",
+        "gabanzhaf_full": ({}, "trace_frontier_full"),
+        "gabanzhaf_no_trace": ({"GABANZHAF_DISABLE_TRACE": "1"}, "no_trace"),
+        "gabanzhaf_no_trace_topology": (
+            {"GABANZHAF_DISABLE_TRACE_TOPOLOGY": "1"},
+            "no_trace_topology",
+        ),
+        "gabanzhaf_no_coverage": (
+            {"GABANZHAF_DISABLE_COVERAGE": "1"},
+            "no_coverage",
+        ),
+        "gabanzhaf_no_victim_demotion": (
+            {"GABANZHAF_DISABLE_VICTIM_DEMOTION": "1"},
+            "no_victim_demotion",
         ),
         "gabanzhaf_evidence_service": (
             {"GABANZHAF_RANK_MODE": "service_evidence"},
@@ -86,6 +131,18 @@ def test_gabanzhaf_component_ablation_variants_are_available():
         "gabanzhaf_evidence_metric": (
             {"GABANZHAF_RANK_MODE": "metric_evidence"},
             "evidence_metric",
+        ),
+        "gabanzhaf_evidence_trace": (
+            {"GABANZHAF_RANK_MODE": "trace_evidence"},
+            "evidence_trace",
+        ),
+        "gabanzhaf_evidence_service_trace": (
+            {"GABANZHAF_RANK_MODE": "service_evidence_trace"},
+            "evidence_service_trace",
+        ),
+        "gabanzhaf_residual": (
+            {"GABANZHAF_TRACE_RESIDUAL": "1"},
+            "trace_residual",
         ),
     }
 
@@ -97,44 +154,85 @@ def test_gabanzhaf_component_ablation_variants_are_available():
         assert meta["ablation_role"] == expected_role
 
 
-def test_with_trace_variants_are_available():
+def test_merit_component_ablation_variants_are_available():
     expected = {
-        "with_trace_full": ({}, "with_trace_full"),
-        "with_trace_no_scores": (
-            {"GABANZHAF_TRACE_DISABLE_SCORES": "1"},
-            "with_trace_no_scores",
+        "merit_full": ({}, "trace_frontier_full"),
+        "merit_no_trace": ({"GABANZHAF_DISABLE_TRACE": "1"}, "no_trace"),
+        "merit_no_metric": (
+            {"GABANZHAF_DISABLE_METRICS": "1"},
+            "no_metric",
         ),
-        "with_trace_no_call_graph": (
-            {"GABANZHAF_TRACE_DISABLE_CALL_GRAPH": "1"},
-            "with_trace_no_call_graph",
+        "merit_no_trace_topology": (
+            {"GABANZHAF_DISABLE_TRACE_TOPOLOGY": "1"},
+            "no_trace_topology",
         ),
-        "with_trace_no_trace": (
-            {"GABANZHAF_TRACE_DISABLE_TRACE": "1"},
-            "with_trace_no_trace",
+        "merit_no_coverage": (
+            {"GABANZHAF_DISABLE_COVERAGE": "1"},
+            "no_coverage",
         ),
-        "with_trace_no_residual": (
-            {"GABANZHAF_TRACE_DISABLE_RESIDUAL": "1"},
-            "with_trace_no_residual",
+        "merit_no_victim_demotion": (
+            {"GABANZHAF_DISABLE_VICTIM_DEMOTION": "1"},
+            "no_victim_demotion",
+        ),
+        "merit_evidence_service": (
+            {"GABANZHAF_RANK_MODE": "service_evidence"},
+            "evidence_service",
+        ),
+        "merit_evidence_metric": (
+            {"GABANZHAF_RANK_MODE": "metric_evidence"},
+            "evidence_metric",
+        ),
+        "merit_evidence_trace": (
+            {"GABANZHAF_RANK_MODE": "trace_evidence"},
+            "evidence_trace",
+        ),
+        "merit_evidence_service_trace": (
+            {"GABANZHAF_RANK_MODE": "service_evidence_trace"},
+            "evidence_service_trace",
+        ),
+        "merit_residual": (
+            {"GABANZHAF_TRACE_RESIDUAL": "1"},
+            "trace_residual",
         ),
     }
 
-    for method, (expected_env, role) in expected.items():
+    for method, (expected_env, expected_role) in expected.items():
         base, env, meta = run123.resolve_method_variant(method)
-        assert base == "gabanzhaf_with_trace"
+        assert base == "merit"
         assert env == expected_env
-        assert meta["base_method"] == "gabanzhaf_with_trace"
-        assert meta["ablation_role"] == role
+        assert meta["base_method"] == "merit"
+        assert meta["ablation_role"] == expected_role
+
+
+def test_merit_sensitivity_sweeps_are_available():
+    for tag, value in [("07", 0.7), ("085", 0.85), ("095", 0.95)]:
+        base, env, meta = run123.resolve_method_variant(f"merit_tconf_{tag}")
+        assert base == "merit"
+        assert env == {"GABANZHAF_TRACE_TOPOLOGY_CONF": str(value)}
+        assert meta["base_method"] == "merit"
+        assert meta["trace_topology_conf"] == value
+        assert meta["ablation_role"] == f"trace_topology_conf={value}"
+
+    for tag, value in [("03", 0.3), ("05", 0.5), ("07", 0.7)]:
+        base, env, meta = run123.resolve_method_variant(f"merit_victim_{tag}")
+        assert base == "merit"
+        assert env == {
+            "GABANZHAF_USE_VICTIM_DEMOTION": "1",
+            "GABANZHAF_VICTIM_FLOOR": str(value),
+        }
+        assert meta["base_method"] == "merit"
+        assert meta["victim_floor"] == value
+        assert meta["ablation_role"] == f"victim_floor={value}"
 
 
 def test_save_csv_preserves_variant_metadata(tmp_path):
     output = tmp_path / "ablation.csv"
     records = [
         {
-            "method": "gabanzhaf_approx_banzhaf",
-            "base_method": "gabanzhaf",
-            "banzhaf_mode": "closed_form",
-            "ablation_role": "approx_banzhaf",
-            "exact_candidate_k": 12,
+            "method": "merit_tconf_07",
+            "base_method": "merit",
+            "trace_topology_conf": 0.7,
+            "ablation_role": "trace_topology_conf=0.7",
             "dataset": "re2-ob",
             "status": "OK",
             "wall_time_sec": 1.2,
@@ -149,11 +247,10 @@ def test_save_csv_preserves_variant_metadata(tmp_path):
     with output.open(newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
 
-    assert row["method"] == "gabanzhaf_approx_banzhaf"
-    assert row["base_method"] == "gabanzhaf"
-    assert row["banzhaf_mode"] == "closed_form"
-    assert row["ablation_role"] == "approx_banzhaf"
-    assert row["exact_candidate_k"] == "12"
+    assert row["method"] == "merit_tconf_07"
+    assert row["base_method"] == "merit"
+    assert row["trace_topology_conf"] == "0.7"
+    assert row["ablation_role"] == "trace_topology_conf=0.7"
 
 
 def test_aggregate_repetitions_uses_runtime_median_and_range():

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Baseline benchmark runner for the paper: baro, circa, microrank, tracerca.
 #
-# Per-method AC@K summaries + wall time go to baseline_results/<method>_<dataset>.txt.
+# Per-method AC@K summaries + wall time go to output/baseline-summaries/<method>_<dataset>.txt.
 # Each run gets its own --result-dir, so nothing touches output/results and
 # runs cannot pollute each other. All runs are serial so wall times are honest.
 #
@@ -10,7 +10,7 @@ set -u
 cd "$(dirname "$0")"
 
 PY=./py310/bin/python
-OUT=baseline_results
+OUT=output/baseline-summaries
 mkdir -p "$OUT"
 
 run_one() { # harness method dataset
