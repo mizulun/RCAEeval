@@ -1,6 +1,6 @@
 # MERIT 歷史負面結果與不可外推邊界
 
-狀態：HISTORICAL EVIDENCE；整理日期：2026-10-05。這是從已封存的混合版本文件提煉出的最小保留紀錄，不是目前待辦、方法規格或採納建議。完整原文及舊表在 `/Users/user/RCAEval-cleanup-archive-20261005/files/docs/`。
+狀態：HISTORICAL EVIDENCE；整理日期：2026-10-07。這是從已封存的混合版本文件提煉出的最小保留紀錄，不是目前待辦、方法規格或採納建議。完整原文及舊表在 `/Users/user/RCAEval-cleanup-archive-20261005/files/docs/`。
 
 ## 必須保留的負面結果
 
@@ -25,6 +25,13 @@
 - 2026-09-08 design audit 顯示取消 coverage threshold 在 OB 與 TT 分別造成約 16.67、23.33 個百分點 AC@1 退步，但 SS 無變化；只支持該批次的門檻機制，不證明參數最優。
 - coverage rescue 在 TT 新增候選，但該批次沒有提高真根因 candidate recall；不得寫成已實證救回根因。
 - Shapley 在 TT 多修正一個案例；現行維持 closed-form Banzhaf 是版本與計算設計選擇，不是「所有資料上準確率最佳」的結論。
+
+## 2026-10-07 correctness 稽核
+
+- 修正前 `first_case_pre_fault` 的 cache key 含目前評估案例 boundary，無法固定第一案例圖；既有 first-case 與三個 case-order sensitivity 結果不得支持原固定圖主張，原始 artifact 與 manifest 保持不改寫，須由修正版另批重跑。
+- graph provenance 過去會以目前案例冒充共享圖來源；現版 first-case 記固定 reference，union 記完整排序後來源集合與 exposure-manifest digest。
+- Python API 的 `use_trace=False` 過去仍可能讀 trace；env-based `GABANZHAF_DISABLE_TRACE=1` 正式結果不受此入口缺陷影響。只有直接使用 kwargs 的批次需另行盤點。
+- 以修正後 evaluator 重新讀取 9/30 `timing-ss-full-20260930` 的 90 份 raw diagnostics（未重跑案例、未改寫 artifact）：canonical stage-total median 為 `0.037757073529064655` 秒、p95 為 `0.04217985058203339` 秒；舊式把 `trace` 與四個 trace substages 同時計入時分別為 `0.037861330434679985` 與 `0.04229198945686221` 秒。個別 stage median、stage share、method wall-clock 與 end-to-end 數值不因這項加總修正作廢。
 
 ## 來源與版本
 

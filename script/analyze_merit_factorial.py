@@ -54,17 +54,17 @@ FACTOR_DOC = """## 因子定義
 
 | 代號 | 因子 | Level | pipeline 位置 | 關掉時 fallback |
 |---|---|---|---|---|
-| **M** | metric evidence | 1 / 0 | `merit.py:1533-1573` | 服務分數改由 trace service evidence 提供 |
-| **T** | trace 資訊 | full / graph / off | `merit.py:1049-1050`、`:1492-1516`、`:1602-1606` | 見下 |
-| **C** | call-graph coverage | 1 / 0 | `merit.py:1601-1611` | 無 quiet-root 救援邊 |
-| **V** | victim demotion | 1 / 0 | `merit.py:1644-1657` | 自我覆蓋維持 1.0，不因上游異常收縮 |
-| **B** | Banzhaf 聚合 | 1 / 0 | `merit.py:1619-1701` | 直接以證據分數排序，不建 game |
+| **M** | metric evidence | 1 / 0 | `merit.py:_merit_core`、`merit_evidence.py` | 服務分數改由 trace service evidence 提供 |
+| **T** | trace 資訊 | full / graph / off | `merit_trace.py`、`merit.py:_prepare_case_inputs` | 見下 |
+| **C** | call-graph coverage | 1 / 0 | `merit_game.py:_coverage_parents` | 無 quiet-root 救援邊 |
+| **V** | victim demotion | 1 / 0 | `merit_game.py:_victim_factors` | 自我覆蓋維持 1.0，不因上游異常收縮 |
+| **B** | Banzhaf 聚合 | 1 / 0 | `merit.py:_merit_core`、`merit_game.py` | 直接以證據分數排序，不建 game |
 
 ### T 的三個 level 實際差在哪（與旗標名稱不一致，容易誤解）
 
 `GABANZHAF_DISABLE_TRACE_TOPOLOGY=1` 的名字看起來只關 topology 邊，實際上
 `_trace_topology_from_case_dir` 會直接回傳**完全空的** feature bundle
-（`merit.py:1049-1050`），trace service evidence 一併消失。三個 level 的真實內容：
+（`merit.py:_prepare_case_inputs`），trace service evidence 一併消失。三個 level 的真實內容：
 
 | Level | trace 證據 | topology 邊 | call graph（供 coverage 用） |
 |---|---|---|---|
@@ -104,11 +104,11 @@ trace_evidence / service_evidence_trace 分支）。表中仍標成 M/T 的 0/1�
 
 | 條件 | 後果 | 依據 |
 |---|---|---|
-| `B=0`（rank_mode != banzhaf） | C / V / T-topology 全部不影響排名 | `merit.py:1662-1673`（整段機制在 `if rank_mode == "banzhaf":` 內） |
-| `T=off` | call graph 清空 → coverage_parents 恆空 → causal_edges 恆空 → C 與 V 皆失效 | `merit.py:1602-1606`、`:1611-1616` |
-| `M=0` | coverage 結構性失效（`if config.use_metrics and use_coverage`）；V 仍可經 trace topology 邊生效 | `merit.py:1601` |
-| `M=0` 且 `T=off` | 證據全零、退化排名，無資訊 → 排除 | `merit.py:1561-1571` |
-| `T=graph` 且 `C=0` | call graph 只透過 coverage 進入方法，C=0 時它無處可用 → 整格等同 `T=off`；且 causal_edges 的兩個來源（coverage 邊、topology 邊）皆空 → V 一併失效 | `merit.py:1601-1616` |
+| `B=0`（rank_mode != banzhaf） | C / V / T-topology 全部不影響排名 | `merit.py:_merit_core` 的 `rank_mode == "banzhaf"` 分支 |
+| `T=off` | call graph 清空 → coverage_parents 恆空 → causal_edges 恆空 → C 與 V 皆失效 | `merit.py:_prepare_case_inputs, _merit_core` |
+| `M=0` | coverage 結構性失效（`if config.use_metrics and use_coverage`）；V 仍可經 trace topology 邊生效 | `merit.py:_merit_core` |
+| `M=0` 且 `T=off` | 證據全零、退化排名，無資訊 → 排除 | `merit_ablation.py:metric_free_evidence` |
+| `T=graph` 且 `C=0` | call graph 只透過 coverage 進入方法，C=0 時它無處可用 → 整格等同 `T=off`；且 causal_edges 的兩個來源（coverage 邊、topology 邊）皆空 → V 一併失效 | `merit.py:_merit_core` |
 
 最後一條是本輪實測發現的（不是事前推導）：`merit_fx_noTT_noC`、
 `merit_fx_noTT_noC_noV`、`merit_no_trace` 三者在 re2-tt 跑出**逐位元相同**的

@@ -1,18 +1,22 @@
 # MERIT 碩論消融與實驗操作語義
 
-狀態：ACTIVE；維護者：當輪執行者；核對日期：2026-10-02。任務狀態只維護於 [碩論工作清單](thesis-workplan.md)，本文件定義比較，不另建待跑清單。
+狀態：ACTIVE；維護者：當輪執行者；核對日期：2026-10-07。任務狀態只維護於 [碩論工作清單](thesis-workplan.md)，本文件定義比較，不另建待跑清單。
 
-## 程式分工（2026-10-05）
+## 程式分工（2026-10-07）
 
-- `RCAEval/e2e/merit.py`：共用證據、候選、coverage／victim、閉式 Banzhaf 與排名；公開 `merit(...)` 為薄入口，舊私有函式保留相容轉接。共用階段仍保留必要的模態／消融接點，不複製另一套主流程。
+- `RCAEval/e2e/merit.py`：只協調共用流程、公開 `merit(...)` 與舊私有名稱的相容轉接。
 - `RCAEval/e2e/merit_config.py`：`_GabanzhafConfig`、原預設值及 kwargs 轉換。
 - `RCAEval/e2e/merit_ablation.py`：環境變數開關、no-metric／no-trace 控制、替代排序／singleton／bruteforce／CUSUM、trace 擾動與 graph-source 選擇；需要核心運算時以 callback 傳入，不反向匯入核心。
+- `RCAEval/e2e/merit_evidence.py`：視窗前處理、metric／service evidence、正規化與 evidence ranking。
+- `RCAEval/e2e/merit_trace.py`：trace I/O、call graph、topology、cache、case input 與 `GraphArtifact` provenance。
+- `RCAEval/e2e/merit_game.py`：候選、coverage、victim、矩陣、閉式 Banzhaf 與 faithfulness。
+- `RCAEval/e2e/merit_diagnostics.py`：診斷 payload、可相加的 stage timing schema 與結果組裝。
 
-環境變數名稱、kwargs、結果欄位與預設值不變。一般 kwargs 優先；`GABANZHAF_DISABLE_TRACE=1` 仍強制清除所有 trace 輸入，`GABANZHAF_WRITE_DIAGNOSTICS=1` 仍強制開啟診斷。研究腳本的 source transformation 保留原有核心接點。
+環境變數名稱、kwargs、結果欄位與預設值不變。一般 kwargs 優先；`GABANZHAF_DISABLE_TRACE=1` 仍強制清除所有 trace 輸入，明確 `use_trace=False` 也在任何 trace I/O 前清除輸入；`GABANZHAF_WRITE_DIAGNOSTICS=1` 仍強制開啟診斷。coverage candidate augmentation 與 trace latency filter 使用可 monkeypatch hook，不再對 `_merit_core` 做文字替換。
 
-這是拆檔重構，不是新方法或重跑結果。新研究批次記錄三檔 `method_source_sha256`，正式 manifest 的 `file_sha256` 同樣涵蓋三檔。單檔歷史 manifest 不得通過新來源集合的重用檢查；重現歷史結果須用該批快照，不能改寫舊 hash 來取得通過。固定重構前行為基準位於 `tests/fixtures/merit_refactor.json`，由 `tests/test_merit_refactor.py` 驗證。
+這是拆檔重構加四項 correctness 修正，不是新方法或重跑結果。新研究批次記錄七檔 `method_source_sha256`，正式 manifest 的 `file_sha256` 同樣涵蓋七檔。舊 manifest 不得通過新來源集合的重用檢查；重現歷史結果須用該批快照，不能改寫舊 hash 來取得通過。固定重構前行為基準位於 `tests/fixtures/merit_refactor.json`；測試保留它作歷史基準，只排除明確修正的 first-case、provenance、stage total 與 Python `use_trace=False` 行為。
 
-驗收：174 項相關測試通過；非計時數值以小數點後 12 位的固定指紋比較，排名／候選／欄位完整核對，計時另驗證欄位與非負有限值。七個主要證據／coverage／victim／閉式歸因／排名函式與重構前文字相同。這些回歸檢查不代表重新驗證全資料集準確率或成本。
+計時輸出只以 `trace`、`preprocess`、`metric_evidence`、`candidates`、`banzhaf`、`ranking` 作可加總頂層；trace 細項只在 `trace_stage_timing`。evaluator 讀舊資料時若已有 `trace` 即忽略細項，否則只合成一次。這些回歸檢查不代表重新驗證全資料集準確率或成本。
 
 ## 共同契約
 

@@ -274,6 +274,13 @@ published numbers into the self-run row.
   coalition attribution/aggregation with singleton weighted coverage.
 - Graph-source conditions: `per_case_full`, `first_case_pre_fault`, and
   `union_pre_fault`, plus three deterministic first-case order permutations.
+- Correctness notice (2026-10-07): the pre-fix `first_case_pre_fault` cache key
+  included the currently evaluated case boundary, so historical first-case and
+  case-order sensitivity outputs do not establish their intended fixed-graph
+  condition. They remain immutable historical artifacts but must be rerun with
+  the runner-provided `graph_reference_case_id` before supporting a thesis
+  claim. `union_pre_fault` now records the complete exposure-manifest digest and
+  sorted source cases. This notice does not alter the frozen experimental grid.
 - Trace dropout: 10/30/50/70/100%; trace-series and graph-edge noise:
   10/30/50%.
 - `bruteforce`: numerical/efficiency validation only, not an accuracy ablation;

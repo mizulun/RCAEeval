@@ -74,7 +74,7 @@ def run_variant(data, inject, dataset, base, variant, special=None):
     elif variant=='rescue_only':
         target='_apply_coverage_edges';replacement=lambda matrix,*args: matrix
     elif variant=='edges_only':
-        fn=transformed(m._merit_core,[('for parent in coverage_parents:\n','for parent in []:\n')])
+        target='_augment_coverage_candidates';replacement=lambda candidates,*args:list(candidates)
     elif variant=='ungated_coverage':
         target='_coverage_parents'
         def replacement(graph, weights, latency, config):

@@ -26,6 +26,11 @@ cannot replace headline predictions.
 | RQ3 computation | Closed form must match enumeration within absolute error `1e-9` for every frozen `K`; measured speedup applies only to the attribution kernel. End-to-end cost must separately disclose input, trace/graph, metric, candidate, Banzhaf, and ranking time. | Enumeration gate for `K={3,6,9,12,15}`, five cold and five warm repetitions, median/IQR/p95, RSS, stage shares. |
 | RQ4 robustness | On naturally trace-missing RE2-SS, full and no-trace complete ranks should be identical; any mismatch blocks graceful-degradation wording. Graph-source/order, dropout/noise, candidate cap, coefficient, window, and delay effects are reported whether positive, neutral, or negative. | Exact rank comparison, graph edge Jaccard/rank change, explanation stability, cluster-aware comparisons, complete descriptive curves and realized boundaries. |
 
+Correctness status (2026-10-07): this frozen RQ remains unchanged, but the
+historical first-case and case-order outputs did not hold a fixed first-case
+graph because their cache key included each evaluated case boundary. They may
+not answer RQ4 until rerun with an explicit runner-selected reference case.
+
 ## Variables and controls
 
 - Independent variables: method; controlled MERIT variant; graph source/order;

@@ -952,15 +952,16 @@ def test_merit_no_trace_skips_all_trace_file_reads(tmp_path, monkeypatch):
     def fail_if_trace_read(*_args, **_kwargs):
         raise AssertionError("no-trace variant must not inspect trace files")
 
-    monkeypatch.setenv("GABANZHAF_DISABLE_TRACE", "1")
     monkeypatch.setattr(merit_mod, "_build_call_graph_from_traces", fail_if_trace_read)
     monkeypatch.setattr(merit_mod, "_trace_topology_from_case_dir", fail_if_trace_read)
+    monkeypatch.setenv("GABANZHAF_GRAPH_SOURCE", "must-not-be-parsed")
 
     result = merit_mod.merit(
         data,
         inject_time=6,
         dataset="unit",
         args=args,
+        use_trace=False,
         return_diagnostics=True,
     )
 
@@ -975,8 +976,12 @@ def test_merit_no_trace_skips_all_trace_file_reads(tmp_path, monkeypatch):
     assert result["ranks"]
 
 
-def test_merit_no_trace_scrubs_caller_supplied_trace_evidence(monkeypatch):
-    monkeypatch.setenv("GABANZHAF_DISABLE_TRACE", "1")
+@pytest.mark.parametrize("explicit_kwarg", [False, True])
+def test_merit_no_trace_scrubs_caller_supplied_trace_evidence(
+    monkeypatch, explicit_kwarg
+):
+    if not explicit_kwarg:
+        monkeypatch.setenv("GABANZHAF_DISABLE_TRACE", "1")
 
     result = merit_mod.merit(
         _simple_core_frame(),
@@ -988,6 +993,7 @@ def test_merit_no_trace_scrubs_caller_supplied_trace_evidence(monkeypatch):
         trace_latency_evidence={"svc-b": 1.0},
         trace_error_evidence={"svc-b": 1.0},
         trace_stage_timing={"trace_latency": 1.0},
+        **({"use_trace": False} if explicit_kwarg else {}),
         return_diagnostics=True,
         return_stage_timing=True,
     )
@@ -1000,6 +1006,7 @@ def test_merit_no_trace_scrubs_caller_supplied_trace_evidence(monkeypatch):
     assert diagnostics["trace_error_evidence"] == {}
     assert diagnostics["trace_stage_timing"] == {}
     assert diagnostics["call_graph_edges"] == []
+    assert diagnostics["graph_provenance"]["source"] == "disabled_no_trace"
     assert diagnostics["causal_edges"] == []
     assert diagnostics["game_candidates"]
     assert diagnostics["coverage_strength_matrix"]

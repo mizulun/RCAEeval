@@ -15,6 +15,7 @@ from RCAEval.benchmark.paper_evaluation import (
     exact_mcnemar,
     holm_adjust,
     paired_bootstrap,
+    _canonical_stage_total,
 )
 
 
@@ -178,6 +179,18 @@ def test_merit_stage_timings_are_summarized_by_stage(tmp_path):
 
     assert summary["stage_timing_seconds"]["call_graph"]["median"] == 1.0
     assert summary["stage_timing_seconds"]["banzhaf"]["p95"] == pytest.approx(0.29)
+
+
+def test_stage_total_counts_trace_substages_once_for_new_and_legacy_payloads():
+    trace_details = {
+        "call_graph": 1.0, "trace_latency": 4.0,
+        "trace_error": 3.0, "trace_edges": 5.0,
+    }
+    assert _canonical_stage_total({**trace_details, "preprocess": 1.0,
+                                   "ranking": 1.0}) == pytest.approx(15.0)
+    assert _canonical_stage_total({"trace": 13.0, **trace_details,
+                                   "preprocess": 1.0,
+                                   "ranking": 1.0}) == pytest.approx(15.0)
 
 
 def _outcome(case_id, hit):

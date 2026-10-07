@@ -1,8 +1,9 @@
 # MERIT method definitions and closed-form derivation
 
 This document is the source of truth for the paper's problem definition,
-notation, and complexity claims. It describes the frozen implementation in
-`RCAEval/e2e/merit.py`; it does not introduce a second algorithm.
+notation, and complexity claims. It describes the implementation jointly
+defined by the seven `RCAEval/e2e/merit*.py` modules listed in
+[`merit-ablation.md`](merit-ablation.md); it does not introduce a second algorithm.
 
 ## Problem and assumptions
 

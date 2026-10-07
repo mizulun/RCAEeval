@@ -15,6 +15,7 @@ import pandas as pd
 from script.merit_design_audit import m, transformed, run_variant
 from script.run_paper_dataset import discover_data_paths, prepare_case
 from RCAEval.benchmark.input_boundaries import full_record_boundary
+from RCAEval.e2e import merit_trace as mt
 
 C = 1.3489795003921634  # 2 * Phi^{-1}(.75), no fitted parameter
 NEW = ['mean_iqr', 'median_std', 'normal_iqr', 'normal_iqr_matched_threshold',
@@ -110,7 +111,7 @@ def trace_alternatives(path, graph, inject, boundary):
         centered = {s: v - v[pre].mean() for s, v in series.items()}
         for variant, values in [('trace_raw_cosine', series), ('trace_centered_cosine', centered)]:
             # Min-max would undo centering. Keep signed values in the centered arm.
-            with patch.object(m, '_norm_trace_arr', lambda x: np.asarray(x, float)):
+            with patch.object(mt, '_norm_trace_arr', lambda x: np.asarray(x, float)):
                 groups[variant].append(m._trace_multilag_edges(graph, values, cfg, kind))
         for caller, callees in graph.items():
             for callee in callees:

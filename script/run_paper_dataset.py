@@ -89,6 +89,15 @@ def case_artifact_name(data_path: Path) -> str:
     return f"{data_path.parent.parent.name}_{data_path.parent.name}.json"
 
 
+def order_case_paths(
+    paths: list[Path], case_order_seed: int | None, limit: int | None
+) -> list[Path]:
+    ordered = list(paths)
+    if case_order_seed is not None:
+        random.Random(case_order_seed).shuffle(ordered)
+    return ordered if limit is None else ordered[:limit]
+
+
 def prepare_case(
     data_path: Path,
     length: int | None = None,
@@ -230,6 +239,7 @@ def _execute_case(method, args, data_path: Path) -> dict:
             case_exposure=exposure,
             dataset_exposure_manifest=args.exposure_manifest,
             graph_source=args.graph_source,
+            graph_reference_case_id=getattr(args, "graph_reference_case_id", None),
         )
         method_kwargs = {
             "dataset": args.dataset,
@@ -387,13 +397,16 @@ def run_dataset(args) -> dict:
     diagnostics_dir = result_dir / "diagnostics"
     metadata_dir.mkdir()
 
-    paths = discover_data_paths(repo_root, args.dataset)
-    if args.case_order_seed is not None:
-        random.Random(args.case_order_seed).shuffle(paths)
-    if args.limit is not None:
-        paths = paths[: args.limit]
+    paths = order_case_paths(
+        discover_data_paths(repo_root, args.dataset),
+        args.case_order_seed,
+        args.limit,
+    )
     if not paths:
         raise FileNotFoundError(f"no cases found for {args.dataset}")
+    # Resolve after ordering and limiting so every worker generation uses the
+    # same experimental first case, including after a timeout/restart.
+    args.graph_reference_case_id = case_artifact_name(paths[0]).removesuffix(".json")
 
     context = multiprocessing.get_context("spawn")
     worker, input_queue, output_queue = _start_worker(context, args)
@@ -477,6 +490,7 @@ def run_dataset(args) -> dict:
                 "input_boundary": result.get("input_boundary"),
                 "case_exposure": result.get("case_exposure"),
                 "graph_source": args.graph_source,
+                "graph_reference_case_id": args.graph_reference_case_id,
                 "case_order_seed": args.case_order_seed,
                 "case_order_index": case_index,
             }
@@ -495,6 +509,7 @@ def run_dataset(args) -> dict:
         "seed": args.seed,
         "fixed_sli": args.sli,
         "case_order_seed": args.case_order_seed,
+        "graph_reference_case_id": args.graph_reference_case_id,
         "case_order": [case_artifact_name(path) for path in paths],
     }
     _atomic_json(result_dir.parent / "combination.json", summary)

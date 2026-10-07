@@ -8,6 +8,10 @@ MERIT_SOURCE_FILES = (
     "RCAEval/e2e/merit.py",
     "RCAEval/e2e/merit_config.py",
     "RCAEval/e2e/merit_ablation.py",
+    "RCAEval/e2e/merit_evidence.py",
+    "RCAEval/e2e/merit_trace.py",
+    "RCAEval/e2e/merit_game.py",
+    "RCAEval/e2e/merit_diagnostics.py",
 )
 
 

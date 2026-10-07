@@ -40,7 +40,7 @@ def transformed(fn, replacements):
 
 
 # ---------------------------------------------------------------------------
-# E1: IQR=0 denominator (merit.py:313). Baseline ("full") already uses the
+# E1: IQR=0 denominator (merit_evidence._metric_evidence). Baseline ("full") uses the
 # production rule (denominator 1). Two alternatives.
 # ---------------------------------------------------------------------------
 _E1_SIGMA_NORMAL = transformed(m._metric_evidence, [
@@ -54,7 +54,7 @@ _E1_EXCLUDE_COL = transformed(m._metric_evidence, [
 ])
 
 # ---------------------------------------------------------------------------
-# E2: near-constant truncation cap (merit.py:322). Baseline cap=10.
+# E2: near-constant truncation cap (merit_evidence._metric_evidence). Baseline cap=10.
 # ---------------------------------------------------------------------------
 _E2_CAPS = {}
 for _cap in (5, 20, 50):
@@ -66,7 +66,7 @@ _E2_UNCAPPED = transformed(m._metric_evidence, [
 ])
 
 # ---------------------------------------------------------------------------
-# B: persistence threshold rz>3.0 (merit.py:331). Baseline threshold=3.
+# B: persistence threshold in merit_evidence._metric_evidence. Baseline threshold=3.
 # ---------------------------------------------------------------------------
 _B_PERSIST = {}
 for _thr in (2, 4, 5):
@@ -76,12 +76,11 @@ for _thr in (2, 4, 5):
 
 # ---------------------------------------------------------------------------
 # E5 decoupled: only the trace-edge latency filter set to 0 (coverage gate
-# stays at default). This is inline code inside _merit_core (merit.py:1655),
-# not a separate function, so it needs a whole-function source transform.
+# stays at default). The production hook makes this intervention explicit and
+# avoids copying/recompiling the whole orchestration function.
 # ---------------------------------------------------------------------------
-_E5_TRACEFILTER_ONLY_0 = transformed(m._merit_core, [
-    (">= config.coverage_lat_floor", ">= 0.0"),
-])
+def _E5_TRACEFILTER_ONLY_0(edges, latency_family, minimum):
+    return m._filter_trace_topology_edges(edges, latency_family, 0.0)
 
 
 def run_core(data, inject, dataset, capture, overrides=None, edges_override=None,
@@ -186,7 +185,7 @@ def build_records(data, inject, dataset, capture, has_traces, case_dir, boundary
     add("E5", "covgate_only_0", lambda: run_core(data, inject, dataset, capture,
         patch_target="_coverage_parents", patch_fn=_cov_patch))
     add("E5", "tracefilter_only_0", lambda: run_core(data, inject, dataset, capture,
-        core_fn=_E5_TRACEFILTER_ONLY_0))
+        patch_target="_filter_trace_topology_edges", patch_fn=_E5_TRACEFILTER_ONLY_0))
 
     # ---- E6: victim thresholds ----
     for up in (0.35, 0.45, 0.55):

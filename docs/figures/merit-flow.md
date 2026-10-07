@@ -20,15 +20,15 @@ flowchart LR
 
 ## 對應程式碼
 
-2026-10-05 拆檔後，下表仍指向共用核心；`_banzhaf_power` 為相容轉接，替代歸因在 `merit_ablation.py`，閉式 `_probabilistic_banzhaf` 仍在核心。設定在 `merit_config.py`，環境開關與消融實作不再寫於核心入口。
+2026-10-07 模組化後，`merit.py` 只協調流程與保留相容名稱；實作位置如下。`_banzhaf_power` 在入口保留相容轉接，替代歸因位於 `merit_ablation.py`。
 
-| 步驟 | 主要函式 (`RCAEval/e2e/merit.py`) |
+| 步驟 | 權威模組與主要函式 |
 |---|---|
-| ① 輸入 + Trace 特徵 | `_build_call_graph_from_traces` → `_trace_topology_from_case_dir`（內含 `_trace_multilag_edges`） |
-| ② 異常證據 | `_split_raw_windows` → `_preprocess_windows` → `_metric_evidence` → `_service_evidence` |
-| ③ 候選與 directed edges | `_coverage_parents` + trace edges → `_causal_edges` → `_select_exact_candidates` |
-| ④ coverage game | `_causal_explanation_matrix` → `_apply_coverage_edges` / `_apply_trace_topology_edges` → `_victim_factors` → `_banzhaf_power` |
-| ⑤ 根因排名 | `_rank_metrics` |
+| ① 輸入 + Trace 特徵 | `merit_trace.py`：`prepare_case_inputs`、`_resolve_graph_artifact`、`_build_call_graph_from_traces`、`_trace_topology_from_case_dir` |
+| ② 異常證據 | `merit_evidence.py`：`_split_raw_windows` → `_preprocess_windows` → `_metric_evidence` → `_service_evidence` |
+| ③ 候選與 directed edges | `merit_game.py`：`_coverage_parents`、`_augment_coverage_candidates`、`_causal_edges`、`_select_exact_candidates` |
+| ④ coverage game | `merit_game.py`：`_causal_explanation_matrix`、coverage／trace edge、victim、閉式 Banzhaf |
+| ⑤ 根因排名與輸出 | `merit_evidence.py` 排名；`merit_diagnostics.py` 組裝 diagnostics 與 canonical timing |
 
 ## Controlled variants
 
@@ -46,6 +46,9 @@ flowchart LR
   換成 singleton weighted coverage。
 - primary graph 只使用每個 case 自己的 pre-fault spans；first-case、union、
   per-case-full 與 case-order 皆為 sensitivity condition。
+- `first_case_pre_fault` 由 runner 在 shuffle／limit 後固定 `graph_reference_case_id`；
+  cache 保存圖與來源。空圖亦固定，worker 重啟仍由同一 reference 重建。缺 reference
+  直接報錯。union provenance 不冒充單一來源，而記完整排序後來源集合與 manifest digest。
 - 啟用 `return_diagnostics` 時，才計算及輸出 nonzero player→target edge 的
   local contribution 與 edge-removal utility drop；預設排名路徑不輸出這些矩陣。
   這些診斷不代表 calibrated probability 或 structural causal explanation。

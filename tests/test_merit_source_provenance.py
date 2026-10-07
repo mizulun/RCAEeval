@@ -27,7 +27,7 @@ def test_old_single_file_manifest_is_not_current_evidence():
         require_merit_sources({"source_sha256": hashes[MERIT_SOURCE_FILES[0]]})
 
 
-def test_snapshot_contains_all_three_identical_sources(tmp_path):
+def test_snapshot_contains_all_seven_identical_sources(tmp_path):
     snapshot_merit_sources(tmp_path)
     root = Path(__file__).resolve().parents[1]
     for name in MERIT_SOURCE_FILES:

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "output" / "sensitivity-results"
 OUT = ROOT / "output" / "generated-docs" / "sensitivity-sweep-table.md"
 
-# Defaults as of RCAEval/e2e/merit.py:_GabanzhafConfig (lines 33-80).
+# Defaults are defined by RCAEval/e2e/merit_config.py:_GabanzhafConfig.
 DEFAULTS = {
     "top_k_svcs": "15",
     "exact_candidate_k": "12",
@@ -78,7 +78,7 @@ def main() -> None:
         "由 `run_sensitivity_sweep.sh` 產生，`script/tabulate_sensitivity.py` 製表。",
         "",
         "**這是事後敏感度分析，不是超參數選擇程序。**預設值在掃描前即已固定"
-        "（`RCAEval/e2e/merit.py:33-80`），表中標記 **粗體** 只是讓讀者看出預設值"
+        "（`RCAEval/e2e/merit_config.py:_GabanzhafConfig`），表中標記 **粗體** 只是讓讀者看出預設值"
         "落在區間何處，不表示它是依據本表選出的。",
         "",
         "AC@1 與 Avg@5 為 fault type 的 macro 平均。",

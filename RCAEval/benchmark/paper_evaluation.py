@@ -435,6 +435,32 @@ def _distribution(values: Sequence[float]) -> dict | None:
     }
 
 
+_CORE_TIMING_STAGES = {
+    "preprocess", "metric_evidence", "candidates", "banzhaf", "ranking"
+}
+_TRACE_TIMING_STAGES = {
+    "call_graph", "trace_latency", "trace_error", "trace_edges",
+    "trace_call_graph", "trace_trace_latency", "trace_trace_error",
+    "trace_trace_edges",
+}
+
+
+def _canonical_stage_total(stage_timing: dict[str, float]) -> float:
+    """Sum old and new timing payloads without counting trace twice."""
+    if "trace" in stage_timing:
+        return float(stage_timing["trace"]) + sum(
+            float(stage_timing.get(stage, 0.0)) for stage in _CORE_TIMING_STAGES
+        )
+    recognized = _CORE_TIMING_STAGES | _TRACE_TIMING_STAGES
+    total = sum(float(stage_timing.get(stage, 0.0)) for stage in recognized)
+    # Preserve uncommon legacy stages that were never trace aggregates.
+    total += sum(
+        float(value) for stage, value in stage_timing.items()
+        if stage not in recognized
+    )
+    return total
+
+
 def summarize_outcomes(
     method: str, dataset: str, outcomes: Sequence[CaseOutcome]
 ) -> dict:
@@ -456,7 +482,7 @@ def summarize_outcomes(
         if outcome.rescued_candidate_recall is not None
     ]
     timing_totals = [
-        sum(outcome.stage_timing.values())
+        _canonical_stage_total(outcome.stage_timing)
         for outcome in outcomes
         if outcome.stage_timing
     ]

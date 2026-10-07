@@ -10,6 +10,7 @@ from script.run_paper_dataset import (
     _stop_worker,
     _wait_for_worker_case,
     case_artifact_name,
+    order_case_paths,
     prepare_case,
     prepare_trace_case,
 )
@@ -54,6 +55,18 @@ def test_prepare_case_uses_window_and_renames_latency_without_selecting_sli(tmp_
 def test_case_artifact_name_is_evaluation_only_label(tmp_path):
     path = tmp_path / "service_delay" / "3" / "simple_metrics.csv"
     assert case_artifact_name(path) == "service_delay_3.json"
+
+
+@pytest.mark.parametrize("seed", [20260713, 20260714, 20260715])
+def test_case_order_reference_is_selected_after_shuffle_and_limit(tmp_path, seed):
+    paths = [tmp_path / "fault" / str(i) / "data.csv" for i in range(5)]
+    ordered = order_case_paths(paths, case_order_seed=seed, limit=3)
+
+    assert len(ordered) == 3
+    assert ordered == order_case_paths(paths, case_order_seed=seed, limit=3)
+    assert case_artifact_name(ordered[0]).removesuffix(".json") == (
+        f"fault_{ordered[0].parent.name}"
+    )
 
 
 def test_prepare_trace_case_uses_same_total_window_and_microseconds(tmp_path):

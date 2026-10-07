@@ -16,6 +16,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from script.merit_source_provenance import MERIT_SOURCE_FILES
+except ModuleNotFoundError:  # direct ``python script/create_artifact_manifest.py``
+    from merit_source_provenance import MERIT_SOURCE_FILES
+
 
 DATASET_PATHS = {
     "re2-ob": Path("data/RE2/RE2-OB"),
@@ -163,9 +168,7 @@ def create_manifest(
 
     tracked_files = [
         protocol_path,
-        Path("RCAEval/e2e/merit.py"),
-        Path("RCAEval/e2e/merit_config.py"),
-        Path("RCAEval/e2e/merit_ablation.py"),
+        *(Path(name) for name in MERIT_SOURCE_FILES),
         Path("RCAEval/e2e/__init__.py"),
         Path("RCAEval/benchmark/paper_evaluation.py"),
         Path("script/run_paper_dataset.py"),

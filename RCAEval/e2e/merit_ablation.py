@@ -6,7 +6,6 @@ legacy precedence (including the force-disable-trace and diagnostics exceptions)
 
 import hashlib
 import os
-import sys
 
 import numpy as np
 
@@ -454,25 +453,44 @@ def resolve_runtime_kwargs(kwargs, environ=None):
     if environ.get("GABANZHAF_WRITE_DIAGNOSTICS") == "1":
         runtime_kwargs["return_diagnostics"] = True
         runtime_kwargs["return_stage_timing"] = True
-    disable_trace = environ.get("GABANZHAF_DISABLE_TRACE") == "1"
+    disable_trace = (
+        environ.get("GABANZHAF_DISABLE_TRACE") == "1"
+        or runtime_kwargs.get("use_trace") is False
+    )
     if disable_trace:
-        # This is a modality ablation, not an alternate ranking path.  Scrub
-        # both file-derived and caller-supplied trace information before the
-        # shared core pipeline so later stages cannot consume trace evidence.
-        runtime_kwargs["use_trace"] = False
-        runtime_kwargs["use_trace_topology"] = False
-        runtime_kwargs["call_graph"] = {}
-        runtime_kwargs["trace_topology_edges"] = []
-        runtime_kwargs["trace_service_evidence"] = {}
-        runtime_kwargs["trace_latency_evidence"] = {}
-        runtime_kwargs["trace_error_evidence"] = {}
-        runtime_kwargs["trace_stage_timing"] = {}
-        runtime_kwargs["graph_provenance"] = {}
+        runtime_kwargs = disable_trace_inputs(runtime_kwargs)
     return runtime_kwargs, _profile, disable_trace
 
 
-def graph_context(args_ns, case_dir, dataset_root, input_boundary, boundary_schema_version):
-    graph_source = os.environ.get(
+def disable_trace_inputs(kwargs):
+    """Return a copy with every trace-derived input and provenance scrubbed."""
+    runtime_kwargs = dict(kwargs)
+    runtime_kwargs.update({
+        "use_trace": False,
+        "use_trace_topology": False,
+        "call_graph": {},
+        "trace_topology_edges": [],
+        "trace_service_evidence": {},
+        "trace_latency_evidence": {},
+        "trace_error_evidence": {},
+        "trace_stage_timing": {},
+        "graph_provenance": {
+            "source": "disabled_no_trace",
+            "source_case": None,
+            "source_cases": [],
+            "source_case_count": 0,
+            "edge_count": 0,
+            "empty_graph_cached": False,
+        },
+    })
+    return runtime_kwargs
+
+
+def resolve_graph_source(args_ns, environ=None):
+    """Resolve the experiment-only graph source without touching trace files."""
+    if environ is None:
+        environ = os.environ
+    graph_source = environ.get(
         "GABANZHAF_GRAPH_SOURCE",
         getattr(args_ns, "graph_source", "per_case_pre_fault"),
     )
@@ -483,46 +501,4 @@ def graph_context(args_ns, case_dir, dataset_root, input_boundary, boundary_sche
         "union_pre_fault",
     }:
         raise ValueError(f"unsupported graph source: {graph_source}")
-    pre_fault_graph = graph_source.endswith("pre_fault")
-    graph_cache_scope = (
-        dataset_root
-        if graph_source in {"first_case_pre_fault", "union_pre_fault"}
-        else os.path.realpath(case_dir)
-    )
-    boundary_version = (
-        input_boundary.get("version", boundary_schema_version)
-        if isinstance(input_boundary, dict)
-        else boundary_schema_version
-    )
-    graph_cache_key = (
-        graph_source,
-        graph_cache_scope,
-        boundary_version,
-    )
-    return graph_source, pre_fault_graph, graph_cache_scope, boundary_version, graph_cache_key
-
-
-def finish_result(result, dataset, profile):
-    """Attach diagnostic timings and optional legacy stderr profiling."""
-    if "diagnostics" in result:
-        trace_stage_timing = result["diagnostics"].get("trace_stage_timing", {})
-        merged_stage_timing = {}
-        for name, seconds in trace_stage_timing.items():
-            merged_stage_timing[f"trace_{name}"] = float(seconds)
-        if trace_stage_timing:
-            merged_stage_timing["trace"] = float(
-                sum(trace_stage_timing.values())
-            )
-        merged_stage_timing.update(result.get("stage_timing", {}))
-        result["diagnostics"]["stage_timing"] = dict(
-            merged_stage_timing
-        )
-
-    if profile and "stage_timing" in result:
-        st = result["stage_timing"]
-        total = sum(st.values())
-        label = str(dataset) or "?"
-        parts = [f"{k}={v:.3f}s" for k, v in st.items()] + [f"total={total:.3f}s"]
-        print(f"[PROFILE] {label}  " + "  ".join(parts), file=sys.stderr)
-
-    return result
+    return graph_source
