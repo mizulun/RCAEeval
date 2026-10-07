@@ -20,6 +20,8 @@ flowchart LR
 
 ## 對應程式碼
 
+2026-10-05 拆檔後，下表仍指向共用核心；`_banzhaf_power` 為相容轉接，替代歸因在 `merit_ablation.py`，閉式 `_probabilistic_banzhaf` 仍在核心。設定在 `merit_config.py`，環境開關與消融實作不再寫於核心入口。
+
 | 步驟 | 主要函式 (`RCAEval/e2e/merit.py`) |
 |---|---|
 | ① 輸入 + Trace 特徵 | `_build_call_graph_from_traces` → `_trace_topology_from_case_dir`（內含 `_trace_multilag_edges`） |
@@ -44,5 +46,6 @@ flowchart LR
   換成 singleton weighted coverage。
 - primary graph 只使用每個 case 自己的 pre-fault spans；first-case、union、
   per-case-full 與 case-order 皆為 sensitivity condition。
-- 每個 nonzero player→target edge 均輸出 local contribution 與 edge-removal
-  utility drop；不宣稱 calibrated probability 或 structural causal explanation。
+- 啟用 `return_diagnostics` 時，才計算及輸出 nonzero player→target edge 的
+  local contribution 與 edge-removal utility drop；預設排名路徑不輸出這些矩陣。
+  這些診斷不代表 calibrated probability 或 structural causal explanation。
