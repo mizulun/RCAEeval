@@ -128,6 +128,8 @@ ENV/
 env.bak/
 venv.bak/
 py310/
+/py310
+/py38
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -167,6 +169,7 @@ cython_debug/
 # ignore csv, and images file
 *.csv
 *.png
+!/paper/merit_v3_no_injection_time.png
 *.jpg
 *.jpeg
 *.gif
@@ -179,8 +182,8 @@ env10
 debug
 notebook.ipynb
 data/_syn_rcd
-data/
-output/
+/data/
+/output/
 /output-parameter-tuning
 /output-various-length
 /output-rca-synthetic
@@ -220,9 +223,88 @@ data/online-boutique
 data/sock-shop-1
 data/sock-shop-2
 data/train-ticket
-output
 ablation_results/
+artifacts/
 *.zip
 .DS_Store
 logparser/config.json
 logbatcher/config.json
+
+# Reference PDFs and downloaded material are local-only.  Paper sources live
+# under paper/ and are intentionally trackable.
+/paper-ref/
+
+#result
+/benchmark_result/
+/result/
+/baseline_results/
+/benchmark/
+
+#md檔
+/.md/
+
+#skill
+/skill/
+
+#agent
+*.agents
+*.claude
+/agent/
+
+# Generated shell wrappers belong under artifacts/output.  Maintained project
+# scripts and documentation are intentionally trackable.
+
+#data
+/data
+
+#output
+/output/
+
+#log
+/log/
+
+#error
+/error
+
+#new_method
+/new_method/
+
+
+# Unit tests are source.  Only the large duplicated datasets are local-only;
+# carts.toml is the small fixture used by the test suite.
+/tests/data/*
+!/tests/data/carts.toml
+
+#sensitive_results
+/sensitivity_results/
+
+#tmp
+/tmp/
+
+# Research source and curated evidence are trackable.  Raw/intermediate runs
+# remain under the ignored locations above.
+!evidence/**/*.csv
+
+# Paper build products and local backups.
+/paper/**/*.aux
+/paper/**/*.bbl
+/paper/**/*.blg
+/paper/**/*.fdb_latexmk
+/paper/**/*.fls
+/paper/**/*.lof
+/paper/**/*.log
+/paper/**/*.lot
+/paper/**/*.out
+/paper/**/*.toc
+/paper/**/*.xdv
+/paper/**/*.pdf
+/paper/**/*.docx
+/paper/**/*.xlsx
+/paper/**/*.bak-*
+
+# Local agent/session state and download residues.
+screenlog.*
+skills-lock.json
+*.bak-*
+/RE3-OB.zip
+/paper_draft_twsc.pdf
