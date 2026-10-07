@@ -1,5 +1,9 @@
+import importlib
 import os
+import sys
+import types
 import warnings
+from functools import wraps
 warnings.filterwarnings("ignore")
 
 import numpy as np
@@ -20,51 +24,97 @@ from RCAEval.utility import is_py310, is_py312
 
 def rca(func):
     """RCA Wrapper to tolerate the case when the RCA algorithm fails."""
+    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as e:
+            if os.getenv("RCAEVAL_STRICT_FAILURES") == "1":
+                raise
             from RCAEval.io.time_series import preprocess
             data = preprocess(data=args[0], dataset=kwargs.get("dataset"), dk_select_useful=False)
             dummy = data.columns.to_list()
             return {"adj": [], "node_names": dummy, "ranks": dummy}
     return wrapper
 
+_LAZY_EXPORTS = {}
 if is_py310() or is_py312():
-    try:
-        from .causalai import causalai
-    except Exception as e:
-        pass
-    from .baro import baro, mmbaro, mmnsigma
-    from .causalrca import causalrca
-    from .circa import circa
-    from .cloudranger import cloudranger
-    from .fci_pagerank import fci_pagerank
-    from .ges_pagerank import ges_pagerank
-    from .granger_pagerank import granger_pagerank
-    from .lingam_pagerank import lingam_pagerank, micro_diag
-    from .microcause import microcause
-    from .microrank import microrank
-    from .easyrca import easyrca
-    from .pc_pagerank import cmlp_pagerank, ntlr_pagerank, pc_pagerank
-    from .pc_randomwalk import (
-        fci_randomwalk,
-        granger_randomwalk,
-        lingam_randomwalk,
-        ntlr_randomwalk,
-        pc_randomwalk,
-    )
-    from .run import run
-    from .mscred import mscred
-    from .tracerca import tracerca
-    from .banzhaf import local_banzhaf as banzhaf
-    from .merit import merit
-    gabanzhaf = merit  # backward-compat alias (old scripts / result comparisons)
-    from .banzhaf_with_trace import gabanzhaf as gabanzhaf_with_trace
-    from .predict_banzhaf import predict_banzhaf
+    _LAZY_EXPORTS.update({
+        "causalai": ("causalai", "causalai"),
+        "baro": ("baro", "baro"),
+        "mmbaro": ("baro", "mmbaro"),
+        "mmnsigma": ("baro", "mmnsigma"),
+        "causalrca": ("causalrca", "causalrca"),
+        "circa": ("circa", "circa"),
+        "cloudranger": ("cloudranger", "cloudranger"),
+        "fci_pagerank": ("fci_pagerank", "fci_pagerank"),
+        "ges_pagerank": ("ges_pagerank", "ges_pagerank"),
+        "granger_pagerank": ("granger_pagerank", "granger_pagerank"),
+        "lingam_pagerank": ("lingam_pagerank", "lingam_pagerank"),
+        "micro_diag": ("lingam_pagerank", "micro_diag"),
+        "microcause": ("microcause", "microcause"),
+        "microrank": ("microrank", "microrank"),
+        "easyrca": ("easyrca", "easyrca"),
+        "cmlp_pagerank": ("pc_pagerank", "cmlp_pagerank"),
+        "ntlr_pagerank": ("pc_pagerank", "ntlr_pagerank"),
+        "pc_pagerank": ("pc_pagerank", "pc_pagerank"),
+        "fci_randomwalk": ("pc_randomwalk", "fci_randomwalk"),
+        "granger_randomwalk": ("pc_randomwalk", "granger_randomwalk"),
+        "lingam_randomwalk": ("pc_randomwalk", "lingam_randomwalk"),
+        "ntlr_randomwalk": ("pc_randomwalk", "ntlr_randomwalk"),
+        "pc_randomwalk": ("pc_randomwalk", "pc_randomwalk"),
+        "run": ("run", "run"),
+        "mscred": ("mscred", "mscred"),
+        "tracerca": ("tracerca", "tracerca"),
+        "banzhaf": ("banzhaf", "local_banzhaf"),
+        "merit": ("merit", "merit"),
+        "gabanzhaf": ("merit", "merit"),
+        "gabanzhaf_with_trace": ("banzhaf_with_trace", "gabanzhaf"),
+        "predict_banzhaf": ("predict_banzhaf", "predict_banzhaf"),
+        "rcd": ("rcd", "rcd"),
+        "mmrcd": ("mmrcd", "mmrcd"),
+    })
 else:
-    from .rcd import rcd
-    from .mmrcd import mmrcd
+    _LAZY_EXPORTS.update({
+        "rcd": ("rcd", "rcd"),
+        "mmrcd": ("mmrcd", "mmrcd"),
+    })
+
+
+def __getattr__(name):
+    """Load RCA implementations only when their public export is requested."""
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute = target
+    module = importlib.import_module(f"{__name__}.{module_name}")
+    value = getattr(module, attribute)
+    globals()[name] = value
+    return value
+
+
+class _LazyExportModule(types.ModuleType):
+    """Keep function exports stable after direct submodule imports.
+
+    Python normally assigns ``package.rcd = <module>`` when code imports
+    ``RCAEval.e2e.rcd`` directly. Convert that module back to the declared
+    public attribute on access without eagerly importing anything.
+    """
+
+    def __getattribute__(self, name):
+        value = super().__getattribute__(name)
+        exports = super().__getattribute__("_LAZY_EXPORTS")
+        if name in exports and isinstance(value, types.ModuleType):
+            _, attribute = exports[name]
+            value = getattr(value, attribute)
+            setattr(self, name, value)
+        return value
+
+
+sys.modules[__name__].__class__ = _LazyExportModule
+
+
+__all__ = ["rca", *_LAZY_EXPORTS]
 
 
 def dummy(data, inject_time=None, dataset=None, *args, **kwargs):
@@ -254,5 +304,3 @@ def ht(data, inject_time=None, dataset=None, num_loop=None, sli=None, anomalies=
         "node_names": normal_df.columns.to_list(),
         "ranks": ranks,
     }
-
-

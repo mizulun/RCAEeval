@@ -6,9 +6,9 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from causallearn.utils.cit import chisq
-from causallearn.utils.PCUtils import SkeletonDiscovery
 from sklearn.preprocessing import KBinsDiscretizer
 
+from RCAEval.e2e import _rcd_causal_learn as SkeletonDiscovery
 from RCAEval.io.time_series import drop_extra
 
 warnings.filterwarnings("ignore")
