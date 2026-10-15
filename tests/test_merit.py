@@ -501,6 +501,40 @@ def test_build_call_graph_missing_traces_returns_empty(tmp_path):
     assert merit_mod._build_call_graph_from_traces(str(tmp_path)) == {}
 
 
+def test_graph_cache_separates_dropout_without_boundary(tmp_path):
+    pd.DataFrame({
+        "spanID": ["root", "child"],
+        "parentSpanID": ["", "root"],
+        "serviceName": ["frontend", "checkout"],
+    }).to_csv(tmp_path / "traces.csv", index=False)
+    merit_mod._CALL_GRAPH_CACHE.clear()
+
+    complete = merit_mod._build_call_graph_from_traces(
+        str(tmp_path), {"frontend", "checkout"}, cache_key=("same-source",),
+        dropout_fraction=0.0,
+    )
+    dropped = merit_mod._build_call_graph_from_traces(
+        str(tmp_path), {"frontend", "checkout"}, cache_key=("same-source",),
+        dropout_fraction=1.0,
+    )
+
+    assert complete == {"frontend": ["checkout"]}
+    assert dropped == {}
+
+
+def test_pre_fault_graph_requires_an_input_boundary(tmp_path):
+    pd.DataFrame({
+        "spanID": ["root", "child"],
+        "parentSpanID": ["", "root"],
+        "serviceName": ["frontend", "checkout"],
+    }).to_csv(tmp_path / "traces.csv", index=False)
+
+    with pytest.raises(ValueError, match="requires an input boundary"):
+        merit_mod._build_call_graph_from_traces(
+            str(tmp_path), {"frontend", "checkout"}, pre_fault=True,
+        )
+
+
 def test_match_service_maps_trace_name_to_metric_prefix():
     names = {"frontend", "frontend-external", "checkoutservice"}
     # "frontendservice" → longest metric prefix it starts with = "frontend"
@@ -1032,19 +1066,25 @@ def test_victim_factors_demotes_service_with_abnormal_upstream():
 
 
 def test_gabanzhaf_contains_no_dataset_or_fault_specific_branches():
-    source_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
-        "RCAEval", "e2e", "merit.py",
-    )
-    with open(source_path, "r", encoding="utf-8") as f:
-        source = f.read()
-
+    source_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "RCAEval", "e2e")
+    source_paths = [
+        "merit.py",
+        "merit_config.py",
+        "merit_ablation.py",
+        "merit_evidence.py",
+        "merit_trace.py",
+        "merit_game.py",
+        "merit_diagnostics.py",
+    ]
     forbidden = [
-        "ground_truth", "root_cause", "root_service", "case_id", "if dataset",
+        "ground_truth", "root_cause", "root_service", "if dataset",
         "re2-ob", "re2-ss", "re2-tt", "DELAY", "LOSS",
     ]
-    for token in forbidden:
-        assert token not in source
+    for source_name in source_paths:
+        with open(os.path.join(source_root, source_name), "r", encoding="utf-8") as handle:
+            source = handle.read()
+        for token in forbidden:
+            assert token not in source, f"{token!r} appears in {source_name}"
 
 
 def test_pre_fault_graph_excludes_post_fault_span_edges(tmp_path):

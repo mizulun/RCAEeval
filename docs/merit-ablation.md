@@ -1,6 +1,6 @@
-# MERIT 碩論消融與實驗操作語義
+# MERIT Ablation and Experiment Semantics
 
-狀態：ACTIVE；維護者：當輪執行者；核對日期：2026-10-07。任務狀態只維護於 [碩論工作清單](thesis-workplan.md)，本文件定義比較，不另建待跑清單。
+狀態：ACTIVE；核對日期：2026-10-07。本文件定義 MERIT 比較與實驗語義；執行狀態以各批 manifest 與相關 issue 為準。
 
 ## 程式分工（2026-10-07）
 

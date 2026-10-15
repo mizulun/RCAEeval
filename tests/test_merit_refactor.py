@@ -69,6 +69,13 @@ def inputs():
     return data, kwargs
 
 
+def test_graph_source_default_matches_boundary_availability():
+    assert merit_ablation.resolve_graph_source(SimpleNamespace()) == "per_case_full"
+    assert merit_ablation.resolve_graph_source(
+        SimpleNamespace(input_boundary={"version": "test"})
+    ) == "per_case_pre_fault"
+
+
 def stable(value):
     if isinstance(value, dict):
         return {k: stable(v) for k, v in value.items() if "timing" not in k}

@@ -1,4 +1,4 @@
-"""Create an isolated, clean Git snapshot for formal paper experiments.
+"""Create an isolated, clean Git snapshot for formal MERIT experiments.
 
 The source repository may contain unrelated user work.  This builder never
 touches its ``.git`` directory: it copies the research tree to a new directory,
@@ -24,7 +24,6 @@ COPY_DIRECTORIES = (
     "LICENSES",
     "docs",
     "experiment",
-    "paper",
     "script",
     "tests",
 )
@@ -38,7 +37,18 @@ IGNORED_NAMES = {
     # The repository's tests/data directory is a second 39 GB dataset copy.
     # Formal experiments use the separately linked, ignored root data/ tree.
     "data",
+    "paper",
 }
+PRIVATE_DOC_NAMES = {
+    "private-submission-metadata.md",
+    "submission-checklist.md",
+    "paper-content-map.md",
+    "paper-writing-workflow.md",
+    "thesis-design-rationale-ledger.md",
+    "thesis-workplan.md",
+    "merit-thesis-english-blueprint-20260930.md",
+}
+PRIVATE_ROOT_NAMES = {"TASK.md"}
 IGNORED_SUFFIXES = {
     ".pyc",
     ".pyo",
@@ -54,10 +64,13 @@ IGNORED_SUFFIXES = {
 
 
 def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
+    in_docs = Path(_directory).name == "docs"
     return {
         name
         for name in names
-        if name in IGNORED_NAMES or Path(name).suffix in IGNORED_SUFFIXES
+        if name in IGNORED_NAMES
+        or (in_docs and name in PRIVATE_DOC_NAMES)
+        or Path(name).suffix in IGNORED_SUFFIXES
     }
 
 
@@ -102,6 +115,8 @@ def create_snapshot(source_root: Path, output_dir: Path) -> dict:
     for source in source_root.iterdir():
         if not source.is_file():
             continue
+        if source.name in PRIVATE_ROOT_NAMES:
+            continue
         if source.name in ROOT_NAMES or source.suffix in ROOT_SUFFIXES:
             shutil.copy2(source, output_dir / source.name)
 
@@ -132,7 +147,7 @@ def create_snapshot(source_root: Path, output_dir: Path) -> dict:
         json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
     )
 
-    _run(output_dir, "git", "init", "-b", "paper-frozen")
+    _run(output_dir, "git", "init", "-b", "merit-frozen")
     _run(output_dir, "git", "config", "user.name", "Anonymous Research Snapshot")
     _run(output_dir, "git", "config", "user.email", "anonymous@invalid")
     _run(output_dir, "git", "add", "--all")
@@ -141,7 +156,7 @@ def create_snapshot(source_root: Path, output_dir: Path) -> dict:
         "git",
         "commit",
         "-m",
-        f"Freeze paper protocol {protocol['protocol_version']}",
+        f"Freeze MERIT protocol {protocol['protocol_version']}",
     )
     status = _run(output_dir, "git", "status", "--porcelain")
     if status:

@@ -34,16 +34,6 @@ def test_snapshot_contains_all_seven_identical_sources(tmp_path):
         assert (tmp_path / Path(name).name).read_bytes() == (root / name).read_bytes()
 
 
-def test_artifact_does_not_filter_split_modules():
-    from script.build_anonymous_artifact import _ignore_tree, PAPER_SCRIPTS, PAPER_TESTS
-    root = Path(__file__).resolve().parents[1]
-    _ignore_tree.repo_root = root
-    names = [Path(name).name for name in MERIT_SOURCE_FILES]
-    assert not set(names) & _ignore_tree(str(root / "RCAEval/e2e"), names)
-    assert "merit_source_provenance.py" in PAPER_SCRIPTS
-    assert "test_merit_source_provenance.py" in PAPER_TESTS
-
-
 def test_formal_manifest_tracks_all_split_modules(tmp_path, monkeypatch):
     import json
     from script import create_artifact_manifest as creator

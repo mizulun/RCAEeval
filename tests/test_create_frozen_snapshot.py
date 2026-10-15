@@ -15,13 +15,23 @@ def test_snapshot_copy_excludes_generated_and_cache_files():
             "module.py",
             "module.pyc",
             "paper.pdf",
+            "paper",
             "__pycache__",
             "data",
             "README.md",
         ],
     )
 
-    assert ignored == {"module.pyc", "paper.pdf", "__pycache__", "data"}
+    assert ignored == {"module.pyc", "paper.pdf", "paper", "__pycache__", "data"}
+
+
+def test_snapshot_copy_excludes_private_thesis_documents():
+    ignored = _copy_ignore(
+        "/tmp/source/docs",
+        ["method-theory.md", "thesis-workplan.md", "submission-checklist.md"],
+    )
+
+    assert ignored == {"thesis-workplan.md", "submission-checklist.md"}
 
 
 def test_snapshot_cli_requires_an_independent_output_directory():

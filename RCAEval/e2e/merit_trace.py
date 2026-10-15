@@ -121,17 +121,21 @@ def _build_call_graph_from_traces(
         if isinstance(boundary, dict)
         else boundary
     )
+    if pre_fault and boundary_obj is None:
+        raise ValueError("pre-fault graph filtering requires an input boundary")
     boundary_signature = (
         (
             boundary_obj.version,
             float(boundary_obj.start),
             float(boundary_obj.end),
             float(boundary_obj.inject_time),
-            bool(pre_fault),
-            float(np.clip(dropout_fraction, 0.0, 1.0)),
         )
         if boundary_obj is not None
-        else None
+        else (None, None, None, None)
+    )
+    boundary_signature += (
+        bool(pre_fault),
+        float(np.clip(dropout_fraction, 0.0, 1.0)),
     )
     key = (
         cache_key if cache_key is not None else os.path.realpath(case_dir),

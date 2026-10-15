@@ -1,6 +1,6 @@
 # MERIT frozen research protocol
 
-> 角色更新（2026-10-02）：FROZEN：本文件與 experiment/protocol.json 的科學契約保持一致。會議時程／頁數是原凍結背景，不是目前英文碩論的格式與優先序；當前進度由 docs/thesis-workplan.md 維護。
+> FROZEN: this document and `experiment/protocol.json` jointly define the evaluation contract. Track each run's status in its manifest and linked issue; this protocol is not a progress checklist.
 
 Protocol version: `2026-07-28.14`
 Protocol content frozen before the v14 retrospective rerun: **yes**; a clean Git
@@ -29,47 +29,6 @@ MERIT, quick baselines, controlled variants, and sweeps run before the
 timeout-prone RCD, PC+PageRank, and CausalRCA cells. This ordering cannot change
 any method input, seed, denominator, or score; it only ensures that a slow cell
 does not delay preservation of already independent cells.
-
-## Venue decision
-
-### Primary: SANER 2027 Research Track
-
-- Mandatory abstract: 2026-09-21 AoE; paper: 2026-09-25 AoE.
-- English, PDF, `\documentclass[10pt,conference]{IEEEtran}` without `compsoc`
-  or `compsocconf`.
-- At most 10 pages for all main text, figures, tables, and appendices, plus at
-  most 2 pages containing references only.
-- Full double-anonymous review. Omit authors, affiliations, acknowledgments,
-  identity-revealing repository links, absolute paths, and organization names.
-- Supplementary material may be attached through EasyChair as `.zip`/`.tgz`;
-  it must also be anonymized. An anonymized external link is acceptable.
-- Artifact sharing is encouraged but not mandatory. The paper must contain a
-  `Data Availability` section after the conclusion, either linking an anonymous
-  artifact or explaining why it is unavailable.
-- Generative-AI use follows the IEEE and ACM authorship policies. AI-generated
-  paper content must be disclosed in acknowledgments in the camera-ready
-  version; editing and grammar assistance is outside the mandatory-disclosure
-  intent, though disclosure is recommended. The anonymous submission keeps the
-  disclosure in supplementary metadata so it does not reveal author identity.
-- Official sources: [research-track CFP](https://conf.researchr.org/track/saner-2027/saner-2027-papers),
-  [AI-generated text guidance](https://conf.researchr.org/attending/saner-2027/Guidelines+for+Artificial+Intelligence+%28AI%29-Generated+Text).
-
-### Backup: ICSA 2027 Research Papers
-
-- Mandatory abstract: 2026-10-30 AoE; paper: 2026-11-04 AoE.
-- English, IEEE conference format, at most 10 pages of main text plus 2 pages
-  containing references only.
-- Double-anonymous review.
-- An anonymized artifact draft is expected with the paper. If none can be
-  supplied, the paper must explain why. Accepted papers are expected to enter
-  artifact evaluation; the listed artifact deadline is 2026-12-20.
-- The venue explicitly includes microservices, observability, distributed
-  tracing, architecture reliability, and lightweight evaluation methods.
-- Official sources: [research-paper CFP](https://conf.researchr.org/track/icsa-2027/icsa-2027-papers),
-  [artifact evaluation](https://conf.researchr.org/track/icsa-2027/icsa-artifacts-evaluation-2027).
-
-The backup is a schedule contingency if the SANER submission gate is not met
-before SANER's deadline. It is not authorization for simultaneous submission.
 
 ## Research questions and headline metric
 
@@ -212,7 +171,7 @@ environment cannot be rebuilt by the end of Week 1, use a correctly attributed
 published number marked `not self-run`; never mix it into paired tests.
 
 Implementation provenance, upstream revisions, and redistribution constraints
-are recorded in `experiment/protocol.json` and `docs/related-work-sources.md`.
+are recorded in `experiment/protocol.json` and the linked method documentation.
 In particular, the RCD Python 3.10 change is an API-compatibility port of its
 causal-learn calls, not an algorithm change.
 
@@ -278,8 +237,7 @@ published numbers into the self-run row.
   included the currently evaluated case boundary, so historical first-case and
   case-order sensitivity outputs do not establish their intended fixed-graph
   condition. They remain immutable historical artifacts but must be rerun with
-  the runner-provided `graph_reference_case_id` before supporting a thesis
-  claim. `union_pre_fault` now records the complete exposure-manifest digest and
+  the runner-provided `graph_reference_case_id` before supporting a research claim. `union_pre_fault` now records the complete exposure-manifest digest and
   sorted source cases. This notice does not alter the frozen experimental grid.
 - Trace dropout: 10/30/50/70/100%; trace-series and graph-edge noise:
   10/30/50%.
@@ -366,22 +324,13 @@ floor, smallest edge confidence, then smallest candidate K.
   and observed base/rescued/final `K` and target `N`. Projection values remain
   labeled projections.
 
-## Submission and artifact gates
+## Reproducibility and provenance gates
 
 Before a v14 retrospective run, the generated manifest must record git SHA and dirty
 state, checksums, Python/dependency locks, baseline revisions, hardware, thread
 variables, seeds, timeouts, exact command, and a fresh output directory.
 
-Before submission:
-
-- every number in `paper/main.tex` resolves to a raw case artifact and generator;
-- `headline-macros.tex`, `results-summary.tex`, `extended-results.tex`,
-  `paired-statistics-details.tex`, and `fault-breakdown.tex` must byte-match a
-  fresh render from the validated
-  reproduction; the final audit rejects missing or hand-edited generated files;
-- the anonymous artifact has no author names, account/repository names, absolute
-  paths, acknowledgments, or VCS author metadata;
-- a clean environment reproduces all tables;
-- references resolve and LaTeX has no undefined references;
-- the PDF is English, IEEE double-column, no more than 10 main-text pages plus
-  2 reference-only pages, and contains a `Data Availability` section.
+Every reported result must resolve to per-case outputs, the source revision,
+protocol version, environment, and generator used to produce it. Keep generated
+summaries under ignored `output/`; manuscript preparation is handled separately
+by the maintainer and is outside the public contribution workflow.

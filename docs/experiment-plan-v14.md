@@ -1,6 +1,6 @@
 # MERIT protocol-v14 experiment plan
 
-> 角色更新（2026-10-02）：FROZEN：保留 v14 原始設計與完整 gate，非即時待辦。現版 MERIT 的 9/30 重跑已存在；其 dirty 條件與未完成验收見 [現行工作清單](thesis-workplan.md)。不得以舊進度推定整批未跑或全部通過。
+> FROZEN：保留 v14 實驗設計與驗收條件，不是即時進度表。每次執行須以該批 manifest、逐案例產物與相關 issue 記錄為準；不得以文件日期推定已完成或通過。
 
 Status: implementation-frozen candidate; formal evidence remains pending until
 the clean detached reproduction and all reporting gates complete.
@@ -82,17 +82,15 @@ pooled) are descriptive.
    never deletes an interrupted attempt.
 4. Run experiments, evaluation, BARO cross-check, global descriptive selection,
    Banzhaf equivalence, and gated table generation.
-5. Copy the five generated files into `paper/generated`, compile the final
-   submission, and run anonymity, provenance, reference, overfull-box, and page
-   gates. The final PDF may not exceed ten main-text pages plus two
-   reference-only pages.
+5. Save generated experiment summaries and tables under the ignored
+   `output/generated-docs/` directory. Manuscript preparation and venue checks
+   are outside the scope of public code contributions.
 
 ## Exit criteria
 
 The campaign is complete only if every non-N/A method--dataset cell has all 90
 cases, the full-record boundary and graph provenance are present per case,
 environment/checksum/clean-manifest gates pass, all three Holm families are
-complete, exact-rank and equivalence diagnostics pass their defined gates, all
-five generated files byte-match a fresh render, and the final submission audit
-has no findings. A negative method result is not a failure condition; missing
+complete, and exact-rank and equivalence diagnostics pass their defined gates.
+A negative method result is not a failure condition; missing
 or unauditable evidence is.

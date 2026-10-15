@@ -487,13 +487,23 @@ def disable_trace_inputs(kwargs):
 
 
 def resolve_graph_source(args_ns, environ=None):
-    """Resolve the experiment-only graph source without touching trace files."""
+    """Resolve graph source without touching trace files.
+
+    Protocol runs pass an input boundary and default to its pre-fault graph.
+    Direct callers without a boundary use the full-record graph and receive
+    matching provenance instead of being labeled pre-fault without a cutoff.
+    """
     if environ is None:
         environ = os.environ
-    graph_source = environ.get(
-        "GABANZHAF_GRAPH_SOURCE",
-        getattr(args_ns, "graph_source", "per_case_pre_fault"),
-    )
+    graph_source = environ.get("GABANZHAF_GRAPH_SOURCE")
+    if graph_source is None:
+        graph_source = getattr(args_ns, "graph_source", None)
+    if graph_source is None:
+        graph_source = (
+            "per_case_pre_fault"
+            if getattr(args_ns, "input_boundary", None) is not None
+            else "per_case_full"
+        )
     if graph_source not in {
         "per_case_pre_fault",
         "per_case_full",

@@ -178,8 +178,6 @@ def create_manifest(
         Path("script/reproduce_paper.py"),
         Path("script/select_global_sweep.py"),
         Path("script/generate_paper_tables.py"),
-        Path("script/build_anonymous_artifact.py"),
-        Path("script/audit_submission.py"),
         Path("script/crosscheck_baro_reference.py"),
         Path("script/verify_environment_lock.py"),
         Path("script/create_frozen_snapshot.py"),

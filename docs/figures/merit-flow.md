@@ -1,7 +1,6 @@
 # MERIT 流程圖
 
-論文用的整體流程概覽。正式英文稿採用 repository-native TikZ 版本
-`paper/merit_pipeline.tex`；下列 Mermaid 保持相同語義，供文件快速檢視。
+MERIT 方法流程概覽。下列 Mermaid 圖與公開方法文件保持相同語義，供快速檢視。
 
 ```mermaid
 flowchart LR

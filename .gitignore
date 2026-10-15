@@ -169,7 +169,6 @@ cython_debug/
 # ignore csv, and images file
 *.csv
 *.png
-!/paper/merit_v3_no_injection_time.png
 *.jpg
 *.jpeg
 *.gif
@@ -230,8 +229,7 @@ artifacts/
 logparser/config.json
 logbatcher/config.json
 
-# Reference PDFs and downloaded material are local-only.  Paper sources live
-# under paper/ and are intentionally trackable.
+# Reference PDFs and downloaded material are local-only.
 /paper-ref/
 
 #result
@@ -308,3 +306,15 @@ skills-lock.json
 *.bak-*
 /RE3-OB.zip
 /paper_draft_twsc.pdf
+
+# Private manuscript files and personal task notes; keep them out of this public repository.
+/paper/
+/TASK.md
+/docs/*thesis*
+/docs/paper-content-map.md
+/docs/paper-writing-workflow.md
+/docs/tanet2026-format.md
+/docs/related-work-sources.md
+/docs/private-submission-metadata.md
+/docs/submission-checklist.md
+/evidence/merit-thesis-readiness-*/

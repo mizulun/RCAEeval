@@ -16,6 +16,8 @@ RCAEval is an open-source benchmark that offers nine datasets with 735 real fail
 
 **_NOTE:_** The [main branch](https://github.com/phamquiluan/RCAEval/tree/main) is now under extensive development. Please refer to [CHANGE LOGS](https://github.com/phamquiluan/RCAEval/blob/main/README.md#change-logs) to find the code for our previous publications.
 
+> **Repository contributions:** Open all issues and pull requests in [`mizulun/RCAEval`](https://github.com/mizulun/RCAEval) only. Pull requests must target the `merit` branch; do not send them to the original author's `phamquiluan/RCAEval` repository or to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the locked development environment, tests, and result-reporting rules.
+
 <p align="center">
 <img width=1000 src= "./docs/readme.jpg"/>
 </p>
@@ -32,11 +34,16 @@ RCAEval is an open-source benchmark that offers nine datasets with 735 real fail
     + [RCAEval Benchmark Paper](#rcaeval-benchmark-paper)
     + [For ASE Paper](#for-ase-paper)
   * [Creating New RCA Datasets or Methods](#creating-new-rca-datasets-or-methods)
+  * [Contributing to this repository](#contributing-to-this-repository)
   * [Licensing](#licensing)
   * [Acknowledgments](#acknowledgments)
   * [Change Logs](#change-logs)
   * [Citation](#citation)
   * [Contact](#contact)
+
+## Contributing to this repository
+
+All issues and pull requests must go to [`mizulun/RCAEval`](https://github.com/mizulun/RCAEval), targeting the `merit` branch. Never submit a pull request to `phamquiluan/RCAEval` or `main`. Follow the [contributor guide](CONTRIBUTING.md) for environment setup, tests, review, and result reporting.
 
 ## Prerequisites
 
