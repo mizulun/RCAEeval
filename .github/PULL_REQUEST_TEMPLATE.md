@@ -1,6 +1,6 @@
 ## Target
 
-- [ ] This pull request targets `mizulun/RCAEval` with base branch `merit`.
+- [ ] This pull request targets `mizulun/RCAEeval` with base branch `merit`.
 - [ ] It is not addressed to `phamquiluan/RCAEval` or `main`.
 - [ ] I checked the base repository manually; GitHub did not leave the original parent preselected.
 - Related issue: #

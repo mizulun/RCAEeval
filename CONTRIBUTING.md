@@ -4,32 +4,32 @@ Thank you for helping improve MERIT. This guide covers contributions to the meth
 
 ## Where to file issues and pull requests
 
-**All issues and pull requests for this repository belong in [`mizulun/RCAEval`](https://github.com/mizulun/RCAEval), and every pull request must target its `merit` branch. Never open a pull request against the original author's `phamquiluan/RCAEval` repository. Do not target `main`.**
+**All issues and pull requests for this repository belong in [`mizulun/RCAEeval`](https://github.com/mizulun/RCAEeval), and every pull request must target its `merit` branch. Never open a pull request against the original author's `phamquiluan/RCAEval` repository. Do not target `main`.**
 
-For a method proposal, protocol change, new metric, or experiment that could consume substantial compute, open an issue in `mizulun/RCAEval` first and agree on the scope before implementation. For a reproducible bug, include the failing command, environment, and smallest available input or fixture. Do not upload private data, credentials, or large datasets to an issue.
+For a method proposal, protocol change, new metric, or experiment that could consume substantial compute, open an issue in `mizulun/RCAEeval` first and agree on the scope before implementation. For a reproducible bug, include the failing command, environment, and smallest available input or fixture. Do not upload private data, credentials, or large datasets to an issue.
 
 ## Branch and pull-request workflow
 
-Fork `mizulun/RCAEval` on GitHub, then clone your fork. Add the project repository as `upstream`, fetch its `merit` branch, and create a topic branch from that branch:
+Fork `mizulun/RCAEeval` on GitHub, then clone your fork. Add the project repository as `upstream`, fetch its `merit` branch, and create a topic branch from that branch:
 
 ```bash
-git clone https://github.com/<your-github-name>/RCAEval.git
-cd RCAEval
-git remote add upstream https://github.com/mizulun/RCAEval.git
+git clone https://github.com/<your-github-name>/RCAEeval.git
+cd RCAEeval
+git remote add upstream https://github.com/mizulun/RCAEeval.git
 git fetch upstream
 git switch -c feat/<issue-number>-short-description upstream/merit
 ```
 
-Keep `origin` pointed at your fork and `upstream` pointed at `mizulun/RCAEval`. Make focused commits, run relevant tests, and push your topic branch to your fork:
+Keep `origin` pointed at your fork and `upstream` pointed at `mizulun/RCAEeval`. Make focused commits, run relevant tests, and push your topic branch to your fork:
 
 ```bash
 git push -u origin feat/<issue-number>-short-description
 ```
 
-Open the pull request from your fork to **`mizulun/RCAEval`**, with base branch **`merit`**. GitHub may preselect the original parent repository for a fork; explicitly select `mizulun/RCAEval` as the base repository, then verify both the repository and `merit` base branch before submitting. You can force the intended destination with GitHub CLI:
+Open the pull request from your fork to **`mizulun/RCAEeval`**, with base branch **`merit`**. GitHub may preselect the original parent repository for a fork; explicitly select `mizulun/RCAEeval` as the base repository, then verify both the repository and `merit` base branch before submitting. You can force the intended destination with GitHub CLI:
 
 ```bash
-gh pr create --repo mizulun/RCAEval --base merit \
+gh pr create --repo mizulun/RCAEeval --base merit \
   --head <your-github-name>:feat/<issue-number>-short-description
 ```
 
