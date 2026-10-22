@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible defect in RCAEval, MERIT, or its evaluation tools.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the [contributor guide](https://github.com/mizulun/RCAEeval/blob/merit/CONTRIBUTING.md#issue-and-pull-request-format).
+        Include a small reproducer and remove credentials and private data.
+  - type: textarea
+    id: bug
+    attributes:
+      label: Describe the bug
+      description: What happened, and which behavior is incorrect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact command and a minimal input or fixture. If you cannot share a reproducer, explain the limitation.
+      placeholder: |
+        1. Prepare the input or fixture.
+        2. Run the command.
+        3. Observe the error or incorrect result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the expected result and why it is expected.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        Branch and commit:
+        Python version:
+        Environment / lock file:
+        Operating system:
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include relevant errors, related issues, or a small manifest or summary. Do not upload datasets, raw traces, secrets, or large run directories.
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Willingness to contribute
+      description: Reporting a bug does not require contributing a fix.
+      options:
+        - I can contribute a fix independently
+        - I would like guidance to contribute a fix
+        - I cannot contribute a fix at this time

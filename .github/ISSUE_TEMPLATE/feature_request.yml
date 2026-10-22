@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a feature, usability improvement, or documentation improvement.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the [contributor guide](https://github.com/mizulun/RCAEeval/blob/merit/CONTRIBUTING.md#issue-and-pull-request-format).
+        Use the method or experiment proposal form for research methods, protocol changes, new metrics, or substantial experiments.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this feature solve?
+      description: Explain the use case, the current limitation, and the intended improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the potential solution
+      description: Describe the desired behavior. It is fine to state that the implementation is still undecided.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include alternatives, examples, related issues, and compatibility considerations.
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Willingness to contribute
+      description: A feature request is welcome even if you cannot implement it.
+      options:
+        - I can implement this independently
+        - I would like guidance to implement this
+        - I cannot implement this at this time
