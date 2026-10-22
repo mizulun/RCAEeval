@@ -5,6 +5,11 @@ from dataclasses import dataclass
 import numpy as np
 
 
+# Denominator policy for metric columns whose normal-period IQR is zero
+# (Issue #2). "unit" is the historical default.
+METRIC_ZERO_IQR_POLICIES = ("unit", "std", "exclude")
+
+
 @dataclass(frozen=True)
 class _GabanzhafConfig:
     """MERIT configuration; the historical class name is retained for callers."""
@@ -80,6 +85,25 @@ class _GabanzhafConfig:
     # persistence term misses. Default-off; on/off ablation decides adoption.
     scorer: str = "robust_z"
     cusum_slack: float = 0.5
+    # Robust-z denominator for columns with zero normal-period IQR. "unit"
+    # (default) keeps the historical denominator 1; "std" uses the positive
+    # normal-period population std, else 1; "exclude" sets those columns' rz
+    # to zero after the near-constant cap (zero-evidence imputation, not
+    # column removal). Non-unit policies only apply to scorer="robust_z".
+    metric_zero_iqr_policy: str = "unit"
+
+    def __post_init__(self):
+        policy = self.metric_zero_iqr_policy
+        if not isinstance(policy, str) or policy not in METRIC_ZERO_IQR_POLICIES:
+            raise ValueError(
+                f"Unsupported metric_zero_iqr_policy: {policy!r}; "
+                f"expected one of {METRIC_ZERO_IQR_POLICIES}"
+            )
+        if policy != "unit" and self.scorer != "robust_z":
+            raise ValueError(
+                f"metric_zero_iqr_policy={policy!r} requires scorer='robust_z', "
+                f"got scorer={self.scorer!r}"
+            )
 
     @staticmethod
     def _positive_int_or_default(value, default):
@@ -207,4 +231,8 @@ class _GabanzhafConfig:
             victim_floor=float(kwargs.get("victim_floor", cls.victim_floor)),
             scorer=str(kwargs.get("scorer", cls.scorer)),
             cusum_slack=float(kwargs.get("cusum_slack", cls.cusum_slack)),
+            # Passed through unconverted so __post_init__ rejects non-strings.
+            metric_zero_iqr_policy=kwargs.get(
+                "metric_zero_iqr_policy", cls.metric_zero_iqr_policy
+            ),
         )

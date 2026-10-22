@@ -51,6 +51,7 @@ def build_result(ranks, cols, config, kwargs, state, stage_timing):
                 "use_victim_demotion": config.use_victim_demotion,
                 "protect_coverage_parents": config.protect_coverage_parents,
                 "use_coverage": bool(kwargs.get("use_coverage", True)),
+                "metric_zero_iqr_policy": config.metric_zero_iqr_policy,
             },
             "candidate_pool": list(state["cand_list"]),
             "game_candidates": list(game_candidates),
