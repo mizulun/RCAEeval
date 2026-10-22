@@ -1,0 +1,48 @@
+name: Method or experiment proposal
+description: Discuss a method, protocol, metric, or substantial experiment before implementation.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the [contributor guide](https://github.com/mizulun/RCAEeval/blob/merit/CONTRIBUTING.md#issue-and-pull-request-format).
+        Agree on the scope with a maintainer before starting a large implementation or experiment.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and motivation
+      description: What limitation or research question would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change and alternatives
+      description: Describe the method, protocol, or experiment, its assumptions and failure conditions, and why it is preferable to reasonable alternatives.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and open questions
+      description: Link checked sources or existing artifacts. Distinguish theory, literature, empirical findings, and unverified hypotheses; identify missing evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: evaluation
+    attributes:
+      label: Evaluation plan
+      description: Specify baselines and comparisons, case sets or inputs, metrics, tests, acceptance criteria, and how evidence gaps would be checked. Do not use ground truth as method input or introduce dataset-specific method logic; preserve baseline behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: Cost, compatibility, and risks
+      description: Estimate data, compute, implementation cost, and stopping conditions. State any effect on frozen defaults, protocols, or existing claims. Mark unknown estimates explicitly.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include related issues or small summaries. Do not upload datasets, raw traces, private data, or large run directories.
