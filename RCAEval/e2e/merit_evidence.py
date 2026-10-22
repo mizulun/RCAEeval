@@ -43,6 +43,12 @@ def _metric_evidence(normal_mat, anomal_mat, cols, config=None):
     config.scorer selects the underlying anomaly scorer: "robust_z" (default)
     keeps this function's original magnitude/persistence/peak behaviour
     exactly as-is; "cusum" routes to _cusum_metric_evidence instead.
+
+    config.metric_zero_iqr_policy selects the robust-z treatment of columns
+    whose normal-period IQR is zero: "unit" (default, historical denominator
+    1), "std" (positive normal-period population std, else 1), or "exclude"
+    (zero rz for those columns after the near-constant cap). Only
+    normal-period statistics decide which columns are affected.
     """
     if config is None:
         config = _GabanzhafConfig.from_kwargs({})
@@ -50,11 +56,18 @@ def _metric_evidence(normal_mat, anomal_mat, cols, config=None):
     anomal_mat = np.asarray(anomal_mat, dtype=float)
     if getattr(config, "scorer", "robust_z") == "cusum":
         return _cusum_metric_evidence(normal_mat, anomal_mat, cols, config)
+    zero_iqr_policy = getattr(config, "metric_zero_iqr_policy", "unit")
     med = np.nanmedian(normal_mat, axis=0)
     q75 = np.nanpercentile(normal_mat, 75, axis=0)
     q25 = np.nanpercentile(normal_mat, 25, axis=0)
     std = np.nanstd(normal_mat, axis=0)
-    iqr = np.where((q75 - q25) > 0, q75 - q25, 1.)
+    if zero_iqr_policy == "std":
+        raw_iqr = q75 - q25
+        iqr = np.where(raw_iqr > 0, raw_iqr, np.where(std > 0, std, 1.))
+    else:
+        # "unit" and "exclude" share the historical denominator; research
+        # scripts replace this exact line via inspect.getsource.
+        iqr = np.where((q75 - q25) > 0, q75 - q25, 1.)
 
     rz = np.abs((anomal_mat - med) / iqr)
     rz = np.nan_to_num(rz, nan=0., posinf=0., neginf=0.)
@@ -64,6 +77,10 @@ def _metric_evidence(normal_mat, anomal_mat, cols, config=None):
     # that have IQR=0 but non-trivial spread so their rz is still meaningful.
     near_zero_baseline = ((q75 - q25) <= 0) & (std <= 1e-6)   # shape (n_cols,)
     rz = np.where(near_zero_baseline, np.clip(rz, 0., 10.), rz)
+    if zero_iqr_policy == "exclude":
+        # Zero-evidence imputation, not column removal: the columns stay in
+        # every summary, normalization and service aggregation below.
+        rz[:, (q75 - q25) <= 0] = 0.
 
     anomal_len = rz.shape[0]
     early_len = max(int(round(anomal_len * config.early_window_ratio)), 1)

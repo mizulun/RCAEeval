@@ -1,6 +1,6 @@
 # MERIT Ablation and Experiment Semantics
 
-狀態：ACTIVE；核對日期：2026-10-07。本文件定義 MERIT 比較與實驗語義；執行狀態以各批 manifest 與相關 issue 為準。
+狀態：ACTIVE；核對日期：2026-10-22。本文件定義 MERIT 比較與實驗語義；執行狀態以各批 manifest 與相關 issue 為準。
 
 ## 程式分工（2026-10-07）
 
@@ -12,7 +12,7 @@
 - `RCAEval/e2e/merit_game.py`：候選、coverage、victim、矩陣、閉式 Banzhaf 與 faithfulness。
 - `RCAEval/e2e/merit_diagnostics.py`：診斷 payload、可相加的 stage timing schema 與結果組裝。
 
-環境變數名稱、kwargs、結果欄位與預設值不變。一般 kwargs 優先；`GABANZHAF_DISABLE_TRACE=1` 仍強制清除所有 trace 輸入，明確 `use_trace=False` 也在任何 trace I/O 前清除輸入；`GABANZHAF_WRITE_DIAGNOSTICS=1` 仍強制開啟診斷。coverage candidate augmentation 與 trace latency filter 使用可 monkeypatch hook，不再對 `_merit_core` 做文字替換。
+2026-10-07 拆檔時保留當時的環境變數名稱、kwargs、結果欄位與預設值；本次零 IQR 政策另新增可選 kwarg 與 diagnostics 設定欄，預設仍為 `unit`。一般 kwargs 優先；`GABANZHAF_DISABLE_TRACE=1` 仍強制清除所有 trace 輸入，明確 `use_trace=False` 也在任何 trace I/O 前清除輸入；`GABANZHAF_WRITE_DIAGNOSTICS=1` 仍強制開啟診斷。coverage candidate augmentation 與 trace latency filter 使用可 monkeypatch hook，不再對 `_merit_core` 做文字替換。
 
 這是拆檔重構加四項 correctness 修正，不是新方法或重跑結果。新研究批次記錄七檔 `method_source_sha256`，正式 manifest 的 `file_sha256` 同樣涵蓋七檔。舊 manifest 不得通過新來源集合的重用檢查；重現歷史結果須用該批快照，不能改寫舊 hash 來取得通過。固定重構前行為基準位於 `tests/fixtures/merit_refactor.json`；測試保留它作歷史基準，只排除明確修正的 first-case、provenance、stage total 與 Python `use_trace=False` 行為。
 
@@ -39,6 +39,7 @@ Primary 為 service AC@1；另報 AC@3/5、AVG@5、有效分母、execution succ
 | rescue_only／edges_only | audit 固定 coverage-derived victim 邊與 parent protection | 區分候選召回与矩陣重排；記 base/rescued/final K 與 recall |
 | lag0／shuffle／trace perturbation | 使用對應 runner 的明確控制 | 相似度不是因果；negative control 未顯示差異時收縮主張 |
 | brute force | 同 game 對照 closed form | 數值等價及 kernel timing；不作新定位方法的 accuracy baseline |
+| zero-IQR policy | 公開 kwarg `metric_zero_iqr_policy='std'`／`'exclude'`（預設 `unit`）；只改 normal 期 IQR 為 0 之欄的 robust-z 分母或零化，cap 與下游公式不變 | 零 IQR 不等於恆定；`exclude` 是零證據補值而非刪欄。policy 記於 diagnostics `configuration`；逐系統×故障類型 AC@1／Avg@5 配對分析與接受判準尚未完成，初步表格不算完成（[Issue #2](https://github.com/mizulun/RCAEeval/issues/2)，定義見 [方法文件](method-theory.md#零-iqr-分母政策)） |
 
 可用組態名以 [正式 runner](../script/run_paper_experiments.py)、[設計 audit](../script/merit_design_audit.py)、[follow-up](../script/merit_followup.py) 為準；跨 runner 名稱不可互換。已完成的主要比較見 [9/30 摘要](../artifacts/formal-rerun-20260930/summary.md)。
 

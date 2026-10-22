@@ -60,6 +60,46 @@ the game, no attribution rule can recover it. Candidate recall is computed only
 by the offline evaluator and is reported separately, so a candidate-selection
 gain is not credited to Banzhaf attribution.
 
+## 零 IQR 分母政策
+
+狀態：可選 kwarg，預設行為不變；討論與追蹤見 [Issue #2](https://github.com/mizulun/RCAEeval/issues/2)。
+
+**問題。** robust z 以 normal 期（`t_a` 之前）的中位數與 IQR 標準化每一列 post 資料：`rz = |x - median| / IQR`。若某 metric 欄在 normal 期 `q75 - q25 = 0`，原實作以 1 作分母。IQR 為 0 不代表欄位恆定：稀疏欄（例如 90% 為 0、10% 為正值）同樣 IQR 為 0，此時分母 1 使 raw 偏差取決於該 metric 的量測單位。
+
+**定義。** `metric_zero_iqr_policy` 只依 normal 期統計量（`q75 - q25 <= 0`）決定作用欄位，不使用資料集、服務、故障類型或任何標籤：
+
+| 政策 | IQR > 0 的欄 | IQR = 0 的欄 |
+|---|---|---|
+| `unit`（預設） | 分母 = IQR | 分母 = 1（歷史行為） |
+| `std` | 分母 = IQR | normal 期母體標準差 `np.nanstd(normal, axis=0)`（ddof=0）為正時用之，否則 1 |
+| `exclude` | 分母 = IQR | 分母同 `unit`；在既有 near-constant cap 之後把該欄 `rz` 設為 0 |
+
+既有順序不變：`nan_to_num` → near-constant cap（IQR = 0 且 std `<= 1e-6` 的欄截在 10）→ 僅 `exclude` 的零化 → magnitude／persistence／peak 與 early/full 摘要。`exclude` 是零證據補值，不是刪除欄位，也不是正式棄權：欄位仍以 0 出現在 metric evidence、min-max 正規化與 service 聚合中。`scorer='cusum'` 只支援 `unit`；非 `unit` 搭配 `cusum`，或未知值（含非字串），都會丟出 `ValueError`，不會靜默退回預設。
+
+**用法。**
+
+```python
+from RCAEval.e2e.merit import merit
+
+out = merit(data, inject_time=inject_time,
+            metric_zero_iqr_policy="std",  # 或 "exclude"；省略即 "unit"
+            return_diagnostics=True)
+out["diagnostics"]["configuration"]["metric_zero_iqr_policy"]  # "std"
+```
+
+**raw 與最終證據的區別。** IQR > 0 的欄，其 raw `rz`（例如每欄 p95）在三種政策下相同；但最終 metric evidence 經跨欄 min-max 正規化，所以零 IQR 欄的值改變時，正 IQR 欄的最終分數、service 證據與排名仍可能改變。
+
+**相容性。** 預設 `unit`；不傳此 kwarg 時分數與排名不變。`unit` 路徑保留原本的分母程式行，供以 `inspect.getsource` 做文字替換的研究腳本使用。near-constant cap 與 `1e-6` 門檻、各組權重、正規化、service 聚合、candidate、coverage game 與 trace 處理皆未修改；diagnostics 只新增 `configuration.metric_zero_iqr_policy`。
+
+**風險與限制。**
+
+- IQR 為 0 可能來自稀疏而非恆定的欄位；三種政策對同一組欄位作不同假設，沒有一種在所有資料上都正確。
+- `std` 對 normal 期離群值敏感，少數尖峰即可決定分母；std 很小但高於 `1e-6` 時，`rz` 可被大幅放大且不受 cap 限制。IQR 與 std 皆為 0 時仍用分母 1，而固定 cap（10）與 `1e-6` 門檻都是絕對值，因此仍依 metric 單位而定。
+- `exclude` 會丟失「normal 期平坦、注入後出現新偏移」以及稀疏欄的訊號；這些欄仍以 0 計入 service 聚合（p95／top-3／max），而非從聚合中移除。
+- 這些政策沒有一般性的準確率或因果保證；不得在看到結果後才選定政策作為 headline（見 [CONTRIBUTING](../CONTRIBUTING.md) 的結果回報規則）。
+
+**未完成事項。** 逐系統 × 故障類型的 AC@1／Avg@5 配對比較、結果解讀與接受判準仍待完成。既有的初步表格不等同已完成的詳細分析；完成前不改預設，也不據以宣稱任一政策較佳。
+
 ## Directed coverage-strength game
 
 Let `\mathcal P = {1, ..., K}` be candidate players and

@@ -78,7 +78,12 @@ def test_graph_source_default_matches_boundary_availability():
 
 def stable(value):
     if isinstance(value, dict):
-        return {k: stable(v) for k, v in value.items() if "timing" not in k}
+        # metric_zero_iqr_policy (Issue #2) is additive config/diagnostics
+        # metadata absent from the frozen fixture. Drop only its default
+        # "unit" value so unchanged scoring still matches; non-unit values
+        # stay visible and would change the fingerprint.
+        return {k: stable(v) for k, v in value.items() if "timing" not in k
+                and not (k == "metric_zero_iqr_policy" and v == "unit")}
     if isinstance(value, (list, tuple, np.ndarray)):
         return [stable(v) for v in value]
     if isinstance(value, (float, np.floating)):
