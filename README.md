@@ -112,8 +112,6 @@ tests/test.py .                                                            [100%
 =============================== 1 passed in 3.16s ================================
 ```
 
-The MERIT experiment scripts in this repository use a separate Python 3.10 environment named `py310` (macOS, Linux and Windows); see [MERIT experiment environment](docs/SETUP.md#merit-experiment-environment-python-310).
-
 ## How-to-use
 
 ### Data format

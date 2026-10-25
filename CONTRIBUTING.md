@@ -130,6 +130,17 @@ PYTHON310="$(uv python find 3.10.18)"
 ./py310/bin/python -m pip install -r requirements_py310.lock
 ```
 
+On Windows (PowerShell), create the environment with `uv` as below; the interpreter is then `py310\Scripts\python.exe`, which the Python runners find automatically. The `run_*.sh` scripts need Git Bash or WSL; they also look for `py310/Scripts/python.exe`, and any of them accepts an explicit interpreter, e.g. `PY=/path/to/python ./run_baselines.sh`.
+
+```powershell
+uv python install 3.10.18
+$PYTHON310 = uv python find 3.10.18
+& $PYTHON310 -m venv py310
+.\py310\Scripts\python -m pip install -r requirements_py310.lock
+```
+
+The lock was frozen on macOS. If a pinned package cannot be installed on your platform, open an issue instead of substituting versions: `script/verify_environment_lock.py` rejects any mismatch, and the paper runners stop before running experiments.
+
 If your system does not provide Python 3.10.18, install that exact patch release with your preferred Python version manager. Do not update the lock file to make a local installation work; propose dependency changes separately and document their effect on reproducibility.
 
 The lock fixes Python package versions; it does not make timing identical across machines. When reporting runtime or memory, record the operating system, CPU, memory, and numerical-library/thread settings required by the protocol.
