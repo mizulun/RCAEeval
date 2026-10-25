@@ -27,4 +27,4 @@ jobs:
         python -m pip install .[default]
 
     - name: Test
-      run: python -m pytest tests/test.py tests/test_parser* tests/test_merit.py
+      run: python -m pytest tests/test.py tests/test_parser* tests/test_merit.py tests/test_merit_zero_iqr_policy.py tests/test_merit_refactor.py

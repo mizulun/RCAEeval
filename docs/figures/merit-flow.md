@@ -5,7 +5,7 @@ MERIT 方法流程概覽。下列 Mermaid 圖與公開方法文件保持相同�
 ```mermaid
 flowchart LR
     IN["① 稽核後的 case 輸入<br/>完整 metric 紀錄<br/>可選 raw spans + 注入時間"]
-    EV["② 證據抽取<br/>完整 pre/post metric 證據<br/>本 case pre-fault call graph<br/>可選 lagged trace signal"]
+    EV["② 證據抽取<br/>完整 pre/post metric 證據<br/>零 IQR 分母政策（預設 unit）<br/>本 case pre-fault call graph<br/>可選 lagged trace signal"]
     CAN["③ 候選建構<br/>異常排序 base set<br/>coverage parent rescue<br/>記錄實際 K/N"]
     GAME["④ directed coverage game<br/>coverage-strength matrix A<br/>victim factor<br/>noisy-OR-inspired utility"]
     OUT["⑤ 可稽核排名<br/>player→target local contribution<br/>edge-removal utility drop<br/>service ranking"]
@@ -40,6 +40,11 @@ flowchart LR
   `tracets_lat.csv`／`tracets_err.csv`，因此沒有動態 trace edge。
 - `trace_only` 先以注入前後 residual 計算各服務的 trace 幅度，再跨服務正規化；
   不再對每條序列各自 min-max 後取最大值。
+- `metric_zero_iqr_policy`（`unit` 預設／`std`／`exclude`）只在第二步 metric evidence
+  改變 normal 期 IQR 為 0 之欄的 robust-z 分母（`std`）或在既有 cap 後補零（`exclude`）；
+  欄位不刪除，下游公式不變，分數仍可能因正規化而改變；選定值記於 diagnostics `configuration`。定義與風險見
+  [方法文件](../method-theory.md#零-iqr-分母政策)，追蹤見
+  [Issue #2](https://github.com/mizulun/RCAEeval/issues/2)。
 - `individual attribution` 保留相同 players、targets、anomaly weights、coverage-
   strength matrix、coverage 與 victim factors，只把 coalition Banzhaf 邊際貢獻
   換成 singleton weighted coverage。

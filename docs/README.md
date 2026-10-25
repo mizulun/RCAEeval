@@ -5,6 +5,7 @@ These public documents support code and method contributions:
 - [Method definition](method-theory.md) and [method flow](figures/merit-flow.md)
 - [Research protocol](research-protocol.md) and [experiment protocol](../experiment/protocol.json)
 - [MERIT ablation design](merit-ablation.md)
+- [零 IQR 分母政策 `metric_zero_iqr_policy`](method-theory.md#零-iqr-分母政策)（[Issue #2](https://github.com/mizulun/RCAEeval/issues/2)；預設 `unit`）
 - [Contributor setup, tests, and reporting](../CONTRIBUTING.md)
 - [Shared Issue and PR format](../CONTRIBUTING.md#issue-and-pull-request-format) and [GitHub activation checklist](../CONTRIBUTING.md#maintainer-activation-checklist)
 
