@@ -20,6 +20,7 @@ from script.run_paper_experiments import (
     _completed_resume_record,
     _formal_output_path_is_safe,
     _infeasible_task_record,
+    _resolve_python,
     _validate_dataset_budget,
     _validate_method_environments,
     _validate_manifest_output_path,
@@ -317,3 +318,15 @@ def test_parent_enforces_hard_case_deadline(tmp_path):
     finally:
         _stop_worker(worker)
     assert not worker.is_alive()
+
+
+def test_resolve_python_falls_back_to_windows_venv_layout(tmp_path):
+    assert _resolve_python(tmp_path, "./py310/bin/python") == tmp_path / "py310/bin/python"
+    windows = tmp_path / "py310" / "Scripts" / "python.exe"
+    windows.parent.mkdir(parents=True)
+    windows.touch()
+    assert _resolve_python(tmp_path, "./py310/bin/python") == windows
+    posix = tmp_path / "py310" / "bin" / "python"
+    posix.parent.mkdir(parents=True)
+    posix.touch()
+    assert _resolve_python(tmp_path, "./py310/bin/python") == posix

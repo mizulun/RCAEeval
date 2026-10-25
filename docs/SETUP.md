@@ -10,6 +10,7 @@ We assume the users are on Ubuntu machine and ready to have Python 3.12 installe
     + [Install RCAEval in DEFAULT mode](#install-rcaeval-in-default-mode)
     + [Install RCAEval in RCD mode](#install-rcaeval-in-rcd-mode)
   * [Basic usage example](#basic-usage-example)
+  * [MERIT experiment environment (Python 3.10)](#merit-experiment-environment-python-310)
 
 
 
@@ -143,3 +144,33 @@ Avg@5-LOSS:  0.51
 Avg speed: 16.2
 ```
 </details>
+
+## MERIT experiment environment (Python 3.10)
+
+The MERIT experiment scripts in this repository (`run_*.sh`, `script/reproduce_paper.py`,
+`script/run_paper_experiments.py`) expect a Python
+3.10.18 virtual environment named `py310` in the repository root. Its packages are pinned
+by `requirements_py310.lock` (the lock also installs this repository in editable mode).
+
+macOS / Linux:
+
+```bash
+python3.10 -m venv py310
+./py310/bin/pip install -r requirements_py310.lock
+./py310/bin/python script/verify_environment_lock.py   # prints "ok": true when the environment matches
+```
+
+Windows (PowerShell):
+
+```powershell
+py -3.10 -m venv py310
+.\py310\Scripts\pip install -r requirements_py310.lock
+.\py310\Scripts\python script\verify_environment_lock.py
+```
+
+On Windows the Python scripts find `py310\Scripts\python.exe` automatically. The `.sh`
+scripts need Git Bash or WSL; they also look for `py310/Scripts/python.exe`, and any of
+them accepts an explicit interpreter, e.g. `PY=/path/to/python ./run_baselines.sh`.
+The lock file was frozen on macOS; if a pinned package has no wheel for your platform,
+install the closest available version and expect `verify_environment_lock.py` to report
+the mismatch.

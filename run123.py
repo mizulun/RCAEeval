@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from statistics import median
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -433,8 +434,8 @@ def run_single(
 
     env = os.environ.copy()
     env.update(extra_env)
-    env.setdefault("MPLCONFIGDIR", "/private/tmp/rcaeval-mpl-cache")
-    env.setdefault("XDG_CACHE_HOME", "/private/tmp/rcaeval-cache")
+    env.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "rcaeval-mpl-cache"))
+    env.setdefault("XDG_CACHE_HOME", os.path.join(tempfile.gettempdir(), "rcaeval-cache"))
     if diagnostics:
         env["GABANZHAF_WRITE_DIAGNOSTICS"] = "1"
 

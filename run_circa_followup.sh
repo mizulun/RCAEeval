@@ -4,7 +4,11 @@
 # wall times stay honest). Resumable like run_baselines.sh.
 set -u
 cd "$(dirname "$0")"
-PY=./py310/bin/python
+# Override with PY=/path/to/python; Git Bash on Windows uses the Scripts/ venv layout.
+if [[ -z ${PY:-} ]]; then
+  PY=./py310/bin/python
+  [[ -x $PY ]] || PY=./py310/Scripts/python.exe
+fi
 OUT=output/baseline-summaries
 mkdir -p "$OUT"
 
