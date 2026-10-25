@@ -14,7 +14,11 @@
 set -u
 cd "$(dirname "$0")"
 
-PY=./py310/bin/python
+# Override with PY=/path/to/python; Git Bash on Windows uses the Scripts/ venv layout.
+if [[ -z ${PY:-} ]]; then
+  PY=./py310/bin/python
+  [[ -x $PY ]] || PY=./py310/Scripts/python.exe
+fi
 DATASETS="${DATASETS:-re2-tt re2-ob re2-ss}"
 # Modes: full | no-trace | no-metric | trace-evidence | metric-evidence | metric-only
 #        | metric+trace | no-coverage | no-victim-demotion
