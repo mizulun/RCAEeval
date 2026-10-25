@@ -311,6 +311,18 @@ def _validate_dataset_budget(protocol: dict, limit: int | None = None) -> None:
         )
 
 
+def _resolve_python(repo_root: Path, python_rel: str) -> Path:
+    """Resolve a POSIX venv path such as ./py310/bin/python, falling back to the
+    Windows venv layout (py310/Scripts/python.exe) when only that one exists."""
+
+    python = repo_root / python_rel.removeprefix("./")
+    if not python.exists() and python.parent.name == "bin":
+        windows = python.parent.parent / "Scripts" / "python.exe"
+        if windows.exists():
+            return windows
+    return python
+
+
 def _validate_method_environments(
     repo_root: Path, protocol_path: Path, protocol: dict
 ) -> list[dict]:
@@ -318,7 +330,7 @@ def _validate_method_environments(
 
     reports = []
     for python_rel in sorted(set(protocol["method_environments"].values())):
-        python = repo_root / python_rel.removeprefix("./")
+        python = _resolve_python(repo_root, python_rel)
         if not python.exists():
             raise FileNotFoundError(f"frozen environment is absent: {python}")
         process = subprocess.run(
@@ -675,7 +687,7 @@ def main(argv=None) -> int:
                 continue
 
             python_rel = protocol["method_environments"][spec.base_method]
-            python = repo_root / python_rel.removeprefix("./")
+            python = _resolve_python(repo_root, python_rel)
             if not python.exists():
                 raise FileNotFoundError(
                     f"frozen environment for {spec.base_method} is absent: {python}"

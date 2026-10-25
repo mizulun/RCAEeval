@@ -18,11 +18,13 @@ from pathlib import Path
 
 try:
     from script.run_paper_experiments import (
+        _resolve_python,
         _validate_method_environments,
         _validate_resume_manifest,
     )
 except ModuleNotFoundError:  # direct script execution
     from run_paper_experiments import (
+        _resolve_python,
         _validate_method_environments,
         _validate_resume_manifest,
     )
@@ -328,7 +330,7 @@ def main(argv=None) -> int:
         }
     _write_json(plan_path, record)
 
-    python = repo_root / "py310/bin/python"
+    python = _resolve_python(repo_root, "./py310/bin/python")
     if not python.exists():
         raise FileNotFoundError(f"frozen Python 3.10 environment is absent: {python}")
 

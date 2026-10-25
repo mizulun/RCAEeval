@@ -8,6 +8,71 @@ Thank you for helping improve MERIT. This guide covers contributions to the meth
 
 For a method proposal, protocol change, new metric, or experiment that could consume substantial compute, open an issue in `mizulun/RCAEeval` first and agree on the scope before implementation. For a reproducible bug, include the failing command, environment, and smallest available input or fixture. Do not upload private data, credentials, or large datasets to an issue.
 
+## Issue and pull-request format
+
+
+All contributors, including maintainers and contributors using coding agents, follow this standard. The structure is adapted from Apache DataFusion Comet's [issue forms](https://github.com/apache/datafusion-comet/tree/main/.github/ISSUE_TEMPLATE) and [PR template](https://github.com/apache/datafusion-comet/blob/main/.github/pull_request_template.md), with additional fields for reproducible RCA research. Use descriptive titles and enough detail for someone unfamiliar with the work to assess it. English is preferred for public contributions; keep the supplied section headings.
+
+### Opening an issue
+
+Choose the form that matches the work:
+
+| Form | When to use it | What to include |
+|---|---|---|
+| [Bug report](.github/ISSUE_TEMPLATE/bug_report.yml) | Incorrect behavior or a reproducible failure | Actual behavior, reproduction steps, expected behavior, branch/commit, Python/lock file, operating system, and relevant errors |
+| [Feature request](.github/ISSUE_TEMPLATE/feature_request.yml) | A feature, usability improvement, or documentation improvement | The problem, desired behavior, possible solution, and alternatives or examples |
+| [Method or experiment proposal](.github/ISSUE_TEMPLATE/method_proposal.yml) | A method, protocol, metric, or substantial experiment | Motivation, choice and alternatives, assumptions, checked evidence and gaps, evaluation criteria, cost, risks, and scope |
+
+Issue titles describe the problem or desired behavior directly, for example `MERIT fails when a trace column is missing`. An issue title does not need the PR title prefix. Complete required fields; if a reproducer or cost estimate is unavailable, explain the limitation. You can report a problem without volunteering to fix it.
+
+GitHub's issue chooser uses these forms and disables the blank-issue option for ordinary contributors. Maintainers with write access can still open blank issues. If you use the CLI or API, include the same information and section headings in the issue body; the web form's required-field validation does not enforce CLI/API submissions.
+
+### Pull-request titles
+
+Use `type: description` or `type(scope): description`. Types are lowercase:
+
+| Type | Use |
+|---|---|
+| `feat` | Add a feature |
+| `fix` | Correct a defect |
+| `docs` | Change documentation |
+| `perf` | Improve performance |
+| `refactor` | Restructure code while preserving behavior |
+| `test` | Add or improve tests |
+| `build` | Change dependencies or packaging |
+| `ci` | Change continuous integration |
+| `chore` | Other maintenance |
+| `revert` | Revert a previous change |
+
+The optional scope names the affected area, such as `merit`, `trace`, or `parser`. It starts with an ASCII letter or digit and may contain ASCII letters, digits, `.`, `_`, `/`, and `-`, without spaces. An optional `!` immediately before the colon marks a breaking change; explain that change in the PR body. Follow the colon with one space and a nonempty description starting with a non-whitespace character. Titles must fit on one line.
+
+Examples:
+
+```text
+fix(merit): handle missing trace columns
+feat(parser): support an additional trace field
+docs: clarify the locked development environment
+ci: check pull request titles
+refactor(api)!: remove a deprecated argument
+```
+
+The [`Check PR Title` workflow](.github/workflows/pr_title_check.yml) checks titles on PRs targeting `merit`, including PRs from forks. It runs when a PR is opened, edited, reopened, or updated with commits, so correcting the title triggers a fresh check. It reads the title through an environment variable and does not check out or execute contribution code. The check validates title syntax; reviewers assess whether the title accurately describes the change.
+
+GitHub may require a maintainer to approve workflow runs for fork contributions, and `pull_request` workflows do not run while a PR has merge conflicts. In those cases, resolve the approval or conflict before expecting the check to run. Workflow definitions are also part of a PR's changes, so reviewers must inspect changes to `.github/workflows/` rather than treating a passing check as approval of its own definition. See [GitHub's PR workflow behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
+
+### Pull-request descriptions
+
+Use the four main sections in [the PR template](.github/PULL_REQUEST_TEMPLATE.md):
+
+1. **Related issue:** Link the issue. Use `Closes #123` only when the PR fully resolves it; use `Related to #123` for partial or follow-up work. Small documentation or maintenance changes may explain why no issue was needed. GitHub's automatic issue closing applies when the PR is merged into the default branch.
+2. **Rationale:** Explain the problem and intended behavior, or refer to the linked issue without duplicating its full description.
+3. **Changes:** Summarize the concrete modifications and compatibility implications.
+4. **Testing:** Record the environment, commands, actual results, and CI checks. Explain when existing tests suffice or when a documentation-only change needs no new tests. Do not report a check as passed unless it was run.
+
+Complete the target/checklist section. For research changes, also complete the expandable research-results section and follow [Reporting results consistently](#reporting-results-consistently). Keep evidence status and limitations explicit.
+
+When creating a PR through the CLI or API, use the same description structure. For example, copy `.github/PULL_REQUEST_TEMPLATE.md` to a local Markdown file, fill it in, and pass that file using `gh pr create --body-file <path-to-filled-template.md>` together with the explicit repository, base, head, and title options below. The Markdown template supplies guidance; it does not itself make PR body fields mandatory.
+
 ## Branch and pull-request workflow
 
 Fork `mizulun/RCAEeval` on GitHub, then clone your fork. Add the project repository as `upstream`, fetch its `merit` branch, and create a topic branch from that branch:
@@ -30,12 +95,23 @@ Open the pull request from your fork to **`mizulun/RCAEeval`**, with base branch
 
 ```bash
 gh pr create --repo mizulun/RCAEeval --base merit \
-  --head <your-github-name>:feat/<issue-number>-short-description
+  --head <your-github-name>:feat/<issue-number>-short-description \
+  --title "feat(merit): describe the resulting behavior" \
+  --body-file <path-to-filled-template.md>
 ```
 
 Link the related issue, explain the behavior change, list the commands and tests you ran, and attach or link the relevant manifest and generated summary for research results. A maintainer reviews and merges accepted changes into `merit`.
 
-For maintainers, enable Issues, set `merit` as the repository default branch, and configure a GitHub ruleset or branch protection for `merit` that requires pull requests, at least one approval, and the two CI jobs as named in the pull request checks (matrix jobs may include the Python version) before merge. Setting the default branch does not change the contents of `main`. GitHub reads issue and pull-request templates from the default branch, so the templates in this guide will only appear after they are merged into that branch. See [GitHub's issue-template documentation](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository) and [pull-request-template documentation](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository).
+### Maintainer activation checklist
+
+Repository files make the standard available to every contributor after they are merged and pushed. Repository settings must also be configured on GitHub:
+
+1. Enable **Issues** and set `merit` as the repository's default branch. Setting the default branch does not change the contents of `main`.
+2. Merge this guide, the Issue Forms and `config.yml`, the PR template, and the title-check workflow into `merit`. GitHub reads Issue and PR templates from the default branch.
+3. Open **Issues → New issue** and confirm the three forms appear. Start a PR to `mizulun/RCAEeval:merit` and confirm the description template appears. Test an invalid title and then edit it to a valid title to confirm the check reruns.
+4. Configure a ruleset or branch protection for `merit` that requires pull requests, at least one approval, and the two existing build-and-test status checks as named in the PR checks (matrix names may include the Python version), plus `check-pr-title`. Select `check-pr-title` after its first workflow run makes it available. A failed check blocks merging only when repository rules require it.
+
+This checklist describes activation, not a claim that remote settings have already been changed. See GitHub's [Issue template configuration](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository), [PR template configuration](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository), and [linking a PR to an issue](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue).
 
 ## Development environment
 
@@ -53,6 +129,17 @@ PYTHON310="$(uv python find 3.10.18)"
 "$PYTHON310" -m venv py310
 ./py310/bin/python -m pip install -r requirements_py310.lock
 ```
+
+On Windows (PowerShell), create the environment with `uv` as below; the interpreter is then `py310\Scripts\python.exe`, which the Python runners find automatically. The `run_*.sh` scripts need Git Bash or WSL; they also look for `py310/Scripts/python.exe`, and any of them accepts an explicit interpreter, e.g. `PY=/path/to/python ./run_baselines.sh`.
+
+```powershell
+uv python install 3.10.18
+$PYTHON310 = uv python find 3.10.18
+& $PYTHON310 -m venv py310
+.\py310\Scripts\python -m pip install -r requirements_py310.lock
+```
+
+The lock was frozen on macOS. If a pinned package cannot be installed on your platform, open an issue instead of substituting versions: `script/verify_environment_lock.py` rejects any mismatch, and the paper runners stop before running experiments.
 
 If your system does not provide Python 3.10.18, install that exact patch release with your preferred Python version manager. Do not update the lock file to make a local installation work; propose dependency changes separately and document their effect on reproducibility.
 

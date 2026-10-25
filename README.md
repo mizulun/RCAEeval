@@ -45,6 +45,8 @@ RCAEval is an open-source benchmark that offers nine datasets with 735 real fail
 
 All issues and pull requests must go to [`mizulun/RCAEeval`](https://github.com/mizulun/RCAEeval), targeting the `merit` branch. Never submit a pull request to `phamquiluan/RCAEval` or `main`. Follow the [contributor guide](CONTRIBUTING.md) for environment setup, tests, review, and result reporting.
 
+Use the shared [Issue and PR format](CONTRIBUTING.md#issue-and-pull-request-format): choose a Bug, Feature, or Method/Experiment issue form, then describe the related issue, rationale, changes, and validation in your PR. PR titles use `type: description` or `type(scope): description`, for example `fix(merit): handle missing trace columns`; the title check also accepts a breaking-change `!`. The same standard applies to maintainers, forks, and CLI/API submissions. Maintainers can follow the [activation checklist](CONTRIBUTING.md#maintainer-activation-checklist) to enable the templates and require the title check on GitHub.
+
 ## Prerequisites
 
 We recommend using machines equipped with at least 8 cores, 16GB RAM, and ~50GB available disk space with Ubuntu 22.04 or Ubuntu 20.04, and **Python3.12**.
