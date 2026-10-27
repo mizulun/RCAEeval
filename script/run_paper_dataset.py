@@ -78,10 +78,26 @@ class MemorySampler:
             pass
 
 
+def prefer_simple_data(paths: list[Path]) -> list[Path]:
+    """Use the curated ``simple_data.csv`` next to a ``data.csv`` when the release ships both.
+
+    RE1 sock-shop-2 and train-ticket ship ``data.csv`` as raw container metrics
+    (438 / 1242 columns) and ``simple_data.csv`` as the standard service-level
+    metrics (``<service>_cpu``, ``_mem``, ``_latency-90`` ...). Only the latter is
+    the benchmark input; scoring the raw file is not comparable to published
+    RCAEval results (issue #12).
+    """
+    return [
+        p.with_name("simple_data.csv") if p.name == "data.csv" and p.with_name("simple_data.csv").is_file() else p
+        for p in paths
+    ]
+
+
 def discover_data_paths(repo_root: Path, dataset: str) -> list[Path]:
     dataset_root = repo_root / DATASET_PATHS[dataset]
     paths = sorted(dataset_root.glob("*/*/data.csv"))
-    return paths or sorted(dataset_root.glob("*/*/simple_metrics.csv"))
+    paths = paths or sorted(dataset_root.glob("*/*/simple_metrics.csv"))
+    return prefer_simple_data(paths)
 
 
 def case_artifact_name(data_path: Path) -> str:

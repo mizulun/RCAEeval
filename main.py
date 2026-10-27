@@ -152,15 +152,18 @@ dataset = DATASET_MAP[args.dataset]
 data_paths = list(glob.glob(os.path.join(dataset, "**/data.csv"), recursive=True))
 if not data_paths: 
     data_paths = list(glob.glob(os.path.join(dataset, "**/simple_metrics.csv"), recursive=True))
-# new_data_paths = []
-# for p in data_paths: 
-#     if os.path.exists(p.replace("data.csv", "simple_data.csv")):
-#         new_data_paths.append(p.replace("data.csv", "simple_data.csv"))
-#     elif os.path.exists(p.replace("data.csv", "simple_metrics.csv")):
-#         new_data_paths.append(p.replace("data.csv", "simple_metrics.csv"))
-#     else:
-#         new_data_paths.append(p)
-# data_paths = new_data_paths
+# RE1 sock-shop-2 / train-ticket ship data.csv as raw container metrics (438 / 1242
+# columns) next to the curated simple_data.csv (standard <service>_cpu/_mem/_latency
+# columns). Only simple_data.csv is the benchmark input; see issue #12.
+new_data_paths = []
+for p in data_paths:
+    if os.path.exists(p.replace("data.csv", "simple_data.csv")):
+        new_data_paths.append(p.replace("data.csv", "simple_data.csv"))
+    elif os.path.exists(p.replace("data.csv", "simple_metrics.csv")):
+        new_data_paths.append(p.replace("data.csv", "simple_metrics.csv"))
+    else:
+        new_data_paths.append(p)
+data_paths = new_data_paths
 if args.test is True:
     data_paths = data_paths[:2]
 
