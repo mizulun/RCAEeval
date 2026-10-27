@@ -8,7 +8,7 @@ from script.merit_training_free import m, metric_adapter, digest
 from script.merit_design_audit import transformed
 from script.run_paper_dataset import prepare_case, discover_data_paths
 from RCAEval.benchmark.input_boundaries import full_record_boundary, ObservationBoundary
-from script.merit_source_provenance import merit_source_hashes, snapshot_merit_sources, require_merit_sources
+from script.merit_source_provenance import merit_source_hashes, repo_git_state, snapshot_merit_sources, require_merit_sources
 
 ARMS=['original','median_std','fallback_only']
 ROOTS={'re1-ob':'online-boutique','re1-ss':'sock-shop-2','re1-tt':'train-ticket'}
@@ -102,7 +102,7 @@ def main():
     import os
     if any(k.startswith(('MERIT_','GABANZHAF_')) for k in os.environ):raise ValueError('Unset environment overrides')
     manifest=dict(status='development',source=digest(m.__file__),runner=digest(__file__),
-        method_source_sha256=merit_source_hashes(),
+        method_source_sha256=merit_source_hashes(),git=repo_git_state(),
         arms=ARMS,extra_scale_arm='positive_only',pollution_fractions=[.05,.1,.2],delay_seconds=[60,120,180],
         horizon_seconds=[60,180,300],re1_paths=ROOTS,limit=args.limit,
         pollution='append floor(fraction*n_normal) initial post samples to metric baseline only; observation unchanged; diagnostic overlap intentional',
