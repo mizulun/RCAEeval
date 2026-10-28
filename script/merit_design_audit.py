@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 from script.run_paper_dataset import discover_data_paths, prepare_case
 from RCAEval.benchmark.input_boundaries import full_record_boundary
-from script.merit_source_provenance import merit_source_hashes, repo_git_state, snapshot_merit_sources
+from script.merit_source_provenance import merit_source_hashes, snapshot_merit_sources
 m = importlib.import_module('RCAEval.e2e.merit')
 VARIANTS = ['full','no_metric','standard_z','magnitude_only','no_early','no_dominance',
  'aggregate_mean','aggregate_max','no_trace','no_trace_evidence','no_dynamic_edges',
@@ -102,7 +102,6 @@ def main():
     manifest={'status':'interim','source_sha256':hashlib.sha256(Path(m.__file__).read_bytes()).hexdigest(),
       'method_source_sha256': merit_source_hashes(),
       'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-      'git':repo_git_state(),
       'python':platform.python_version(),'numpy':np.__version__,'variants':VARIANTS,
       'protocol':'full_record_retrospective; prepare_case from paper harness; current defaults; victim on',
       'bootstrap_cluster':'dataset x root_service x fault_type; exploratory intervals',

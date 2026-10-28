@@ -68,21 +68,15 @@ def tree_checksum(root: Path, mode: str = "full") -> dict:
     }
 
 
-def _git_bytes(root: Path, *args: str) -> bytes:
-    """Raw git stdout. No text mode: the locale codec must never touch diff or path bytes."""
+def _git(root: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", *args],
         cwd=root,
         check=True,
+        text=True,
         capture_output=True,
     )
-    return proc.stdout
-
-
-def _git(root: Path, *args: str) -> str:
-    # Git emits paths and refs as UTF-8 on every supported platform; decode explicitly
-    # and keep going on stray bytes so provenance is still recorded.
-    return _git_bytes(root, *args).decode("utf-8", errors="replace").strip()
+    return proc.stdout.strip()
 
 
 def git_state(root: Path) -> dict:
@@ -94,12 +88,11 @@ def git_state(root: Path) -> dict:
             "branch": _git(root, "rev-parse", "--abbrev-ref", "HEAD"),
             "dirty": bool(status),
             "status_short": status.splitlines(),
-            # Hash the diff bytes as git produced them (no locale decode / newline translation).
             "diff_sha256": hashlib.sha256(
-                _git_bytes(root, "diff", "--binary", "HEAD")
+                _git(root, "diff", "--binary", "HEAD").encode("utf-8")
             ).hexdigest(),
         }
-    except (FileNotFoundError, subprocess.CalledProcessError, OSError):
+    except (FileNotFoundError, subprocess.CalledProcessError):
         return {
             "available": False,
             "sha": None,
