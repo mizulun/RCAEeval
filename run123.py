@@ -419,6 +419,7 @@ def run_single(
     tdelta=0,
     smoke_test=False,
     diagnostics=False,
+    prefer_simple_data=False,
 ):
     base_method, extra_env, metadata = resolve_method_variant(method)
     rdir = result_dir_for(method, dataset)
@@ -431,6 +432,8 @@ def run_single(
            "--result-dir", rdir]
     if smoke_test:
         cmd.append("--test")
+    if prefer_simple_data:
+        cmd.append("--prefer-simple-data")
 
     env = os.environ.copy()
     env.update(extra_env)
@@ -517,6 +520,7 @@ def run_repeated(
     tdelta=0,
     smoke_test=False,
     diagnostics=False,
+    prefer_simple_data=False,
 ):
     runs = [
         run_single(
@@ -526,6 +530,7 @@ def run_repeated(
             tdelta=tdelta,
             smoke_test=smoke_test,
             diagnostics=diagnostics,
+            prefer_simple_data=prefer_simple_data,
         )
         for _ in range(max(1, int(repetitions)))
     ]
@@ -691,6 +696,8 @@ def main():
                         help="每個 method × dataset 重跑次數，時間以中位數彙整")
     parser.add_argument("--diagnostics", action="store_true",
                         help="將每個 case 的演算法 diagnostics 寫入巢狀 sidecar 目錄")
+    parser.add_argument("--prefer-simple-data", action="store_true",
+                        help="轉交給 main.py：案例同時有 data.csv 與 simple_data.csv 時改讀 simple_data.csv（RE1 sock-shop-2 / train-ticket，issue #12）。預設關閉，不影響既有口徑")
     parser.add_argument("--show", action="store_true",
                         help="不執行測試，只載入已有結果並印出（需先跑過測試）")
     args = parser.parse_args()
@@ -736,6 +743,7 @@ def main():
             tdelta=args.tdelta,
             smoke_test=args.test,
             diagnostics=args.diagnostics,
+            prefer_simple_data=args.prefer_simple_data,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:

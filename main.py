@@ -100,6 +100,8 @@ def parse_args():
     parser.add_argument("--tdelta", type=int, default=0, help="Specify $t_delta$ to simulate delay in anomaly detection")
     parser.add_argument("--test", action="store_true", help="Perform smoke test on certain methods without fully run on all data")
     parser.add_argument("--result-dir", type=str, default=None, help="Override result output directory")
+    parser.add_argument("--prefer-simple-data", action="store_true",
+                        help="Read simple_data.csv instead of data.csv when a case ships both (RE1 sock-shop-2 / train-ticket; issue #12). Off by default.")
     args = parser.parse_args()
 
     if args.method not in globals():
@@ -161,6 +163,17 @@ if not data_paths:
 #     else:
 #         new_data_paths.append(p)
 # data_paths = new_data_paths
+if args.prefer_simple_data:
+    # Opt-in only (issue #12): RE1 sock-shop-2 / train-ticket ship data.csv as raw
+    # container metrics (438 / 1242 columns) next to the curated simple_data.csv
+    # (standard <service>_cpu/_mem/_latency columns). The default input stays data.csv
+    # so existing main.py / run123.py commands keep their historical behaviour.
+    data_paths = [
+        p.replace("data.csv", "simple_data.csv")
+        if p.endswith("data.csv") and os.path.exists(p.replace("data.csv", "simple_data.csv"))
+        else p
+        for p in data_paths
+    ]
 if args.test is True:
     data_paths = data_paths[:2]
 
