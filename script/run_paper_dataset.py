@@ -83,9 +83,9 @@ def prefer_simple_data(paths: list[Path]) -> list[Path]:
 
     RE1 sock-shop-2 and train-ticket ship ``data.csv`` as raw container metrics
     (438 / 1242 columns) and ``simple_data.csv`` as the standard service-level
-    metrics (``<service>_cpu``, ``_mem``, ``_latency-90`` ...). Only the latter is
-    the benchmark input; scoring the raw file is not comparable to published
-    RCAEval results (issue #12).
+    metrics (``<service>_cpu``, ``_mem``, ``_latency-90`` ...). Scoring the raw file
+    is not comparable to published RCAEval results (issue #12). Opt-in only: the
+    shared harness default stays ``data.csv``.
     """
     return [
         p.with_name("simple_data.csv") if p.name == "data.csv" and p.with_name("simple_data.csv").is_file() else p
@@ -93,11 +93,13 @@ def prefer_simple_data(paths: list[Path]) -> list[Path]:
     ]
 
 
-def discover_data_paths(repo_root: Path, dataset: str) -> list[Path]:
+def discover_data_paths(
+    repo_root: Path, dataset: str, prefer_simple: bool = False
+) -> list[Path]:
     dataset_root = repo_root / DATASET_PATHS[dataset]
     paths = sorted(dataset_root.glob("*/*/data.csv"))
     paths = paths or sorted(dataset_root.glob("*/*/simple_metrics.csv"))
-    return prefer_simple_data(paths)
+    return prefer_simple_data(paths) if prefer_simple else paths
 
 
 def case_artifact_name(data_path: Path) -> str:

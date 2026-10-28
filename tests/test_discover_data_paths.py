@@ -27,13 +27,26 @@ def test_prefer_simple_data_leaves_other_inputs_alone(tmp_path):
     assert prefer_simple_data([re2 / "simple_metrics.csv"]) == [re2 / "simple_metrics.csv"]
 
 
-def test_discover_data_paths_prefers_simple_data(tmp_path, monkeypatch):
+def test_discover_data_paths_default_keeps_data_csv(tmp_path, monkeypatch):
     dataset_root = Path("data") / "fake-ds"
     monkeypatch.setitem(run_paper_dataset.DATASET_PATHS, "fake", dataset_root)
     root = tmp_path / dataset_root
     _case(root, "carts_cpu", "data.csv", "simple_data.csv")
     _case(root, "orders_mem", "data.csv")
     found = discover_data_paths(tmp_path, "fake")
+    assert [p.relative_to(root).as_posix() for p in found] == [
+        "carts_cpu/1/data.csv",
+        "orders_mem/1/data.csv",
+    ]
+
+
+def test_discover_data_paths_opt_in_prefers_simple_data(tmp_path, monkeypatch):
+    dataset_root = Path("data") / "fake-ds"
+    monkeypatch.setitem(run_paper_dataset.DATASET_PATHS, "fake", dataset_root)
+    root = tmp_path / dataset_root
+    _case(root, "carts_cpu", "data.csv", "simple_data.csv")
+    _case(root, "orders_mem", "data.csv")
+    found = discover_data_paths(tmp_path, "fake", prefer_simple=True)
     assert [p.relative_to(root).as_posix() for p in found] == [
         "carts_cpu/1/simple_data.csv",
         "orders_mem/1/data.csv",
