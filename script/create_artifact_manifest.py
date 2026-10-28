@@ -114,10 +114,21 @@ def _machine_memory_bytes() -> int | None:
                     capture_output=True,
                 ).stdout.strip()
             )
+        if sys.platform == "win32":
+            import psutil
+
+            return int(psutil.virtual_memory().total)
         page_size = os.sysconf("SC_PAGE_SIZE")
         pages = os.sysconf("SC_PHYS_PAGES")
         return int(page_size * pages)
-    except (KeyError, OSError, ValueError, subprocess.SubprocessError):
+    except (
+        AttributeError,
+        ImportError,
+        KeyError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ):
         return None
 
 
