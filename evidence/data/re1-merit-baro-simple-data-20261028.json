@@ -1,17 +1,17 @@
 {
  "manifest": {
   "batch": "re1-simple-data-20261028",
-  "generated_at_utc": "2026-10-28T01:09:42+00:00",
+  "generated_at_utc": "2026-10-28T01:12:19+00:00",
   "purpose": "RE1 MERIT/BARO rerun on the curated simple_data.csv input (issue #12); does not replace evidence/data/re1-merit-baro.json",
   "git": {
    "available": true,
-   "sha": "d96897ab35616ffbeb9ecedb93b05feadd006516",
+   "sha": "6c0f5615b5ef2fbd57da522c6bf2a7bbd75ce74d",
    "branch": "fix/12-prefer-simple-data",
    "dirty": false,
    "status_short": [],
    "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
-  "run_commit": "a635d59",
+  "run_commit": "9c4e7b3",
   "command": "python run123.py --prefer-simple-data --methods merit baro --re1 --workers 3 --output output/benchmarks/re1-simple-data-20261028.csv",
   "harness": "run123.py -> algo_timer.py -> main.py --prefer-simple-data; scorer = main.py service-level Evaluator (RCAEval.benchmark.evaluation), AC@k / Avg@5 per fault",
   "input_selection": "simple_data.csv when present in the case directory, else data.csv (RE1-OB has no simple_data.csv)",
