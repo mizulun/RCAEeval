@@ -21,6 +21,14 @@ def merit_source_hashes(root=None):
             for name in MERIT_SOURCE_FILES}
 
 
+def repo_git_state(root=None):
+    """Git commit, branch and dirty state of the repository a research run was started from."""
+    from script.create_artifact_manifest import git_state
+
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
+    return git_state(root)
+
+
 def require_merit_sources(manifest, root=None):
     """Never qualify an old single-file manifest as a current split-source run."""
     current = merit_source_hashes(root)
